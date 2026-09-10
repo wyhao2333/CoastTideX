@@ -9,6 +9,10 @@ from scipy.signal import find_peaks
 
 import matplotlib
 matplotlib.use('QtAgg')
+# 支持中文字体与负号正常显示
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans', 'sans-serif']
+matplotlib.rcParams['axes.unicode_minus'] = False
+
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib import dates as mdates

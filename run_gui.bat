@@ -2,10 +2,20 @@
 chcp 65001 > nul
 cd /d "%~dp0"
 
+echo ==============================================================================
+echo [CoastTideX] 正在启动全球海岸带潮位模拟与高程基准转换系统...
+echo ==============================================================================
+
 if not exist ".venv\Scripts\python.exe" (
-    echo [*] 首次运行，正在自动为您构建虚拟环境...
+    echo [*] 检测到本地虚拟环境尚未初始化，正在为您构建...
     call setup_env.bat
 )
 
-echo [*] 正在启动 CoastTideX 桌面客户端...
-start "" ".venv\Scripts\pythonw.exe" app.py
+echo [*] 启动主窗口程序中，请稍候...
+".venv\Scripts\python.exe" app.py
+
+if errorlevel 1 (
+    echo.
+    echo [!] 程序异常退出，请查看上方详细报错信息。
+    pause
+)

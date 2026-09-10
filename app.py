@@ -12,6 +12,10 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+# 关键机制：在 Windows 下必须在加载 PyQt6 前预先加载 pyfes C++ 动态链接库，避免 Qt6 运行时内存冲突
+import pyfes
+import rasterio
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from gui.main_window import MainWindow
