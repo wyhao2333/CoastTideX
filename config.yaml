@@ -1,26 +1,29 @@
 # CoastTideX 配置文件
-# 全球海岸带潮位模拟与高程基准转换系统
+# 全球海岸带潮位模拟与高程基准转换系统 v1.1
 
-# 数据路径配置
+# 数据路径配置 (支持绝对路径或相对项目根目录路径)
 paths:
-  # FES2022b 原生非结构有限元网格 NetCDF 文件路径 (推荐，近岸精度最高)
-  fes_ns_grid: "i:/Test_tide_model/fes2022b/ocean_tide_non_structured/FES2022b_OceanTide_NSgrid.nc"
+  # FES2022b 原生非结构有限元网格 NetCDF 文件路径 (近岸精度最高)
+  fes_ns_grid: "fes2022b/ocean_tide_non_structured/FES2022b_OceanTide_NSgrid.nc"
   
   # FES2022b 规则外推网格目录 (备用)
-  fes_extrapolated_dir: "i:/Test_tide_model/fes2022b/ocean_tide_extrapolated"
+  fes_extrapolated_dir: "fes2022b/ocean_tide_extrapolated"
   
-  # CNES-CLS22 MDT 数据路径 (用于 MSL -> EGM2008 基准转换)
-  mdt_nc: "F:/SWOT_interpolation/1-Data/MDT_Data/mdt_hybrid_cnes_cls22_cmems2020_global.nc"
+  # CNES-CLS22 MDT 数据路径 (参考水准面为 GOCO06s)
+  mdt_nc: "mdt_cls22/mdt_hybrid_cnes_cls22_cmems2020_global.nc"
   
-  # EGM2008 2.5分高分辨率全球大地水准面 GeoTIFF 文件路径 (项目内自带)
+  # EGM2008 2.5分高分辨率全球大地水准面起伏 GeoTIFF (项目内自带)
   egm2008_tif: "data/geoid/us_nga_egm08_25.tif"
+
+  # GOCO06s 与 EGM2008 大地水准面差值栅格 (项目内自带，Delta N = N_GOCO06s - N_EGM2008)
+  delta_n_tif: "data/geoid/delta_n_goco06s_minus_egm2008.tif"
 
 # 潮位计算配置
 tide:
   # 默认使用的分潮集合：'all' 表示全套34个分潮，'major8' 表示8大主分潮
   default_constituents: "all"
   
-  # 局部加载空间缓冲框范围 (度)，避免全网格加载，大幅提升计算速度
+  # 局部加载空间缓冲框范围 (度)
   spatial_buffer_deg: 1.0
   
   # 默认预测时间步长 (例如: '10min', '15min', '30min', '1h')
@@ -29,6 +32,7 @@ tide:
 # 界面与展示默认配置
 gui:
   theme: "dark"
+  default_timezone: "UTC"
   default_lon: 122.0
   default_lat: 31.0
   default_location_name: "长江口 (Changjiang Estuary)"

@@ -30,10 +30,11 @@ predicted_tide.csv
 predicted_tide.xlsx
 outputs/
 
-# 忽略常见大文件格式，但强制保留项目内置的 EGM2008 GeoTIFF
+# 忽略常见大文件格式，但保留项目内置的 EGM2008 与 Delta N 差异栅格
 *.tif
 *.tiff
-!data/geoid/us_nga_egm08_25.tif
+!data/geoid/*.tif
+!data/geoid/*.tiff
 
 # IDE 与操作系统临时文件
 .vscode/

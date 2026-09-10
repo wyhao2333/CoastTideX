@@ -23,44 +23,69 @@ The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global oce
 
 ---
 
-## ✨ Key Features
+### ✨ Key Features
 
 * 🌊 **FES2022b Native Non-Structured Mesh**: Directly loads the 3.77 GB native triangular mesh, providing ultimate fidelity in coastal zones with 34 diurnal, semi-diurnal, shallow-water non-linear, and long-period constituents.
-* ⚡ **Adaptive Spatial Bounding-Box Caching**: Automatically bounds the region of interest around input coordinates, indexing only local topology in memory for sub-second query speeds and minimal RAM overhead.
-* 📐 **Rigorous Dual Vertical Datum Pipeline**:
-  * **MSL Datum**: Instantaneous tidal oscillation relative to local Mean Sea Level.
-  * **EGM2008 Datum**: Fused with the CNES-CLS22 MDT model to output geodetic orthometric heights, immediately compatible with terrestrial LiDAR, drone surveys, and Copernicus DEMs for coastal inundation analysis.
+* ⚡ **Adaptive Spatial Chunking & Local BBox Caching**:
+  * **Single Station Mode**: Automatically bounds the region of interest around input coordinates, indexing only local topology in memory for sub-second query speeds and minimal RAM footprint (~1.2 GB);
+  * **Global Discrete Batch Mode**: Employs $5^\circ \times 5^\circ$ adaptive spatial mesh chunking, preventing memory blowup when processing scattered worldwide points.
+* 📐 **Rigorous Four-Tier Vertical Datum Pipeline**:
+  * **MSL Datum**: Instantaneous tidal oscillation relative to local Mean Sea Level;
+  * **GOCO06s Datum**: Relative to the raw CNES-CLS22 MDT reference geoid ($H_{\text{GOCO06S}} = \text{Tide} + \text{MDT}$);
+  * **EGM2008 Orthometric Datum**: Rigorously calibrated with the geoid difference correction term $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$ ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N$);
+  * **WGS84 Ellipsoidal Datum**: 3D geometric ellipsoidal height ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$), immediately compatible with GNSS/RTK observations.
+* 🎯 **True Bilinear Spatial Interpolation & Strict NaN Propagation**:
+  * Applies true bilinear interpolation (`map_coordinates(order=1)`) to EGM2008 and $\Delta N$ GeoTIFFs;
+  * Inland land points or queries outside valid ocean domain strictly propagate `NaN`—never faking `0.0`.
 * 🖥️ **Modern Desktop GUI (PyQt6)**:
   * One-click presets for major world estuaries and ports (Yangtze, Pearl River, Hangzhou Bay, Bohai, Rotterdam, New York, San Francisco, Sydney, etc.);
-  * Interactive Matplotlib canvas with pan/zoom and **automatic peak (high tide) and trough (low tide) detection & annotations**;
-  * Asynchronous multithreaded calculation (`QThread`) keeping the interface responsive at all times.
-* 📑 **Batch File Processing & Export**: Effortlessly processes tabular CSV files containing thousands of discrete coordinate and timestamp records, with one-click export to standard CSV or Excel format.
+  * Interactive Matplotlib canvas with pan/zoom and **automatic peak & trough detection calibrated to semi-diurnal physical windows (~10-12h)**;
+  * Multi-datum dynamic curve overlay, real-time statistical cards, and dual timezone support (UTC / Local Time);
+  * **Integrated User Manual Dialog**: Access complete documentation directly via `Help -> 📖 User Manual & Documentation`.
+* 📑 **Batch File Processing & Vectorized Export**: High-throughput vectorized resolution for large tabular CSV files with export to CSV or Excel.
 * 📦 **Standalone Executable (.exe) Readiness**: Launch via `run_gui.bat` or compile into a standalone Windows `.exe` application via `build_exe.bat`.
+
+---
+
+## 💻 System & Hardware Requirements
+
+CoastTideX is engineered with adaptive spatial indexing to maintain high performance across diverse hardware configurations:
+
+| Usage Scenario | Minimum RAM | Recommended RAM | Compute & Storage | Details |
+| :--- | :---: | :---: | :--- | :--- |
+| **Single Location Time-Series**<br>*(Single Point Mode)* | **4 GB** | **8 GB** | Dual-core CPU or better<br>Free Disk Space ≥ 10 GB | Local BBox caching loads only topology around the target location; resident memory is only ~1.2 GB. |
+| **Local Regional Batch**<br>*(≤ 8° Geographic Span)* | **4 GB** | **8 GB** | Quad-core CPU or better<br>Free Disk Space ≥ 10 GB | Small regional point clusters are solved in a single bounding box with minimal overhead. |
+| **Global Discrete Batch**<br>*(Worldwide Scattered Points)* | **8 GB** | **16 GB** | Quad- to Octa-core CPU<br>High-speed NVMe SSD | $5^\circ \times 5^\circ$ adaptive spatial chunking processes points in clusters, bounding peak memory. |
+| **Full Unconstrained Global Grid**<br>*(All-Mesh Global Loading)* | **16 GB** | **32 GB** | Octa-core CPU or better<br>High-speed NVMe SSD | Loading all 5.69 million nodes and 34 constituents simultaneously requires ~6–8 GB of contiguous RAM. |
+
+* **Supported Operating Systems**: Windows 10/11 64-bit, Ubuntu 20.04+, macOS (x86_64 / Apple Silicon via Rosetta 2).
+* **Python Runtime**: Python 3.11.
 
 ---
 
 ## 🏛️ System Architecture
 
 ```text
-                               ┌────────────────────────┐
-                               │   CoastTideX (GUI/CLI) │
-                               └───────────┬────────────┘
-                                           │
+                                ┌────────────────────────┐
+                                │   CoastTideX (GUI/CLI) │
+                                └───────────┬────────────┘
+                                            │
              ┌─────────────────────────────┴─────────────────────────────┐
              ▼                                                           ▼
   ┌───────────────────────┐                                   ┌───────────────────────┐
   │   Tide Engine Core    │                                   │   Datum Engine Core   │
   └──────────┬────────────┘                                   └──────────┬────────────┘
              │                                                           │
-   ┌─────────┴─────────┐                                       ┌─────────┴─────────┐
-   ▼                   ▼                                       ▼                   ▼
-FES2022b Native Mesh   Spatial BBox Index                 CNES-CLS22 MDT     EGM2008 GeoTIFF
-(5.69M nodes / 34)     (Sub-sec / Low RAM)                (Dynamic Setup)    (Geoid Undulation N)
+   ┌─────────┴─────────┐                                ┌────────┬───────┴────────┬────────┐
+   ▼                   ▼                                ▼        ▼                ▼        ▼
+FES2022b Native Mesh   Spatial BBox Index            CNES-CLS22 MDT    ΔN GeoTIFF     EGM2008 GeoTIFF
+(5.69M nodes / 34)     (Sub-sec / Spatial Chunking)   (GOCO06s Geoid)  (GOCO - EGM)    (Undulation N)
              │                                                           │
              └─────────────────────────────┬─────────────────────────────┘
                                            ▼
                        ┌───────────────────────────────────────┐
-                       │  Multi-Datum Tide Heights (MSL / EGM) │
+                       │  Unified Four-Tier Vertical Datums    │
+                       │  (MSL / GOCO06s / EGM2008 / WGS84)    │
                        │    Interactive Charts / CSV / XLSX    │
                        └───────────────────────────────────────┘
 ```
@@ -74,25 +99,33 @@ The instantaneous sea surface height $\eta(t)$ at any coordinate $(\lambda, \phi
 
 $$\eta(t) = \sum_{i=1}^{34} f_i(t) \cdot H_i(\lambda, \phi) \cdot \cos\left( \omega_i t + V_{0,i}(t_0) + u_i(t) - g_i(\lambda, \phi) \right) + h_{\text{LP}}(t)$$
 
-* $H_i, g_i$: Modeled amplitude and Greenwich phase lag from the FES2022b mesh;
+* $H_i, g_i$: Modeled amplitude and Greenwich phase lag from the FES2022b finite-element mesh;
 * $f_i(t), u_i(t)$: Nodal modulation factors covering the 18.61-year lunar nodal cycle;
 * $h_{\text{LP}}(t)$: Equilibrium long-period tide.
 
-### 2. Vertical Datum Transformation to EGM2008
-Since FES tide anomalies are referenced to the local Mean Sea Level (MSL), converting to the EGM2008 geoid requires adding the Mean Dynamic Topography (MDT):
+### 2. Rigorous Four-Tier Vertical Datum Pipeline
+In simplified workflows, practitioners often equate $\text{Tide} + \text{MDT}$ directly to EGM2008 height. **This is scientifically inaccurate**.
+The CNES-CLS22 MDT model is computed with respect to the **GOCO06s satellite gravity geoid**, which differs globally from the **EGM2008 geoid** by $-6.63\text{m} \sim +6.79\text{m}$ (standard deviation $0.34\text{m}$).
 
-$$H_{\text{EGM2008}}(\lambda, \phi, t) = \text{MDT}(\lambda, \phi) + \eta_{\text{tide}}(\lambda, \phi, t)$$
+CoastTideX resolves this discrepancy through a mathematically rigorous geodetic transformation:
 
-* Conversion to WGS84 geometric ellipsoidal height $h_{\text{WGS84}}$:
-  $$h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}(\lambda, \phi)$$
-  (where $N_{\text{EGM2008}}$ is sampled directly from the bundled `us_nga_egm08_25.tif` raster).
+1. **Instantaneous Tide relative to Mean Sea Level (MSL)**:
+   $$\text{Tide}_{\text{MSL}}(\lambda, \phi, t) = \eta(t)$$
+2. **Sea Surface Height relative to GOCO06s Geoid**:
+   $$H_{\text{GOCO06S}}(\lambda, \phi, t) = \text{Tide}_{\text{MSL}}(\lambda, \phi, t) + \text{MDT}_{\text{CLS22}}(\lambda, \phi)$$
+3. **Orthometric Height relative to EGM2008 Geoid** (incorporating the geoid difference correction $\Delta N$):
+   $$H_{\text{EGM2008}}(\lambda, \phi, t) = H_{\text{GOCO06S}}(\lambda, \phi, t) + \Delta N(\lambda, \phi)$$
+   where $\Delta N(\lambda, \phi) = N_{\text{GOCO06S}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$.
+4. **WGS84 3D Geometric Ellipsoidal Height**:
+   $$h_{\text{WGS84}}(\lambda, \phi, t) = H_{\text{EGM2008}}(\lambda, \phi, t) + N_{\text{EGM2008}}(\lambda, \phi)$$
+   where $N_{\text{EGM2008}}$ is extracted via true bilinear interpolation from the bundled global 2.5' EGM2008 raster.
 
 ---
 
 ## 🚀 Quick Start
 
 ### 1. Environment Setup
-Run `setup_env.bat` in the project root to automatically create the dedicated Python 3.11 `.venv` and install all prerequisites.
+Run `setup_env.bat` in the project root to automatically configure the dedicated Python 3.11 `.venv`.
 
 Manual setup:
 ```bash
@@ -108,14 +141,14 @@ Double-click `run_gui.bat` or run:
 ```
 
 ### 3. Command-Line Interface (CLI)
-Automate predictions using `cli.py`:
+Automate predictions using `cli.py`, with full support for timezones and all 4 datums:
 * **Single Location Time-Series**:
   ```bash
-  python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --output output.csv
+  python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --tz UTC --output output.csv
   ```
 * **Batch Tabular Processing**:
   ```bash
-  python cli.py batch --input points.csv --lon-col longitude --lat-col latitude --time-col datetime --output batch_out.csv
+  python cli.py batch --input points.csv --lon-col longitude --lat-col latitude --time-col datetime --tz UTC --output batch_out.csv
   ```
 
 ### 4. Python API Usage
@@ -126,19 +159,64 @@ from core.datum_engine import DatumTransformer
 predictor = FESTidePredictor()
 transformer = DatumTransformer()
 
-# 24-hour tidal simulation
+# 1. 24-hour tidal simulation (UTC timezone)
 df = predictor.predict_series(
     lon=122.0, lat=31.0,
     start_time="2026-09-10 00:00:00",
     end_time="2026-09-11 00:00:00",
     freq="1h",
-    constituents="all"
+    constituents="all",
+    source_tz="UTC"
 )
 
-# Convert to EGM2008
-egm_tide, mdt = transformer.convert_msl_to_egm2008(df['tide_total_m'].values, 122.0, 31.0)
-df['h_egm2008_m'] = egm_tide
-print(df[['datetime', 'tide_total_m', 'h_egm2008_m']].head())
+# 2. Rigorous vertical datum conversion
+datum_res = transformer.convert_tide_datums(
+    tide_msl_m=df['tide_total_m'].values,
+    lons=122.0,
+    lats=31.0
+)
+
+df['tide_msl_m'] = datum_res['tide_msl_m']
+df['h_goco06s_m'] = datum_res['h_goco06s_m']
+df['h_egm2008_m'] = datum_res['h_egm2008_m']
+df['h_wgs84_m'] = datum_res['h_wgs84_m']
+
+print(df[['datetime_utc', 'tide_msl_m', 'h_egm2008_m', 'h_wgs84_m']].head())
+```
+
+---
+
+## 📁 Directory Structure
+
+```text
+CoastTideX/
+├── .gitignore                      # Excludes large netCDF meshes, .venv, build caches
+├── LICENSE                         # MIT License
+├── README.md                       # Chinese Documentation
+├── README_EN.md                    # English Documentation
+├── requirements.txt                # Python package dependencies
+├── setup_env.bat                   # Portable .venv initializer
+├── run_gui.bat                     # GUI launcher script
+├── build_exe.bat                   # PyInstaller standalone packager
+├── config.yaml                     # Application & data path configuration
+├── app.py                          # Desktop GUI entrypoint
+├── cli.py                          # Headless CLI entrypoint
+├── data/
+│   └── geoid/
+│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (76.8MB)
+│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (22.6MB)
+├── core/                           # Core computation modules
+│   ├── tide_engine.py              # FES2022b tide evaluator & spatial chunking
+│   ├── datum_engine.py             # 4-tier vertical datum transformation & bilinear interpolation
+│   └── utils.py                    # Presets, coordinates, timezones & data exports
+├── gui/                            # PyQt6 desktop application
+│   ├── main_window.py              # Main window implementation (Single & Batch tabs)
+│   ├── chart_widget.py             # Matplotlib multi-datum waveform component
+│   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog
+│   ├── settings_dialog.py          # Data source path configuration dialog
+│   └── styles.py                   # High-contrast dark QSS stylesheet
+└── tests/                          # Automated unit and integration test suite
+    └── test_engines.py             # Numerical closure, NaN propagation & tide tests
 ```
 
 ---

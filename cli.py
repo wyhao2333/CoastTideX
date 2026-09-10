@@ -44,6 +44,7 @@ def main():
     p_single.add_argument("--end", type=str, required=True, help="结束时间 (如 '2026-09-11 00:00:00')")
     p_single.add_argument("--step", type=str, default="1h", help="时间步长 (默认: 1h)")
     p_single.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
+    p_single.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
     p_single.add_argument("--output", "-o", type=str, default="predicted_tide.csv", help="输出文件路径")
 
     # 批量模式参数
@@ -52,6 +53,8 @@ def main():
     p_batch.add_argument("--lon-col", type=str, default="longitude", help="经度列名")
     p_batch.add_argument("--lat-col", type=str, default="latitude", help="纬度列名")
     p_batch.add_argument("--time-col", type=str, default="datetime", help="时间列名")
+    p_batch.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
+    p_batch.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
     p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
 
     args = parser.parse_args()
@@ -65,7 +68,7 @@ def main():
 
     if args.mode == "single":
         print(f"[*] 启动单点潮位预测: ({args.lon}°, {args.lat}°)")
-        print(f"[*] 时段: {args.start} -> {args.end}, 步长: {args.step}")
+        print(f"[*] 时段: {args.start} -> {args.end}, 步长: {args.step}, 时区: {args.tz}")
 
         df = predictor.predict_series(
             lon=args.lon,
@@ -73,48 +76,56 @@ def main():
             start_time=args.start,
             end_time=args.end,
             freq=args.step,
-            constituents=args.constituents
+            constituents=args.constituents,
+            source_tz=args.tz
         )
 
-        egm_tide, mdt_val = transformer.convert_msl_to_egm2008(
+        print("[*] 严密计算四大垂直基准 (MSL, GOCO06s, EGM2008, WGS84)...")
+        datum_res = transformer.convert_tide_datums(
             df['tide_total_m'].values, args.lon, args.lat
         )
-        n_geoid = transformer.get_geoid_undulation(args.lon, args.lat)
 
-        df['mdt_m'] = mdt_val
-        df['h_egm2008_m'] = egm_tide
-        df['geoid_undulation_n_m'] = n_geoid
+        df['tide_msl_m'] = datum_res['tide_msl_m']
+        df['mdt_m'] = datum_res['mdt_m']
+        df['delta_n_m'] = datum_res['delta_n_m']
+        df['n_egm2008_m'] = datum_res['n_egm2008_m']
+        df['h_goco06s_m'] = datum_res['h_goco06s_m']
+        df['h_egm2008_m'] = datum_res['h_egm2008_m']
+        df['h_wgs84_m'] = datum_res['h_wgs84_m']
 
         export_dataframe(df, args.output)
-        print(f"[OK] 预测成功，结果已保存至: {args.output}")
+        print(f"[OK] 预测成功，包含完整四大基准列，结果已保存至: {args.output}")
 
     elif args.mode == "batch":
         print(f"[*] 读取批量输入文件: {args.input}")
         df_records = pd.read_csv(args.input)
-        print(f"[*] 总点数: {len(df_records)}")
+        print(f"[*] 总记录数: {len(df_records)}, 时区: {args.tz}")
 
         df_out = predictor.predict_batch(
             df_records,
             lon_col=args.lon_col,
             lat_col=args.lat_col,
-            time_col=args.time_col
+            time_col=args.time_col,
+            constituents=args.constituents,
+            source_tz=args.tz
         )
 
-        mdt_list = []
-        egm_list = []
-        for _, row in df_out.iterrows():
-            lon_val = float(row[args.lon_col])
-            lat_val = float(row[args.lat_col])
-            tide_m = float(row['tide_total_m'])
-            egm_val, mdt_val = transformer.convert_msl_to_egm2008(tide_m, lon_val, lat_val)
-            mdt_list.append(mdt_val)
-            egm_list.append(egm_val)
+        print("[*] 向量化批量计算四大垂直基准...")
+        lons = df_out[args.lon_col].astype(float).values
+        lats = df_out[args.lat_col].astype(float).values
+        tide_msl = df_out['tide_total_m'].values
 
-        df_out['mdt_m'] = mdt_list
-        df_out['h_egm2008_m'] = egm_list
+        datum_res = transformer.convert_tide_datums(tide_msl, lons, lats)
+        df_out['tide_msl_m'] = datum_res['tide_msl_m']
+        df_out['mdt_m'] = datum_res['mdt_m']
+        df_out['delta_n_m'] = datum_res['delta_n_m']
+        df_out['n_egm2008_m'] = datum_res['n_egm2008_m']
+        df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
+        df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
+        df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
 
         export_dataframe(df_out, args.output)
-        print(f"[OK] 批量计算完成，已导出至: {args.output}")
+        print(f"[OK] 批量解算完成，已导出至: {args.output}")
 
 
 if __name__ == '__main__':

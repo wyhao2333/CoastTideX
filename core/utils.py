@@ -1,30 +1,93 @@
 """
 CoastTideX 通用工具与常量定义
-提供坐标规范化、预设海岸带站点、配置文件加载与数据导出等功能。
+提供坐标规范化、时区精准转换、预设海岸带站点、配置文件加载与数据导出等功能。
 """
 
 import os
 import yaml
+import numpy as np
 import pandas as pd
+from datetime import datetime, timezone
 
 
-def normalize_longitude(lon: float, to_360: bool = True) -> float:
+def get_project_root() -> str:
+    """获取项目根目录绝对路径"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_project_path(path_str: str) -> str:
+    """若为相对路径，自动解析为相对于项目根目录的绝对路径"""
+    if not path_str:
+        return ""
+    if os.path.isabs(path_str):
+        return os.path.normpath(path_str)
+    return os.path.normpath(os.path.join(get_project_root(), path_str))
+
+
+def normalize_longitude(lon: float | np.ndarray, to_360: bool = True) -> float | np.ndarray:
     """
     规范化经度坐标体系。
 
     参数:
-        lon: 输入经度
+        lon: 输入经度（标量或 NumPy 数组）
         to_360: 若为 True，转换为 0~360° (用于 FES 模型);
                 若为 False，转换为 -180~180° (用于常规地图与 MDT)
 
     返回:
-        规范化后的经度浮点数
+        规范化后的经度
     """
-    if to_360:
-        val = lon % 360.0
-        return val if val >= 0 else val + 360.0
+    if isinstance(lon, (list, tuple, np.ndarray)):
+        arr = np.asarray(lon, dtype=float)
+        if to_360:
+            return np.where(arr < 0, (arr % 360.0 + 360.0) % 360.0, arr % 360.0)
+        else:
+            return ((arr + 180.0) % 360.0) - 180.0
     else:
-        return ((lon + 180.0) % 360.0) - 180.0
+        val = float(lon)
+        if to_360:
+            rem = val % 360.0
+            return rem if rem >= 0 else rem + 360.0
+        else:
+            return ((val + 180.0) % 360.0) - 180.0
+
+
+def convert_time_to_utc(
+    time_series: pd.DatetimeIndex | pd.Series | list,
+    source_tz: str = 'UTC'
+) -> tuple[pd.DatetimeIndex, np.ndarray]:
+    """
+    将输入的时间序列严格统一转换为无时区的 UTC 标准时间序列。
+
+    参数:
+        time_series: 输入的时间序列
+        source_tz: 源时区标识，如 'UTC', 'local', 'Asia/Shanghai' 等
+
+    返回:
+        (utc_dt_index, utc_numpy_datetime64_us)
+    """
+    dt_idx = pd.DatetimeIndex(pd.to_datetime(time_series))
+
+    if source_tz == 'UTC' or source_tz is None:
+        if dt_idx.tz is not None:
+            utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
+        else:
+            utc_idx = dt_idx
+    elif source_tz == 'local':
+        # 获取本机系统时区
+        local_tz = datetime.now().astimezone().tzinfo
+        if dt_idx.tz is None:
+            utc_idx = dt_idx.tz_localize(local_tz).tz_convert('UTC').tz_localize(None)
+        else:
+            utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
+    else:
+        # 指定特定时区字符串
+        if dt_idx.tz is None:
+            utc_idx = dt_idx.tz_localize(source_tz).tz_convert('UTC').tz_localize(None)
+        else:
+            utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
+
+    utc_numpy = utc_idx.to_numpy(dtype='datetime64[us]')
+    return utc_idx, utc_numpy
 
 
 # 全球经典海岸带、河口湾区与主要港口预设字典
@@ -47,36 +110,37 @@ COASTAL_PRESETS = {
 
 def load_app_config(config_path: str = None) -> dict:
     """
-    加载应用 YAML 配置文件。若未指定路径，自动搜寻项目根目录下的 config.yaml。
+    加载应用 YAML 配置文件，并自动将相对路径解析为项目根目录绝对路径。
     """
     if config_path is None:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_path = os.path.join(base_dir, 'config.yaml')
+        config_path = os.path.join(get_project_root(), 'config.yaml')
 
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"未找到配置文件: {config_path}")
 
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+
+    # 路径解析
+    if 'paths' in config:
+        for k, v in config['paths'].items():
+            if isinstance(v, str):
+                config['paths'][k] = resolve_project_path(v)
+
     return config
 
 
 def save_app_config(config_dict: dict, config_path: str = None) -> None:
-    """
-    保存应用 YAML 配置文件。
-    """
+    """保存应用 YAML 配置文件"""
     if config_path is None:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        config_path = os.path.join(base_dir, 'config.yaml')
+        config_path = os.path.join(get_project_root(), 'config.yaml')
 
     with open(config_path, 'w', encoding='utf-8') as f:
         yaml.safe_dump(config_dict, f, allow_unicode=True, default_flow_style=False)
 
 
 def export_dataframe(df: pd.DataFrame, output_path: str) -> None:
-    """
-    将预测结果 DataFrame 导出为 CSV 或 Excel 格式。
-    """
+    """将预测结果 DataFrame 导出为 CSV 或 Excel 格式"""
     ext = os.path.splitext(output_path)[1].lower()
     if ext in ['.xlsx', '.xls']:
         df.to_excel(output_path, index=False)
