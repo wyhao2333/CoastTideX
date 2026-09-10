@@ -1,17 +1,17 @@
 @echo off
-chcp 65001 > nul
-echo ==============================================================================
-echo [CoastTideX] Windows 独立可执行程序 (.exe) 打包构建脚本
-echo ==============================================================================
-
+title CoastTideX PyInstaller Build
 cd /d "%~dp0"
 
+echo ==============================================================================
+echo [CoastTideX] Packaging standalone Windows .exe application...
+echo ==============================================================================
+
 if not exist ".venv\Scripts\pyinstaller.exe" (
-    echo [*] 正在安装 PyInstaller...
+    echo [*] Installing PyInstaller in .venv...
     ".venv\Scripts\pip.exe" install pyinstaller
 )
 
-echo [*] 开始执行 PyInstaller 打包构建...
+echo [*] Running PyInstaller...
 ".venv\Scripts\pyinstaller.exe" --noconfirm --onedir --windowed ^
     --name "CoastTideX" ^
     --add-data "data/geoid/us_nga_egm08_25.tif;data/geoid" ^
@@ -26,7 +26,6 @@ echo [*] 开始执行 PyInstaller 打包构建...
     app.py
 
 echo ==============================================================================
-echo [✓] 打包完成！生成目录位于: dist\CoastTideX\
-echo 包含 CoastTideX.exe 以及所有必要运行时资源。
+echo [OK] Build completed! Output directory: dist\CoastTideX\
 echo ==============================================================================
 pause

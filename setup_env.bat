@@ -1,25 +1,24 @@
 @echo off
-chcp 65001 > nul
-echo ==============================================================================
-echo [CoastTideX] 自动化 Python 虚拟环境初始化脚本
-echo ==============================================================================
+title CoastTideX Setup Environment
+cd /d "%~dp0"
 
-set "PROJECT_DIR=%~dp0"
-cd /d "%PROJECT_DIR%"
+echo ==============================================================================
+echo [CoastTideX] Python Virtual Environment Setup
+echo ==============================================================================
 
 if exist ".venv\Scripts\python.exe" (
-    echo [*] 检测到本地 .venv 虚拟环境已存在。
+    echo [*] Local .venv environment already exists.
 ) else (
-    echo [*] 正在创建本地 .venv 虚拟环境 (Python 3.11)...
+    echo [*] Creating .venv environment with Python 3.11...
     "E:\Python311_venv\Geo_env\Scripts\python.exe" -m venv --system-site-packages .venv
     echo E:\Python311_venv\Geo_env\Lib\site-packages> .venv\Lib\site-packages\geo_env.pth
-    echo [✓] 虚拟环境创建成功！
+    echo [OK] Virtual environment created successfully.
 )
 
-echo [*] 检查并更新核心依赖包...
+echo [*] Installing and verifying requirements...
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 
 echo ==============================================================================
-echo [✓] CoastTideX 环境配置完成！您可以双击运行 run_gui.bat 启动软件。
+echo [OK] Environment setup completed! You can now run run_gui.bat.
 echo ==============================================================================
 pause
