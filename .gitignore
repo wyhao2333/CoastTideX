@@ -1,0 +1,43 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# 打包构建输出
+build/
+dist/
+*.spec
+
+# 忽略本地 FES2022 大体积网格文件与压缩包
+fes2022b/
+*.nc
+*.nc.xz
+*.xz
+*.tar.gz
+*.zip
+
+# 忽略临时测试与输出报表
+test_cli_out.csv
+batch_tide_result.csv
+predicted_tide_example.csv
+predicted_tide.csv
+predicted_tide.xlsx
+outputs/
+
+# 忽略常见大文件格式，但强制保留项目内置的 EGM2008 GeoTIFF
+*.tif
+*.tiff
+!data/geoid/us_nga_egm08_25.tif
+
+# IDE 与操作系统临时文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

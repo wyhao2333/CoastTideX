@@ -1,0 +1,121 @@
+"""
+CoastTideX 命令行工具 (Command-Line Interface)
+用于脚本批处理、无人值守自动化以及与 GIS 工作流整合。
+
+使用示例:
+    # 预测单点
+    python cli.py --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --output output.csv
+
+    # 批量计算
+    python cli.py --batch input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
+"""
+
+import os
+import sys
+import argparse
+import pandas as pd
+
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# 将项目根目录加入模块检索路径
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from core.tide_engine import FESTidePredictor
+from core.datum_engine import DatumTransformer
+from core.utils import export_dataframe
+
+
+def main():
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具")
+
+    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点) 或 batch (批量)")
+
+    # 单点模式参数
+    p_single = subparsers.add_parser("single", help="单点时间序列预测")
+    p_single.add_argument("--lon", type=float, required=True, help="目标经度 (-180~180 或 0~360)")
+    p_single.add_argument("--lat", type=float, required=True, help="目标纬度 (-90~90)")
+    p_single.add_argument("--start", type=str, required=True, help="起始时间 (如 '2026-09-10 00:00:00')")
+    p_single.add_argument("--end", type=str, required=True, help="结束时间 (如 '2026-09-11 00:00:00')")
+    p_single.add_argument("--step", type=str, default="1h", help="时间步长 (默认: 1h)")
+    p_single.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
+    p_single.add_argument("--output", "-o", type=str, default="predicted_tide.csv", help="输出文件路径")
+
+    # 批量模式参数
+    p_batch = subparsers.add_parser("batch", help="批量 CSV 文件点位潮位计算")
+    p_batch.add_argument("--input", "-i", type=str, required=True, help="输入 CSV 文件路径")
+    p_batch.add_argument("--lon-col", type=str, default="longitude", help="经度列名")
+    p_batch.add_argument("--lat-col", type=str, default="latitude", help="纬度列名")
+    p_batch.add_argument("--time-col", type=str, default="datetime", help="时间列名")
+    p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
+
+    args = parser.parse_args()
+
+    if not args.mode:
+        parser.print_help()
+        sys.exit(0)
+
+    predictor = FESTidePredictor()
+    transformer = DatumTransformer()
+
+    if args.mode == "single":
+        print(f"[*] 启动单点潮位预测: ({args.lon}°, {args.lat}°)")
+        print(f"[*] 时段: {args.start} -> {args.end}, 步长: {args.step}")
+
+        df = predictor.predict_series(
+            lon=args.lon,
+            lat=args.lat,
+            start_time=args.start,
+            end_time=args.end,
+            freq=args.step,
+            constituents=args.constituents
+        )
+
+        egm_tide, mdt_val = transformer.convert_msl_to_egm2008(
+            df['tide_total_m'].values, args.lon, args.lat
+        )
+        n_geoid = transformer.get_geoid_undulation(args.lon, args.lat)
+
+        df['mdt_m'] = mdt_val
+        df['h_egm2008_m'] = egm_tide
+        df['geoid_undulation_n_m'] = n_geoid
+
+        export_dataframe(df, args.output)
+        print(f"[OK] 预测成功，结果已保存至: {args.output}")
+
+    elif args.mode == "batch":
+        print(f"[*] 读取批量输入文件: {args.input}")
+        df_records = pd.read_csv(args.input)
+        print(f"[*] 总点数: {len(df_records)}")
+
+        df_out = predictor.predict_batch(
+            df_records,
+            lon_col=args.lon_col,
+            lat_col=args.lat_col,
+            time_col=args.time_col
+        )
+
+        mdt_list = []
+        egm_list = []
+        for _, row in df_out.iterrows():
+            lon_val = float(row[args.lon_col])
+            lat_val = float(row[args.lat_col])
+            tide_m = float(row['tide_total_m'])
+            egm_val, mdt_val = transformer.convert_msl_to_egm2008(tide_m, lon_val, lat_val)
+            mdt_list.append(mdt_val)
+            egm_list.append(egm_val)
+
+        df_out['mdt_m'] = mdt_list
+        df_out['h_egm2008_m'] = egm_list
+
+        export_dataframe(df_out, args.output)
+        print(f"[OK] 批量计算完成，已导出至: {args.output}")
+
+
+if __name__ == '__main__':
+    main()
