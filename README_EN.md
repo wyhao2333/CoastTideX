@@ -1,6 +1,7 @@
 # CoastTideX: High-Precision Global Coastal Tide Simulation & Vertical Datum System
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Release-v1.2-blue.svg" alt="Release v1.2">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -33,11 +34,16 @@ The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global oce
   * **MSL Datum**: Instantaneous tidal oscillation relative to local Mean Sea Level;
   * **GOCO06s Datum**: Relative to the raw CNES-CLS22 MDT reference geoid ($H_{\text{GOCO06S}} = \text{Tide} + \text{MDT}$);
   * **EGM2008 Orthometric Datum**: Rigorously calibrated with the geoid difference correction term $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$ ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N$);
-  * **WGS84 Ellipsoidal Datum**: 3D geometric ellipsoidal height ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$), immediately compatible with GNSS/RTK observations.
+  * **WGS84 Ellipsoidal Datum**: 3D geometric ellipsoidal height ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$), immediately compatible with GNSS/RTK observations;
+  * **Mediterranean & Black Sea Geoid Datum Identification (v1.2)**: Automatically distinguishes the regional EIGEN-6C4 ($d/o=2190$) geoid datum employed by Hybrid MDT in the Mediterranean and Black Sea.
 * 🎯 **True Bilinear Spatial Interpolation & Strict NaN Propagation**:
   * Applies true bilinear interpolation (`map_coordinates(order=1)`) to EGM2008 and $\Delta N$ GeoTIFFs;
   * Inland land points or queries outside valid ocean domain strictly propagate `NaN`—never faking `0.0`.
-* 🖥️ **Modern Desktop GUI (PyQt6)**:
+* 🖥️ **Modern Desktop GUI (PyQt6) & Enhancements (v1.2)**:
+  * **Adaptive Scrolling & Arbitrary Window Resizing**: The control panel is enclosed in a `QScrollArea`, completely removing vertical resizing limits for 768p/1080p and high-DPI displays;
+  * **Decoupled Pure MSL Mode**: Enables instant tidal predictions without requiring external MDT or Geoid rasters;
+  * **Dynamic Timezone Switching**: Instantaneously re-indexes chart axes and tabular data when switching timezone without re-running calculations;
+  * **DST Boundary Safety**: Handles daylight saving time transitions smoothly without NaT drops;
   * One-click presets for major world estuaries and ports (Yangtze, Pearl River, Hangzhou Bay, Bohai, Rotterdam, New York, San Francisco, Sydney, etc.);
   * Interactive Matplotlib canvas with pan/zoom and **automatic peak & trough detection calibrated to semi-diurnal physical windows (~10-12h)**;
   * Multi-datum dynamic curve overlay, real-time statistical cards, and dual timezone support (UTC / Local Time);
@@ -129,7 +135,17 @@ Every prediction point is tagged with an evaluation `quality_flag`:
 | **Flag < 0** | Extrapolated | The target point is near complex coastal shorelines or shallow flats. Extrapolated by tide dynamics. Highlighted in amber. |
 | **Flag = 0** | Missing / Inland | Inland point or no tidal solution available. Tide and datums are set to `NaN` (no silent zeros). Highlighted in red. |
 
+### 4. International Standard Tidal Prediction Intervals (Literature Benchmarks)
+CoastTideX supports 1min, 5min, 6min, 10min, 15min, 30min, and 1h sampling steps based on authoritative international standards:
+
+| Recommended Step | Standard & Operational Scenario | Scientific Basis & Literature Citations |
+| :--- | :--- | :--- |
+| **6 minutes (0.1 h)** | **NOAA Operational Tide Gauges & Real-time Predictions** | **NOAA CO-OPS Operational Specification**: The gold standard across US real-time tide gauge networks. High frequency is essential for capturing shallow-water non-linear overtides ($M_4, MS_4, M_6$) and peak turning points. |
+| **10 ~ 15 minutes** | **IOC / GLOSS Global Tide Stations** | **UNESCO IOC / GLOSS Specifications**: Standard operational cadence for global sea-level monitoring stations, balancing wave peak fidelity with data volume. |
+| **1 hour (60 minutes)** | **Classical Harmonic Analysis & Long-term Sea Level** | **Foreman (1977) & Pawlowicz et al. (2002, T_TIDE)**: The standard input interval for classic harmonic tidal analysis and multi-decadal sea level variation research. |
+
 ---
+
 
 ## 🚀 Quick Start
 
@@ -239,6 +255,23 @@ CoastTideX/
 A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 1. Run `build_exe.bat`;
 2. Find the standalone application in `dist/CoastTideX/CoastTideX.exe`.
+
+## 📝 Changelog
+
+### v1.2 (2026-09)
+* **[UI Adaptive Resizing]** Enclosed the left control panel in a `QScrollArea` to remove vertical resizing limits on 768p/1080p and high-DPI displays;
+* **[MSL Mode Decoupling]** Removed mandatory MDT/Geoid dependencies when running pure tide MSL predictions;
+* **[Regional Geoid Recognition]** Automatically identifies the EIGEN-6C4 ($d/o=2190$) reference geoid used by Hybrid MDT in Mediterranean and Black Sea domains;
+* **[Dynamic Timezone Switching]** Instantly synchronizes chart time axes and result tables upon changing timezone dropdown without re-running calculations;
+* **[DST Transition Safety]** Resolved potential ambiguous time issues during daylight saving time transitions;
+* **[Sampling Interval Guidelines]** Integrated international operational benchmarks (NOAA 6-min, IOC/GLOSS 10-15min, Foreman 1h) directly in GUI and docs;
+* **[Dependency Compatibility]** Resolved Affine matrix multiplication deprecation warning and expanded automated tests to 14/14 passing.
+
+### v1.1 (2026-09)
+* Corrected vertical datum conversion to EGM2008 by introducing $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$ geoid difference correction;
+* Optimized single-point BBox caching and global batch adaptive spatial chunking;
+* Introduced true bilinear interpolation and strict inland `NaN` propagation;
+* Added automatic astronomical high/low tide peak detection and statistics cards.
 
 ---
 

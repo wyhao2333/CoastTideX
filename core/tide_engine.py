@@ -1,5 +1,5 @@
 """
-CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.1)
+CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.2)
 基于 CNES/AVISO 官方 pyfes 库，利用原生非结构有限元网格 (LGP2) 进行高保真海岸带潮位解算。
 
 特性:

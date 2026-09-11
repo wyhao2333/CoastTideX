@@ -1,5 +1,5 @@
 """
-CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.1)
+CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.2)
 实现从平均海平面 (MSL) 到 GOCO06s (MDT参考基准)、EGM2008 大地水准面及 WGS84 空间几何椭球面的严密科学转换。
 
 科学转换原理:
@@ -37,6 +37,17 @@ def is_mediterranean_or_black_sea(lons: float | np.ndarray, lats: float | np.nda
     is_med = (lons_arr >= -6.0) & (lons_arr <= 36.5) & (lats_arr >= 30.0) & (lats_arr <= 46.0)
     is_blk = (lons_arr >= 27.0) & (lons_arr <= 42.0) & (lats_arr >= 40.0) & (lats_arr <= 47.5)
     return is_med | is_blk
+
+
+def _apply_affine_transform(transform, xs, ys):
+    """
+    针对不同版本 affine 库对 (x, y) 坐标变换的兼容实现。
+    显式采用标准仿射变换解析式：
+      col = a * x + b * y + c
+      row = d * x + e * y + f
+    保证在所有 Python/affine/rasterio 版本下均 100% 稳健执行且无弃用告警。
+    """
+    return transform.a * xs + transform.b * ys + transform.c, transform.d * xs + transform.e * ys + transform.f
 
 
 class DatumTransformer:
@@ -145,7 +156,7 @@ class DatumTransformer:
             res = np.full(len(lons_arr), np.nan, dtype=float)
             return float(res[0]) if is_scalar else res
 
-        cols, rows = self._egm_inv_transform @ (lons_arr, lats_arr)
+        cols, rows = _apply_affine_transform(self._egm_inv_transform, lons_arr, lats_arr)
         # GDAL/Rasterio 栅格连续坐标中像素中心位于 (col+0.5, row+0.5)，
         # 而 scipy map_coordinates 将数组元素 [0, 0] 定位于整数坐标 (0, 0)。
         # 此处严格扣除 0.5 半像元偏置，彻底消除 ~2.3km (1.25') 空间平移误差。
@@ -168,7 +179,7 @@ class DatumTransformer:
             res = np.full(len(lons_arr), np.nan, dtype=float)
             return float(res[0]) if is_scalar else res
 
-        cols, rows = self._delta_n_inv_transform @ (lons_arr, lats_arr)
+        cols, rows = _apply_affine_transform(self._delta_n_inv_transform, lons_arr, lats_arr)
         cols_map = cols - 0.5
         rows_map = rows - 0.5
         vals = map_coordinates(self._delta_n_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)

@@ -197,7 +197,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.1")
+        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.2")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -255,7 +255,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.1")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.2")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -915,7 +915,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.1</h3>"
+            "<h3>CoastTideX v1.2</h3>"
             "<p><b>全球海岸带潮位模拟与高程基准转换系统</b></p>"
             "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的潮汐预测与严密基准转换工具。</p>"
             "<ul>"
@@ -923,12 +923,13 @@ class MainWindow(QMainWindow):
             "<li><b>四大多元基准体系</b>: "
             "<ul>"
             "<li>MSL (相对平均海平面)</li>"
-            "<li>GOCO06s (MDT 原始大地水准面基准)</li>"
+            "<li>GOCO06s (MDT 原始大地水准面基准 / 地中海与黑海 EIGEN-6C4)</li>"
             "<li>EGM2008 (经 ΔN 改正的严密海拔正高)</li>"
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (20年基准)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
+            "<li><b>新版增强 (v1.2)</b>: 窗口自由拉伸滚动布局、纯MSL解耦计算、动态时区换算、夏令时稳健支持</li>"
             "</ul>"
             "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes & scipy</p>"
         )

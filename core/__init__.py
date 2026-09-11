@@ -12,10 +12,14 @@ except ImportError:
     FESTidePredictor = None
     HAS_PYFES = False
 
+__version__ = "1.2.0"
+
 __all__ = [
+    '__version__',
     'FESTidePredictor',
     'HAS_PYFES',
     'DatumTransformer',
     'normalize_longitude',
     'COASTAL_PRESETS'
 ]
+

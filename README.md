@@ -1,6 +1,7 @@
 # CoastTideX: 全球海岸带高精度潮位模拟与高程基准转换系统
 
 <p align="center">
+  <img src="https://img.shields.io/badge/Release-v1.2-blue.svg" alt="Release v1.2">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -33,15 +34,19 @@
   * **MSL 基准**：相对局部平均海平面的瞬时潮汐起伏高度；
   * **GOCO06s 基准**：相对 CNES-CLS22 MDT 原始参考面 ($H_{\text{GOCO06S}} = \text{Tide} + \text{MDT}$)；
   * **EGM2008 正高基准**：严密引入全球大地水准面差值改正项 $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$，杜绝基准张冠李戴 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N$)；
-  * **WGS84 椭球高**：空间三维几何椭球高 ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$)，可直接对接 GNSS 测量。
+  * **WGS84 椭球高**：空间三维几何椭球高 ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$)，可直接对接 GNSS 测量；
+  * **地中海/黑海混合基准识别 (v1.2)**：自动识别 Hybrid MDT 在地中海与黑海采用的 EIGEN-6C4 ($d/o=2190$) 超高阶重力基准并精准标定。
 * 🎯 **高精度栅格双线性空间插值与真 NaN 状态传播**：
   * 对 EGM2008 与 $\Delta N$ 栅格执行真双线性插值 (`map_coordinates(order=1)`)；
   * 深入内陆或超出有效海洋范围的查询严格返回 `NaN`，彻底杜绝静默返回 `0.0` 伪造数据的工程隐患。
-* 🖥️ **现代化 PyQt6 交互界面**：
+* 🖥️ **现代化 PyQt6 交互界面与新版增强 (v1.2)**：
+  * **自适应滚动与上下无级缩放**：控制面板封装于 `QScrollArea`，彻底解除窗口纵向锁定，768p/1080p/2K/4K 各类屏幕均可自由拉伸缩放；
+  * **纯 MSL 模式解耦**：未勾选垂直基准转换时，无需配置外部 MDT/Geoid 栅格即可直接进行轻量级纯天文潮位预测与波形分析；
+  * **动态时区无缝联动**：计算后切换时区即时自动刷新图表时间轴与表格时间列，无需重新计算；
+  * **夏令时 (DST) 稳健过渡**：消除时区跳变与折返时刻的静默 NaT 风险；
   * 内置全球十余个典型强潮河口/重要港口一键预设（长江口、珠江口、杭州湾、渤海湾、鹿特丹、纽约等）；
   * 嵌入 Matplotlib 交互式波形画布，支持缩放、平移并**按半日潮物理极值间隔 (~10-12小时) 自动标注天文高潮与低潮点**；
-  * 支持多基准面曲线动态叠加切换，配备实时极值统计卡片与动态时区校准（UTC / 本地时间）；
-  * **集成功能说明与操作手册**：菜单栏「帮助 -> 📖 功能说明与操作手册」内置系统级科学原理与操作指南。
+  * **集成功能说明与操作手册**：菜单栏「帮助 -> 📖 功能说明与操作手册」内置系统级科学原理、最低硬件需求与操作指南。
 * 📑 **批量多点离散解算与导出**：支持加载包含成千上万个经纬度及时间点的 CSV 表格，自动批量向量化解算并一键导出为标准 CSV / Excel。
 * 📦 **开箱即用与独立打包**：支持通过 `run_gui.bat` 一键启动，并提供完整的 `build_exe.bat` 脚本，可快速打包为无需 Python 环境的独立 Windows `.exe` 程序。
 
@@ -129,7 +134,17 @@ $$\eta(t) = \sum_{i=1}^{34} f_i(t) \cdot H_i(\lambda, \phi) \cdot \cos\left( \om
 | **Flag < 0** | 近岸动力学外推 (Extrapolated) | 目标点位于复杂海岸线边缘或极浅滩涂，由动力学外推获得，GUI 以黄色高亮警示。 |
 | **Flag = 0** | 陆地/无数据 (Missing) | 目标点位于深内陆或无潮汐解区域，潮位及高程严格置为 `NaN`（杜绝静默返回 0.0），GUI 以红色警示。 |
 
+### 4. 国际标准潮位预测时间采样步长指南 (Literature Benchmarks)
+系统在单点预测时提供 1分/5分/6分/10分/15分/30分/1小时 多种采样步长，对应权威国际海洋规范与学术证据：
+
+| 推荐步长 (Interval) | 权威标准与应用场景 | 科学依据与文献证据 (Literature Citations) |
+| :--- | :--- | :--- |
+| **6 分钟 (0.1 小时)** | **NOAA 业务化实时验潮与预报** | **美国 NOAA CO-OPS 业务化规范**：全美验潮站实时水位监测与天文潮位预测的核心标准时间步长。高密度采样能精准刻画由浅海非线性效应产生的微弱高阶分潮波形畸变（如 $M_4, MS_4, M_6$）与驻波转折极值。 |
+| **10 ~ 15 分钟** | **IOC / GLOSS 验潮站标准** | **联合国教科文组织 IOC / GLOSS 规范**：全球海平面观测系统（GLOSS）推荐的标准业务化观测步长。在确保波形极值精度的同时，显著降低长期海量时序存储和计算开销。 |
+| **1 小时 (60 分钟)** | **经典调和分析与长期海平面研究** | **Foreman (1977) 与 Pawlowicz et al. (2002, T_TIDE)**：经典潮汐调和分析的标准输入步长，适用于天级别至年代际的宏观天文潮演化研究。 |
+
 ---
+
 
 ## 🚀 快速上手 (Quick Start)
 
@@ -246,6 +261,23 @@ CoastTideX/
     └── test_engines.py             # 核心引擎全流程检验测试 (解耦基准点真值/闭合性/时区/相对路径)
 ```
 
+## 📝 版本更新日志 (Changelog)
+
+### v1.2 (2026-09)
+* **[UI 自适应缩放]** 左侧控制面板引入 `QScrollArea` 包装，彻底解除主窗口纵向缩放锁定限制，完美适配 768p/1080p 笔记本及各类缩放比例屏幕；
+* **[MSL 模式解耦]** 纯潮位预测时不再强制依赖 MDT 与 Geoid 栅格文件，未勾选转换时轻量快速运行与出图；
+* **[地中海/黑海科学基准]** 自动识别 Hybrid MDT 在地中海与黑海采用的 EIGEN-6C4 ($d/o=2190$) 超高阶重力基准并予以专属质量标注；
+* **[动态时区即时联动]** 计算完成后切换时区下拉框，系统实时重构图表时间轴和表格时间列，无须重复触发耗时计算；
+* **[夏令时 DST 稳健过渡]** 解决夏令时跳变与回折边界的潜在时间歧义，消除静默 NaT 风险；
+* **[采样步长文献指南]** 界面及文档内置国际主流验潮业务（NOAA 6分钟、IOC/GLOSS 10~15分钟、Foreman 1小时）的标准依据与学术文献；
+* **[依赖兼容优化]** 消除新版 `affine` 矩阵乘法弃用警告，单元测试覆盖扩展至 14/14 全通过。
+
+### v1.1 (2026-09)
+* 修正平均海平面至 EGM2008 科学基准换算，引入 $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$ 大地水准面差值改正项；
+* 优化单点时序预测局部 BBox 索引与全球批量点自适应空间网格分块聚类 (Spatial Chunking)；
+* 引入真双线性栅格插值与严格内陆/缺失值 `NaN` 传播机制；
+* 添加大潮波峰波谷物理极值自动检测与统计卡片。
+
 ---
 
 ## 📚 引用与致谢 (Citations & Acknowledgements)
@@ -260,3 +292,4 @@ CoastTideX/
    > Kvas, A., et al. (2021). GOCO06s - a satellite-only global gravity field model. *International Centre for Global Earth Models (ICGEM)*, GFZ Potsdam. (DOI: `10.5880/ICGEM.2021.002`)
 4. **EGM2008 Geoid**:
    > Pavlis, N. K., Holmes, S. A., Kenyon, S. C., & Factor, J. K. (2012). The development and evaluation of the Earth Gravitational Model 2008 (EGM2008). *Journal of Geophysical Research: Solid Earth*, 117(B4).
+

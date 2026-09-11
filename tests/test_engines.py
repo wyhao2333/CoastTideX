@@ -1,5 +1,5 @@
 """
-CoastTideX 单元与集成测试套件 (Test Suite v1.1.1)
+CoastTideX 单元与集成测试套件 (Test Suite v1.2.0)
 严格验证：
   1. 空间坐标与经度归一化；
   2. 垂直基准闭合数学关系 (H_EGM2008 = Tide + MDT + ΔN, h_WGS84 = H_EGM2008 + N_EGM2008)；
