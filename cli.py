@@ -4,10 +4,10 @@ CoastTideX 命令行工具 (Command-Line Interface)
 
 使用示例:
     # 预测单点
-    python cli.py --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --output output.csv
+    python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --output output.csv
 
     # 批量计算
-    python cli.py --batch input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
+    python cli.py batch --input input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
 """
 
 import os
@@ -93,6 +93,13 @@ def main():
         df['h_egm2008_m'] = datum_res['h_egm2008_m']
         df['h_wgs84_m'] = datum_res['h_wgs84_m']
 
+        if 'quality_flag' in df.columns:
+            flags = df['quality_flag'].values
+            if (flags == 0).any():
+                print("[WARN] 注意: 预测序列中包含质量 Flag=0 的点（陆地或无有效潮汐解），潮位及高程为 NaN！")
+            elif (flags < 0).any():
+                print("[WARN] 提示: 预测序列中包含近岸动力学外推点（Flag < 0），潮位精度可能低于开阔海域！")
+
         export_dataframe(df, args.output)
         print(f"[OK] 预测成功，包含完整四大基准列，结果已保存至: {args.output}")
 
@@ -123,6 +130,15 @@ def main():
         df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
         df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
         df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
+
+        if 'quality_flag' in df_out.columns:
+            flags = df_out['quality_flag'].values
+            n_zero = int((flags == 0).sum())
+            n_neg = int((flags < 0).sum())
+            if n_zero > 0:
+                print(f"[WARN] 注意: 批量解算中发现 {n_zero} 个无有效数据/陆地点 (Flag=0)，对应值为 NaN。")
+            if n_neg > 0:
+                print(f"[WARN] 提示: 批量解算中包含 {n_neg} 个近岸外推点 (Flag < 0)。")
 
         export_dataframe(df_out, args.output)
         print(f"[OK] 批量解算完成，已导出至: {args.output}")

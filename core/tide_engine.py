@@ -57,9 +57,9 @@ class FESTidePredictor:
         获取或复用符合空间包围框与分潮要求的 TidalModel 实例。
         """
         target_bbox = (
-            max(0.0, float(bbox[0])),
+            float(bbox[0]),
             max(-90.0, float(bbox[1])),
-            min(360.0, float(bbox[2])),
+            float(bbox[2]),
             min(90.0, float(bbox[3]))
         )
 
@@ -132,11 +132,11 @@ class FESTidePredictor:
         local_series = pd.date_range(start=start_time, end=end_time, freq=freq)
         utc_idx, dates_np = convert_time_to_utc(local_series, source_tz=source_tz)
 
-        # 2. 计算局部 BBox
+        # 2. 计算局部 BBox (允许跨越 0°/360° 环形边界，由 pyfes 自动加载环形网格拓扑)
         bbox = (
-            max(0.0, lon_norm - buffer_deg),
+            lon_norm - buffer_deg,
             max(-90.0, lat_norm - buffer_deg),
-            min(360.0, lon_norm + buffer_deg),
+            lon_norm + buffer_deg,
             min(90.0, lat_norm + buffer_deg)
         )
 
@@ -217,9 +217,9 @@ class FESTidePredictor:
                 progress_callback(20, f"单局部区域批量解算 ({total_rows} 个点)...")
 
             bbox = (
-                max(0.0, float(np.min(lons_norm)) - 0.5),
+                float(np.min(lons_norm)) - 0.5,
                 max(-90.0, float(np.min(lats)) - 0.5),
-                min(360.0, float(np.max(lons_norm)) + 0.5),
+                float(np.max(lons_norm)) + 0.5,
                 min(90.0, float(np.max(lats)) + 0.5)
             )
             model = self._get_model(bbox, const_list)
@@ -242,7 +242,7 @@ class FESTidePredictor:
 
             num_chunks = len(unique_chunks)
             if progress_callback:
-                progress_callback(25, f"划分为 {num_chunks} 个空间子集并行加载...")
+                progress_callback(25, f"划分为 {num_chunks} 个空间子集串行分块解算...")
 
             for i, chunk_id in enumerate(unique_chunks):
                 mask = (grid_keys == chunk_id)
@@ -251,9 +251,9 @@ class FESTidePredictor:
                 chunk_times = times_utc[mask]
 
                 chunk_bbox = (
-                    max(0.0, float(np.min(chunk_lons)) - 0.5),
+                    float(np.min(chunk_lons)) - 0.5,
                     max(-90.0, float(np.min(chunk_lats)) - 0.5),
-                    min(360.0, float(np.max(chunk_lons)) + 0.5),
+                    float(np.max(chunk_lons)) + 0.5,
                     min(90.0, float(np.max(chunk_lats)) + 0.5)
                 )
 

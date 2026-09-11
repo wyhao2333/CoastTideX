@@ -64,6 +64,17 @@ class SettingsDialog(QDialog):
         layout_egm.addWidget(btn_egm)
         layout_paths.addLayout(layout_egm)
 
+        # Delta-N GeoTIFF (GOCO06s - EGM2008)
+        layout_dn = QHBoxLayout()
+        layout_dn.addWidget(QLabel("GOCO06s-EGM2008 ΔN (.tif):"))
+        self.edit_delta_n = QLineEdit(self.config['paths'].get('delta_n_tif', ''))
+        btn_delta_n = QPushButton("浏览...")
+        btn_delta_n.setObjectName("btn_secondary")
+        btn_delta_n.clicked.connect(self._browse_delta_n)
+        layout_dn.addWidget(self.edit_delta_n)
+        layout_dn.addWidget(btn_delta_n)
+        layout_paths.addLayout(layout_dn)
+
         main_layout.addWidget(grp_paths)
 
         # 2. 状态校验按钮
@@ -105,20 +116,34 @@ class SettingsDialog(QDialog):
         if f:
             self.edit_egm.setText(f)
 
+    def _browse_delta_n(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选择 GOCO06s-EGM2008 ΔN 栅格文件", "", "GeoTIFF Files (*.tif *.tiff)")
+        if f:
+            self.edit_delta_n.setText(f)
+
     def _validate_paths(self):
         fes_path = self.edit_fes.text().strip()
         mdt_path = self.edit_mdt.text().strip()
         egm_path = self.edit_egm.text().strip()
+        delta_n_path = self.edit_delta_n.text().strip()
 
         # 处理相对路径
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if not os.path.isabs(egm_path):
-            egm_path = os.path.join(base_dir, egm_path)
+        def _resolve(p):
+            if not p:
+                return p
+            return p if os.path.isabs(p) else os.path.join(base_dir, p)
+
+        fes_res = _resolve(fes_path)
+        mdt_res = _resolve(mdt_path)
+        egm_res = _resolve(egm_path)
+        dn_res = _resolve(delta_n_path)
 
         msg = []
-        msg.append(f"• FES2022b 网格: {'✅ 正常存在' if os.path.exists(fes_path) else '❌ 不存在'}")
-        msg.append(f"• CNES-CLS22 MDT: {'✅ 正常存在' if os.path.exists(mdt_path) else '❌ 不存在'}")
-        msg.append(f"• EGM2008 GeoTIFF: {'✅ 正常存在' if os.path.exists(egm_path) else '❌ 不存在'}")
+        msg.append(f"• FES2022b 网格: {'✅ 正常存在' if os.path.exists(fes_res) else '❌ 不存在'}")
+        msg.append(f"• CNES-CLS22 MDT: {'✅ 正常存在' if os.path.exists(mdt_res) else '❌ 不存在'}")
+        msg.append(f"• EGM2008 GeoTIFF: {'✅ 正常存在' if os.path.exists(egm_res) else '❌ 不存在'}")
+        msg.append(f"• GOCO06s-EGM2008 ΔN: {'✅ 正常存在' if os.path.exists(dn_res) else '❌ 不存在'}")
 
         QMessageBox.information(self, "数据源完整性校验", "\n".join(msg))
 
@@ -126,6 +151,7 @@ class SettingsDialog(QDialog):
         self.config['paths']['fes_ns_grid'] = self.edit_fes.text().strip()
         self.config['paths']['mdt_nc'] = self.edit_mdt.text().strip()
         self.config['paths']['egm2008_tif'] = self.edit_egm.text().strip()
+        self.config['paths']['delta_n_tif'] = self.edit_delta_n.text().strip()
 
         save_app_config(self.config)
         QMessageBox.information(self, "提示", "设置已成功保存！")

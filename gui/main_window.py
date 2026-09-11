@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
     QSplitter, QStatusBar
 )
-from PyQt6.QtGui import QIcon, QFont, QAction
+from PyQt6.QtGui import QIcon, QFont, QAction, QColor
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
@@ -155,12 +155,13 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.0")
+        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.1")
         self.resize(1280, 850)
         self.setStyleSheet(DARK_THEME_QSS)
 
         self.current_result_df = None
         self.batch_result_df = None
+        self._current_tz_mode = "UTC"
 
         self._init_menu()
         self._init_ui()
@@ -274,6 +275,7 @@ class MainWindow(QMainWindow):
         self.combo_tz = QComboBox()
         self.combo_tz.addItem("UTC (世界标准时)", "UTC")
         self.combo_tz.addItem("本地时间 (Local Time)", "local")
+        self.combo_tz.currentIndexChanged.connect(self._on_timezone_changed)
         layout_time.addWidget(self.combo_tz, 3, 1)
 
         layout_left.addWidget(grp_time)
@@ -323,6 +325,7 @@ class MainWindow(QMainWindow):
         self.lbl_mdt = QLabel("-")
         self.lbl_delta_n = QLabel("-")
         self.lbl_geoid_n = QLabel("-")
+        self.lbl_qc_status = QLabel("-")
 
         layout_stat.addWidget(QLabel("当前统计基准:"), 0, 0)
         layout_stat.addWidget(self.lbl_stat_target, 0, 1)
@@ -338,6 +341,8 @@ class MainWindow(QMainWindow):
         layout_stat.addWidget(self.lbl_delta_n, 5, 1)
         layout_stat.addWidget(QLabel("EGM2008 水准面 N:"), 6, 0)
         layout_stat.addWidget(self.lbl_geoid_n, 6, 1)
+        layout_stat.addWidget(QLabel("网格质量评价:"), 7, 0)
+        layout_stat.addWidget(self.lbl_qc_status, 7, 1)
         layout_left.addWidget(grp_stat)
 
         layout_left.addStretch()
@@ -455,11 +460,54 @@ class MainWindow(QMainWindow):
         layout.addLayout(layout_batch_table)
 
     def _set_default_values(self):
-        # 默认选中长江口
-        idx = self.combo_presets.findText("长江口 (Changjiang Estuary)")
+        app_cfg = load_app_config()
+        gui_cfg = app_cfg.get('gui', {})
+        default_loc = gui_cfg.get('default_location_name', "长江口 (Changjiang Estuary)")
+        idx = self.combo_presets.findText(default_loc)
         if idx >= 0:
             self.combo_presets.setCurrentIndex(idx)
+
+        default_tz = gui_cfg.get('default_timezone', 'UTC')
+        self._current_tz_mode = default_tz
+        idx_tz = self.combo_tz.findData(default_tz)
+        if idx_tz >= 0:
+            self.combo_tz.setCurrentIndex(idx_tz)
+
+        if default_tz == 'UTC':
+            now_dt = QDateTime.currentDateTimeUtc()
+        else:
+            now_dt = QDateTime.currentDateTime()
+
+        self.time_start.setDateTime(now_dt)
+        self.time_end.setDateTime(now_dt.addDays(1))
+
         self.current_scalar_datum = {}
+
+    def _on_timezone_changed(self):
+        new_tz = self.combo_tz.currentData()
+        if not hasattr(self, '_current_tz_mode'):
+            self._current_tz_mode = new_tz
+            return
+        if new_tz == self._current_tz_mode:
+            return
+
+        from datetime import timezone
+        if new_tz == 'local' and self._current_tz_mode == 'UTC':
+            # 将当前界面显示的 UTC 时间转换为本地时间显示
+            start_pydt = self.time_start.dateTime().toPyDateTime().replace(tzinfo=timezone.utc).astimezone()
+            end_pydt = self.time_end.dateTime().toPyDateTime().replace(tzinfo=timezone.utc).astimezone()
+            self.time_start.setDateTime(QDateTime(start_pydt.year, start_pydt.month, start_pydt.day, start_pydt.hour, start_pydt.minute, start_pydt.second))
+            self.time_end.setDateTime(QDateTime(end_pydt.year, end_pydt.month, end_pydt.day, end_pydt.hour, end_pydt.minute, end_pydt.second))
+        elif new_tz == 'UTC' and self._current_tz_mode == 'local':
+            # 将当前界面显示的本地时间转换为 UTC 时间显示
+            start_pydt = self.time_start.dateTime().toPyDateTime().astimezone().astimezone(timezone.utc)
+            end_pydt = self.time_end.dateTime().toPyDateTime().astimezone().astimezone(timezone.utc)
+            self.time_start.setDateTime(QDateTime(start_pydt.year, start_pydt.month, start_pydt.day, start_pydt.hour, start_pydt.minute, start_pydt.second))
+            self.time_end.setDateTime(QDateTime(end_pydt.year, end_pydt.month, end_pydt.day, end_pydt.hour, end_pydt.minute, end_pydt.second))
+
+        self._current_tz_mode = new_tz
+        if self.current_result_df is not None:
+            self._update_chart()
 
     def _on_preset_changed(self, index):
         name = self.combo_presets.currentText()
@@ -585,6 +633,18 @@ class MainWindow(QMainWindow):
         self.lbl_delta_n.setText(f"<b>{dn_v:+.4f} m</b>" if not np.isnan(dn_v) else "<span style='color:#94a3b8;'>NaN</span>")
         self.lbl_geoid_n.setText(f"<b>{geoid_v:+.3f} m</b>" if not np.isnan(geoid_v) else "<span style='color:#94a3b8;'>NaN</span>")
 
+        # 更新网格质量评价标识
+        if 'quality_flag' in df.columns:
+            flags = df['quality_flag'].values
+            if (flags == 0).any():
+                self.lbl_qc_status.setText("<span style='color:#ef4444;font-weight:bold;'>⚠️ 包含无数据/陆地点 (Flag 0)</span>")
+            elif (flags < 0).any():
+                self.lbl_qc_status.setText("<span style='color:#f59e0b;font-weight:bold;'>⚠️ 存在近岸动力学外推 (Flag < 0)</span>")
+            else:
+                self.lbl_qc_status.setText("<span style='color:#10b981;font-weight:bold;'>✅ 全程高保真有效 (Flag 1~6)</span>")
+        else:
+            self.lbl_qc_status.setText("-")
+
     def _on_single_error(self, err_msg):
         self.btn_run_single.setEnabled(True)
         self.prog_single.setValue(0)
@@ -626,12 +686,21 @@ class MainWindow(QMainWindow):
             dn_val = _fmt(row.get('delta_n_m', np.nan), 3)
             egm_val = _fmt(row.get('h_egm2008_m', np.nan), 3)
             wgs_val = _fmt(row.get('h_wgs84_m', np.nan), 3)
-            flag_val = str(int(row.get('quality_flag', 0)))
+            flag_raw = row.get('quality_flag', 0)
+            flag_val = int(flag_raw) if not pd.isna(flag_raw) else 0
 
-            items = [t_utc, t_inp, msl_val, mdt_val, dn_val, egm_val, wgs_val, flag_val]
+            text_color = None
+            if flag_val == 0:
+                text_color = QColor("#ef4444")
+            elif flag_val < 0:
+                text_color = QColor("#f59e0b")
+
+            items = [t_utc, t_inp, msl_val, mdt_val, dn_val, egm_val, wgs_val, str(flag_val)]
             for col_idx, text in enumerate(items):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if text_color is not None:
+                    item.setForeground(text_color)
                 self.table_single.setItem(row_idx, col_idx, item)
 
     def _export_csv(self):

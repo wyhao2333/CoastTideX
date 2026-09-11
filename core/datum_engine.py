@@ -109,8 +109,13 @@ class DatumTransformer:
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
         cols, rows = self._egm_inv_transform * (lons_arr, lats_arr)
-        # order=1 对应双线性插值 (Bilinear Interpolation)
-        vals = map_coordinates(self._egm_data, [rows, cols], order=1, mode='constant', cval=np.nan)
+        # GDAL/Rasterio 栅格连续坐标中像素中心位于 (col+0.5, row+0.5)，
+        # 而 scipy map_coordinates 将数组元素 [0, 0] 定位于整数坐标 (0, 0)。
+        # 此处严格扣除 0.5 半像元偏置，彻底消除 ~2.3km (1.25') 空间平移误差。
+        cols_map = cols - 0.5
+        rows_map = rows - 0.5
+        # order=1 对应严格双线性插值 (Bilinear Interpolation)
+        vals = map_coordinates(self._egm_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
         return float(vals[0]) if is_scalar else vals
 
     def get_delta_n(self, lons: float | np.ndarray, lats: float | np.ndarray) -> float | np.ndarray:
@@ -123,7 +128,9 @@ class DatumTransformer:
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
         cols, rows = self._delta_n_inv_transform * (lons_arr, lats_arr)
-        vals = map_coordinates(self._delta_n_data, [rows, cols], order=1, mode='constant', cval=np.nan)
+        cols_map = cols - 0.5
+        rows_map = rows - 0.5
+        vals = map_coordinates(self._delta_n_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
         return float(vals[0]) if is_scalar else vals
 
     def convert_tide_datums(

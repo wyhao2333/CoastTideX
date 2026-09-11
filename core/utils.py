@@ -4,15 +4,20 @@ CoastTideX 通用工具与常量定义
 """
 
 import os
+import copy
 import yaml
 import numpy as np
 import pandas as pd
+import dateutil.tz
 from datetime import datetime, timezone
 
 
 def get_project_root() -> str:
     """获取项目根目录绝对路径"""
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+PROJECT_ROOT = get_project_root()
 
 
 def resolve_project_path(path_str: str) -> str:
@@ -24,29 +29,38 @@ def resolve_project_path(path_str: str) -> str:
     return os.path.normpath(os.path.join(get_project_root(), path_str))
 
 
+def to_relative_project_path(p: str) -> str:
+    """若路径位于项目根目录下，将其转换为相对路径，以确保多机跨系统可移植性"""
+    if not p or not isinstance(p, str):
+        return p
+    root = get_project_root()
+    try:
+        abs_p = os.path.abspath(p)
+        abs_root = os.path.abspath(root)
+        if os.path.splitdrive(abs_p)[0].lower() == os.path.splitdrive(abs_root)[0].lower():
+            rel = os.path.relpath(abs_p, abs_root)
+            if not rel.startswith('..'):
+                return rel.replace('\\', '/')
+    except Exception:
+        pass
+    return p.replace('\\', '/')
+
+
 def normalize_longitude(lon: float | np.ndarray, to_360: bool = True) -> float | np.ndarray:
     """
     规范化经度坐标体系。
 
     参数:
-        lon: 输入经度（标量或 NumPy 数组）
-        to_360: 若为 True，转换为 0~360° (用于 FES 模型);
-                若为 False，转换为 -180~180° (用于常规地图与 MDT)
-
-    返回:
-        规范化后的经度
+        lon: 经度 (单值或 numpy 数组)
+        to_360: True 映射至 [0, 360) (FES2022 规范)；False 映射至 [-180, 180) (GIS 惯例)
     """
-    if isinstance(lon, (list, tuple, np.ndarray)):
-        arr = np.asarray(lon, dtype=float)
-        if to_360:
-            return np.where(arr < 0, (arr % 360.0 + 360.0) % 360.0, arr % 360.0)
-        else:
-            return ((arr + 180.0) % 360.0) - 180.0
+    if to_360:
+        return np.mod(lon, 360.0)
     else:
-        val = float(lon)
-        if to_360:
-            rem = val % 360.0
-            return rem if rem >= 0 else rem + 360.0
+        # 映射至 [-180, 180)
+        val = np.mod(lon, 360.0)
+        if np.isscalar(val):
+            return val - 360.0 if val >= 180.0 else val
         else:
             return ((val + 180.0) % 360.0) - 180.0
 
@@ -57,6 +71,7 @@ def convert_time_to_utc(
 ) -> tuple[pd.DatetimeIndex, np.ndarray]:
     """
     将输入的时间序列严格统一转换为无时区的 UTC 标准时间序列。
+    全面支持动态夏令时 (DST) 跨季节时区校准。
 
     参数:
         time_series: 输入的时间序列
@@ -65,24 +80,30 @@ def convert_time_to_utc(
     返回:
         (utc_dt_index, utc_numpy_datetime64_us)
     """
-    dt_idx = pd.DatetimeIndex(pd.to_datetime(time_series))
+    # 兼容单标量或序列输入
+    if isinstance(time_series, (str, datetime, pd.Timestamp)) or not hasattr(time_series, '__len__'):
+        time_inputs = [time_series]
+    else:
+        time_inputs = time_series
+
+    dt_idx = pd.DatetimeIndex(pd.to_datetime(time_inputs))
 
     if source_tz == 'UTC' or source_tz is None:
         if dt_idx.tz is not None:
             utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
         else:
             utc_idx = dt_idx
-    elif source_tz == 'local':
-        # 获取本机系统时区
-        local_tz = datetime.now().astimezone().tzinfo
+    elif str(source_tz).lower() == 'local':
+        # 采用 dateutil.tz.tzlocal() 动态依据每个日期的 OS 时区规则处理夏令时 (DST)
+        tz_loc = dateutil.tz.tzlocal()
         if dt_idx.tz is None:
-            utc_idx = dt_idx.tz_localize(local_tz).tz_convert('UTC').tz_localize(None)
+            utc_idx = dt_idx.tz_localize(tz_loc, ambiguous='NaT', nonexistent='shift_forward').tz_convert('UTC').tz_localize(None)
         else:
             utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
     else:
-        # 指定特定时区字符串
+        # 指定特定时区字符串 (如 'Asia/Shanghai', 'America/New_York')
         if dt_idx.tz is None:
-            utc_idx = dt_idx.tz_localize(source_tz).tz_convert('UTC').tz_localize(None)
+            utc_idx = dt_idx.tz_localize(source_tz, ambiguous='NaT', nonexistent='shift_forward').tz_convert('UTC').tz_localize(None)
         else:
             utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
 
@@ -131,12 +152,18 @@ def load_app_config(config_path: str = None) -> dict:
 
 
 def save_app_config(config_dict: dict, config_path: str = None) -> None:
-    """保存应用 YAML 配置文件"""
+    """保存应用 YAML 配置文件，并自动将项目内部绝对路径恢复为相对路径，保障跨机便携性"""
     if config_path is None:
         config_path = os.path.join(get_project_root(), 'config.yaml')
 
+    save_dict = copy.deepcopy(config_dict)
+    if 'paths' in save_dict:
+        for k, v in save_dict['paths'].items():
+            if isinstance(v, str):
+                save_dict['paths'][k] = to_relative_project_path(v)
+
     with open(config_path, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(config_dict, f, allow_unicode=True, default_flow_style=False)
+        yaml.safe_dump(save_dict, f, allow_unicode=True, default_flow_style=False)
 
 
 def export_dataframe(df: pd.DataFrame, output_path: str) -> None:

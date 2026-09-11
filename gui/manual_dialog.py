@@ -76,10 +76,10 @@ PyFES 天文潮汐引潮力计算严格基于 <b>UTC (协调世界时)</b>。
 
 <h2>三、 💻 电脑硬件配置与内存需求 (System Requirements)</h2>
 <table>
-    <tr><th>工作模式</th><th>最低内存需求</th><th>说明</th></tr>
-    <tr><td><b>单点 / 局域连续时序模式</b></td><td><b>最低 4 GB RAM</b></td><td>系统采用<b>自适应局部包围框 (BBox)</b> 技术，单点预测仅在内存中建立目标点周围 ±1° 的局部网格拓扑，运行时内存开销仅约 300~600 MB。</td></tr>
-    <tr><td><b>全球散点批量解算模式</b></td><td><b>推荐 8 GB RAM</b></td><td>采用空间 5°×5° 分块聚类 (Spatial Chunking)，分批加载局部网格，内存占用平稳。</td></tr>
-    <tr><td><b>无约束全网格全量加载</b></td><td><b>推荐 16 GB RAM</b></td><td>全量载入 3.77 GB NetCDF4 及其二阶有限元拓扑节点。</td></tr>
+    <tr><th>工作模式</th><th>最低硬件建议</th><th>详细说明</th></tr>
+    <tr><td><b>单点 / 局域连续时序模式</b></td><td><b>最低 4 GB RAM<br>(推荐 8 GB)</b></td><td>系统采用<b>自适应局部包围框 (BBox)</b> 动态裁剪技术，单点预测仅在内存中构建目标点周围 ±1° 的局部有限元网格拓扑。解算运行时常驻内存约 <b>1.2 GB</b>（包含 FES 局部拓扑结构、GDAL/Rasterio 栅格缓存与 Python 运行栈）。</td></tr>
+    <tr><td><b>全球散点批量解算模式</b></td><td><b>推荐 8 GB RAM<br>或以上</b></td><td>采用<b>自适应空间分块聚类逐块解算 (Spatial Chunking)</b>，对空间上邻近的点集聚类成 5°×5° 窗口分批处理，内存占用平稳可控，杜绝内存溢出。</td></tr>
+    <tr><td><b>无约束全网格全量加载</b></td><td><b>推荐 16 GB RAM</b></td><td>全量载入 3.77 GB NetCDF4 及其二阶有限元全局拓扑节点。</td></tr>
 </table>
 
 <h2>四、 界面操作与主要功能说明</h2>
@@ -98,15 +98,24 @@ PyFES 天文潮汐引潮力计算严格基于 <b>UTC (协调世界时)</b>。
     <li>切换至“批量站点多时刻解算”选项卡；</li>
     <li>点击“浏览文件”导入包含经度、纬度、时间的 CSV 表格；</li>
     <li>下拉框确认映射字段（支持智能自动识别）；</li>
-    <li>点击<b>「开始批量解算」</b>，系统自动通过空间聚类分块多线程并行解算；</li>
+    <li>点击<b>「开始批量解算」</b>，系统自动通过自适应空间分块聚类算法逐块解算；</li>
     <li>解算完成后可一键导出包含全部四大高程基准的完整结果报表。</li>
 </ol>
+
+<h3>3. 网格插值质量标识 (Quality Flag) 说明</h3>
+<table>
+    <tr><th>质量 Flag</th><th>物理状态</th><th>处理逻辑与科学意义</th></tr>
+    <tr><td><b style="color:#10b981;">Flag 1 ~ 6</b></td><td>正常内插 (有效)</td><td>目标点严格位于高精度有限元三角形网格单元内部，多项式内插精度最高。</td></tr>
+    <tr><td><b style="color:#f59e0b;">Flag &lt; 0</b></td><td>近岸外推 (警示)</td><td>目标点位于曲折岸线边缘或极浅滩涂，由动力学外推获得，界面以黄色高亮提示。</td></tr>
+    <tr><td><b style="color:#ef4444;">Flag 0</b></td><td>陆地/缺失 (无效)</td><td>无有效潮汐解或完全位于陆地，潮位及高程严格置为 NaN，界面以红色高亮标出。</td></tr>
+</table>
 
 <h2>五、 科学引用与致谢</h2>
 <ul>
     <li><b>FES2022b:</b> CNES, LEGOS, NOVELTIS & CLS (DOI: 10.24400/527896/a01-2024.004)</li>
     <li><b>CNES-CLS22 MDT:</b> CLS & CNES (DOI: 10.24400/527896/a01-2023.003)</li>
-    <li><b>EGM2008:</b> NGA, Pavlis et al. (2012), JGR.</li>
+    <li><b>GOCO06s Gravity Field:</b> Kvas et al. (2021), DGK Report, ICGEM GFZ Potsdam.</li>
+    <li><b>EGM2008 Geoid:</b> NGA, Pavlis et al. (2012), JGR.</li>
 </ul>
 
 </body>

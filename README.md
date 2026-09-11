@@ -118,7 +118,16 @@ $$\eta(t) = \sum_{i=1}^{34} f_i(t) \cdot H_i(\lambda, \phi) \cdot \cos\left( \om
    其中 $\Delta N(\lambda, \phi) = N_{\text{GOCO06S}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$。
 4. **WGS84 几何空间三维椭球高**（直接兼容 GNSS/RTK）：
    $$h_{\text{WGS84}}(\lambda, \phi, t) = H_{\text{EGM2008}}(\lambda, \phi, t) + N_{\text{EGM2008}}(\lambda, \phi)$$
-   其中 $N_{\text{EGM2008}}$ 由系统内置的全球 2.5 分 EGM2008 栅格经双线性插值提取。
+   其中 $N_{\text{EGM2008}}$ 由系统内置的全球 2.5 分 EGM2008 栅格经双线性插值提取（严格消除半像元 1.25' 空间位移）。
+
+### 3. 网格插值质量控制标识 (Quality Flag)
+系统在单点和批量解算中均输出 `quality_flag`，用于衡量潮位动力学插值的可信度：
+
+| 质量标识 (Quality Flag) | 状态定义 | 科学意义与处理行为 |
+| :---: | :---: | :--- |
+| **Flag 1 ~ 6** | 高保真内插 (Valid) | 目标点位于非结构有限元三角形网格单元内部，解算精度最高，质量完全合格。 |
+| **Flag < 0** | 近岸动力学外推 (Extrapolated) | 目标点位于复杂海岸线边缘或极浅滩涂，由动力学外推获得，GUI 以黄色高亮警示。 |
+| **Flag = 0** | 陆地/无数据 (Missing) | 目标点位于深内陆或无潮汐解区域，潮位及高程严格置为 `NaN`（杜绝静默返回 0.0），GUI 以红色警示。 |
 
 ---
 
@@ -204,6 +213,7 @@ print(df[['datetime_utc', 'tide_msl_m', 'h_egm2008_m', 'h_wgs84_m']].head())
 
 ```text
 CoastTideX/
+├── .github/workflows/ci.yml        # GitHub Actions 自动化测试流水线
 ├── .gitignore                      # 严密排除大体积网格、.venv、中间缓存
 ├── LICENSE                         # MIT 开源授权协议
 ├── README.md                       # 中文主文档
@@ -215,22 +225,25 @@ CoastTideX/
 ├── config.yaml                     # 本地数据源路径与运行参数配置
 ├── app.py                          # 桌面图形界面启动入口
 ├── cli.py                          # 命令行批处理工具入口
+├── scripts/
+│   └── generate_delta_n.py         # ΔN 大地水准面高差栅格复现生成脚本
 ├── data/
 │   └── geoid/
-│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5分全球大地水准面栅格 (76.8MB)
-│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s 与 EGM2008 差值改正栅格 (22.6MB)
+│       ├── README_GEOID.md         # 大地水准面基准与 ICGEM 来源严密说明
+│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5分全球大地水准面栅格 (~72.5MB)
+│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s 与 EGM2008 差值改正栅格 (~11.8MB)
 ├── core/                           # 核心计算包
 │   ├── tide_engine.py              # FES2022b 局部加速与自适应空间分块聚类
-│   ├── datum_engine.py             # 四大垂直基准严密转换引擎与双线性插值
-│   └── utils.py                    # 预设港口、坐标规范化、严格时区转换与报表导出
+│   ├── datum_engine.py             # 四大垂直基准严密转换引擎与双线性插值 (消除半像元偏差)
+│   └── utils.py                    # 预设港口、坐标规范化、严格时区转换 (含DST) 与配置相对化
 ├── gui/                            # PyQt6 桌面应用包
-│   ├── main_window.py              # 桌面主窗口与单点/批量双选项卡实现
+│   ├── main_window.py              # 桌面主窗口与单点/批量双选项卡实现 (含QC指示徽章)
 │   ├── chart_widget.py             # Matplotlib 多基准交互式波形组件 (含物理极值检测)
 │   ├── manual_dialog.py            # 内置功能说明文档与操作手册对话框
-│   ├── settings_dialog.py          # 数据源可视化配置弹窗
+│   ├── settings_dialog.py          # 数据源可视化配置与连通性校验弹窗
 │   └── styles.py                   # 扁平科技感深色 QSS 样式表
 └── tests/                          # 自动化单元与集成测试套件
-    └── test_engines.py             # 核心引擎全流程检验测试 (数学闭合/NaN验证)
+    └── test_engines.py             # 核心引擎全流程检验测试 (解耦基准点真值/闭合性/时区/相对路径)
 ```
 
 ---
@@ -243,5 +256,7 @@ CoastTideX/
    > *"The FES2022 Tide product was funded by CNES, produced by LEGOS, NOVELTIS and CLS and made freely available by AVISO."* (DOI: `10.24400/527896/a01-2024.004`)
 2. **CNES-CLS22 MDT**:
    > *"The Mean Dynamic Topography CNES-CLS22 was produced by CLS and CNES."* (DOI: `10.24400/527896/a01-2023.003`)
-3. **EGM2008 Geoid**:
+3. **GOCO06s Satellite Gravity Field**:
+   > Kvas, A., et al. (2021). GOCO06s - a satellite-only global gravity field model. *International Centre for Global Earth Models (ICGEM)*, GFZ Potsdam. (DOI: `10.5880/ICGEM.2021.002`)
+4. **EGM2008 Geoid**:
    > Pavlis, N. K., Holmes, S. A., Kenyon, S. C., & Factor, J. K. (2012). The development and evaluation of the Earth Gravitational Model 2008 (EGM2008). *Journal of Geophysical Research: Solid Earth*, 117(B4).

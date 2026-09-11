@@ -118,7 +118,16 @@ CoastTideX resolves this discrepancy through a mathematically rigorous geodetic 
    where $\Delta N(\lambda, \phi) = N_{\text{GOCO06S}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$.
 4. **WGS84 3D Geometric Ellipsoidal Height**:
    $$h_{\text{WGS84}}(\lambda, \phi, t) = H_{\text{EGM2008}}(\lambda, \phi, t) + N_{\text{EGM2008}}(\lambda, \phi)$$
-   where $N_{\text{EGM2008}}$ is extracted via true bilinear interpolation from the bundled global 2.5' EGM2008 raster.
+   where $N_{\text{EGM2008}}$ is extracted via true bilinear interpolation from the bundled global 2.5' EGM2008 raster (strictly eliminating the 1.25' half-pixel offset).
+
+### 3. Quality Control (QC) Flags
+Every prediction point is tagged with an evaluation `quality_flag`:
+
+| Quality Flag | Definition | Scientific Meaning & Processing |
+| :---: | :---: | :--- |
+| **Flag 1 ~ 6** | Valid Interpolation | The target point falls inside a high-resolution triangular finite element. Full polynomial accuracy. |
+| **Flag < 0** | Extrapolated | The target point is near complex coastal shorelines or shallow flats. Extrapolated by tide dynamics. Highlighted in amber. |
+| **Flag = 0** | Missing / Inland | Inland point or no tidal solution available. Tide and datums are set to `NaN` (no silent zeros). Highlighted in red. |
 
 ---
 
@@ -190,6 +199,7 @@ print(df[['datetime_utc', 'tide_msl_m', 'h_egm2008_m', 'h_wgs84_m']].head())
 
 ```text
 CoastTideX/
+├── .github/workflows/ci.yml        # Automated GitHub Actions test pipeline
 ├── .gitignore                      # Excludes large netCDF meshes, .venv, build caches
 ├── LICENSE                         # MIT License
 ├── README.md                       # Chinese Documentation
@@ -201,22 +211,25 @@ CoastTideX/
 ├── config.yaml                     # Application & data path configuration
 ├── app.py                          # Desktop GUI entrypoint
 ├── cli.py                          # Headless CLI entrypoint
+├── scripts/
+│   └── generate_delta_n.py         # ΔN geoid difference raster generation script
 ├── data/
 │   └── geoid/
-│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (76.8MB)
-│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (22.6MB)
+│       ├── README_GEOID.md         # Geodetic provenance & ICGEM specifications
+│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (~72.5MB)
+│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (~11.8MB)
 ├── core/                           # Core computation modules
 │   ├── tide_engine.py              # FES2022b tide evaluator & spatial chunking
 │   ├── datum_engine.py             # 4-tier vertical datum transformation & bilinear interpolation
-│   └── utils.py                    # Presets, coordinates, timezones & data exports
+│   └── utils.py                    # Presets, coordinates, timezones (DST) & relative paths
 ├── gui/                            # PyQt6 desktop application
-│   ├── main_window.py              # Main window implementation (Single & Batch tabs)
+│   ├── main_window.py              # Main window implementation (with QC badges)
 │   ├── chart_widget.py             # Matplotlib multi-datum waveform component
 │   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog
 │   ├── settings_dialog.py          # Data source path configuration dialog
 │   └── styles.py                   # High-contrast dark QSS stylesheet
 └── tests/                          # Automated unit and integration test suite
-    └── test_engines.py             # Numerical closure, NaN propagation & tide tests
+    └── test_engines.py             # Decoupled ground truth, closure, DST & portability tests
 ```
 
 ---
@@ -235,5 +248,7 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
    > *"The FES2022 Tide product was funded by CNES, produced by LEGOS, NOVELTIS and CLS and made freely available by AVISO."* (DOI: `10.24400/527896/a01-2024.004`)
 2. **CNES-CLS22 MDT**:
    > *"The Mean Dynamic Topography CNES-CLS22 was produced by CLS and CNES."* (DOI: `10.24400/527896/a01-2023.003`)
-3. **EGM2008 Geoid**:
+3. **GOCO06s Satellite Gravity Field**:
+   > Kvas, A., et al. (2021). GOCO06s - a satellite-only global gravity field model. *International Centre for Global Earth Models (ICGEM)*, GFZ Potsdam. (DOI: `10.5880/ICGEM.2021.002`)
+4. **EGM2008 Geoid**:
    > Pavlis, N. K., Holmes, S. A., Kenyon, S. C., & Factor, J. K. (2012). The development and evaluation of the Earth Gravitational Model 2008 (EGM2008). *Journal of Geophysical Research: Solid Earth*, 117(B4).
