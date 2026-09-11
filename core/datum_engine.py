@@ -18,7 +18,6 @@ import warnings
 import numpy as np
 import xarray as xr
 import rasterio
-import matplotlib.path as mpath
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import map_coordinates
 
@@ -102,8 +101,26 @@ _BLK_POLYGON_VERTICES = [
     (27.2, 41.5)    # 闭合
 ]
 
-_MED_PATH = mpath.Path(_MED_POLYGON_VERTICES)
-_BLK_PATH = mpath.Path(_BLK_POLYGON_VERTICES)
+def _points_in_polygon(lons: np.ndarray, lats: np.ndarray, poly_verts: list[tuple[float, float]]) -> np.ndarray:
+    """
+    纯 NumPy 向量化射线交叉法 (Ray-Casting PNPOLY 算法)。
+    判断空间散点是否位于任意闭合多边形内部，零外部库依赖 (不依赖 matplotlib 或 shapely)。
+    """
+    poly = np.asarray(poly_verts, dtype=float)
+    x = np.asarray(lons, dtype=float)
+    y = np.asarray(lats, dtype=float)
+    inside = np.zeros(x.shape, dtype=bool)
+    n_vert = len(poly)
+    j = n_vert - 1
+    for i in range(n_vert):
+        xi, yi = poly[i, 0], poly[i, 1]
+        xj, yj = poly[j, 0], poly[j, 1]
+        cond_y = (yi > y) != (yj > y)
+        if np.any(cond_y):
+            intersect_x = (xj - xi) * (y[cond_y] - yi) / (yj - yi) + xi
+            inside[cond_y] ^= (x[cond_y] < intersect_x)
+        j = i
+    return inside
 
 
 def get_mdt_reference_geoid(lon: float | np.ndarray, lat: float | np.ndarray) -> str | np.ndarray:
@@ -128,14 +145,12 @@ def get_mdt_reference_geoid(lon: float | np.ndarray, lat: float | np.ndarray) ->
     if len(lats_arr) != n_pts:
         lats_arr = np.full(n_pts, lats_arr[0])
 
-    pts = np.column_stack([lons_arr, lats_arr])
-
     # 1. 检查非法与越界坐标
     invalid_mask = ~np.isfinite(lons_arr) | ~np.isfinite(lats_arr) | (lats_arr < -90.0) | (lats_arr > 90.0)
 
-    # 2. 严密多边形空间几何判定
-    in_med = _MED_PATH.contains_points(pts)
-    in_blk = _BLK_PATH.contains_points(pts)
+    # 2. 严密多边形空间几何判定 (纯 NumPy 射线法，无任何外部库依赖)
+    in_med = _points_in_polygon(lons_arr, lats_arr, _MED_POLYGON_VERTICES)
+    in_blk = _points_in_polygon(lons_arr, lats_arr, _BLK_POLYGON_VERTICES)
     is_eigen = (in_med | in_blk) & (~invalid_mask)
 
     res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'EIGEN-6C4', 'GOCO06s'))

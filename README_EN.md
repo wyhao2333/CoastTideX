@@ -39,9 +39,9 @@ The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global oce
   * **Global Discrete Batch Mode**: Employs $5^\circ \times 5^\circ$ adaptive spatial mesh chunking, preventing memory blowup when processing scattered worldwide points.
 * 📐 **Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3)**:
   * **Open Oceans Geoid**: GOCO06s reference datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$);
-  * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, with `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` bundled);
+  * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, supported via local `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`);
   * **Unified Primary Variable & Semantic Truth**: Primary variable `h_mdt_ref_m` denotes height relative to MDT reference geoid; `h_goco06s_m` is strictly `NaN` in Mediterranean/Black Sea (no faking); deep inland points strictly propagate `NaN`;
-  * **Precise Closed Polygon Masks**: Replaces loose bounding boxes with closed polygons (`matplotlib.path.Path`), eliminating misclassification around the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea.
+  * **Precise Closed Polygon Masks**: Replaces loose bounding boxes with zero-dependency pure NumPy ray-casting closed polygon tests, eliminating misclassification around the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea.
 * 🌊 **Potential Astronomical Tidal Inundation Frequency Analysis & 10m DEM Raster Tool (v1.3)**:
   * Vectorized complementary empirical cumulative distribution function (CCDF / 1 - ECDF) with `np.searchsorted` for instant coastal terrain elevation inundation probability and duration analysis;
   * Provides dedicated tool `scripts/calculate_inundation_raster.py` for block-streaming 10m/30m coastal DEMs into 0~100% annual potential astronomical inundation GeoTIFF rasters.
@@ -275,7 +275,7 @@ CoastTideX/
 │       ├── README_GEOID.md         # Geodetic provenance & ICGEM specifications
 │       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (~76.9MB)
 │       ├── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (~22.7MB)
-│       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 - EGM2008 correction raster (~22.5MB, bundled)
+│       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 - EGM2008 correction raster (Med & Black Sea, local generation)
 ├── core/                           # Core computation modules
 │   ├── tide_engine.py              # FES2022b evaluator, time-chunking, spatial chunking & annual prediction
 │   ├── datum_engine.py             # Dual-geoid Hybrid MDT transformation & polygon masks

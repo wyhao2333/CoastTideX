@@ -39,9 +39,9 @@
   * **全球批量离散点**：采用 $5^\circ \times 5^\circ$ 自适应空间网格分块聚类 (Spatial Chunking)，彻底杜绝全球散点退化为全地球加载的内存爆炸陷阱。
 * 📐 **双重水准面 Hybrid MDT 严密科学转换体系 (v1.3)**：
   * **全球大洋基准**：GOCO06s 基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$)；
-  * **地中海/黑海高阶基准**：EIGEN-6C4 ($d/o=2190$) 严密基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$，项目已内置就绪 `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`)；
+  * **地中海/黑海高阶基准**：EIGEN-6C4 ($d/o=2190$) 严密基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$，支持本地配置 `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`)；
   * **统一标称主变量与严格语义真值**：引入 `h_mdt_ref_m` 代表相对 MDT 原始基准面海面高；在欧陆混合区严禁伪造 `h_goco06s_m`（地中海/黑海严格输出 `NaN`）；深陆点全要素严格置为 `NaN`；
-  * **精细多边形掩码**：基于闭合多边形 (`matplotlib.path.Path`) 判别，彻底解决加的斯湾、直布罗陀西侧、比斯开湾、红海等被矩形 BBox 误判的隐患。
+  * **精细多边形掩码**：基于纯 NumPy 闭合多边形射线法判别，零额外库依赖，彻底解决加的斯湾、直布罗陀西侧、比斯开湾、红海等被矩形 BBox 误判的隐患。
 * 🌊 **潜在天文潮淹没概率分析与潮滩 10m DEM 栅格解算 (v1.3)**：
   * 内置向量化经验互补累积分布算法 (`compute_inundation_frequency`)，秒级支持海岸带地形高程点在长期天文潮作用下的淹没频率/概率计算；
   * 提供专用脚本 `scripts/calculate_inundation_raster.py`，支持大范围 10m/30m DEM 分块流式解算，直接输出整年潜在天文潮淹没频率 (0~100%) GeoTIFF 空间栅格。
@@ -285,7 +285,7 @@ CoastTideX/
 │       ├── README_GEOID.md         # 大地水准面基准与 ICGEM 来源严密说明
 │       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5分全球大地水准面栅格 (~76.9MB)
 │       ├── delta_n_goco06s_minus_egm2008.tif # GOCO06s 与 EGM2008 差值改正栅格 (~22.7MB)
-│       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 与 EGM2008 差值改正栅格 (~22.5MB，地中海/黑海内置就绪)
+│       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 与 EGM2008 差值改正栅格 (地中海/黑海本地生成，不入 Git 库)
 ├── core/                           # 核心计算包
 │   ├── tide_engine.py              # FES2022b 局部加速、时间分块 (Time-Chunking) 与整年 17,568 点预测
 │   ├── datum_engine.py             # 双重水准面 Hybrid MDT 转换体系与精细多边形掩码
