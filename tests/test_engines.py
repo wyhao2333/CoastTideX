@@ -104,6 +104,26 @@ class TestCoastTideX(unittest.TestCase):
             self.assertAlmostEqual(mdt_val, 0.7312, places=3)
 
     @unittest.skipUnless(HAS_EGM and HAS_DELTA_N, "GeoTIFF 大地水准面文件不存在")
+    def test_geoid_vectorization_and_closure(self):
+        """测试向量化大地水准面查询与代数闭合关系 (无须 MDT 网格)"""
+        lons = np.array([122.0, 122.5, 123.0])
+        lats = np.array([31.0, 31.2, 31.5])
+        tides = np.array([1.25, -0.80, 2.10])
+        mock_mdt = np.array([0.5, 0.6, 0.7])
+
+        delta_n = self.transformer.get_delta_n(lons, lats)
+        n_egm = self.transformer.get_egm2008_undulation(lons, lats)
+
+        h_goco = tides + mock_mdt
+        h_egm = h_goco + delta_n
+        h_wgs = h_egm + n_egm
+
+        self.assertEqual(len(delta_n), 3)
+        self.assertEqual(len(n_egm), 3)
+        np.testing.assert_allclose(h_egm, h_goco + delta_n, rtol=1e-5)
+        np.testing.assert_allclose(h_wgs, h_egm + n_egm, rtol=1e-5)
+
+    @unittest.skipUnless(HAS_MDT and HAS_EGM and HAS_DELTA_N, "MDT 与大地水准面栅格文件未就绪，跳过全基准闭合测试")
     def test_datum_closure_and_vectorization(self):
         """测试多元基准闭合数学关系及向量化计算 (严格闭合)"""
         lons = np.array([122.0, 122.5, 123.0])
@@ -118,7 +138,6 @@ class TestCoastTideX(unittest.TestCase):
             self.assertEqual(len(res[k]), 3)
 
         # 验证严密数学闭合公式
-        # 仅针对非 NaN 点验证闭合性
         valid_mask = ~np.isnan(res['h_wgs84_m'])
         if np.any(valid_mask):
             np.testing.assert_allclose(

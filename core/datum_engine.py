@@ -10,11 +10,14 @@ CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.1)
 """
 
 import os
+import warnings
 import numpy as np
 import xarray as xr
 import rasterio
 from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import map_coordinates
+
+warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 
 from .utils import normalize_longitude, load_app_config, resolve_project_path
 
