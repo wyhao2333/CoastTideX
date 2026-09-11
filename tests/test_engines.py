@@ -18,7 +18,6 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
 from core.utils import (
     normalize_longitude, COASTAL_PRESETS,
@@ -26,8 +25,14 @@ from core.utils import (
     convert_time_to_utc, to_relative_project_path, PROJECT_ROOT
 )
 
+try:
+    from core.tide_engine import FESTidePredictor, HAS_PYFES
+except ImportError:
+    FESTidePredictor = None
+    HAS_PYFES = False
+
 cfg = load_app_config()
-HAS_FES = os.path.exists(resolve_project_path(cfg['paths'].get('fes_ns_grid', '')))
+HAS_FES = HAS_PYFES and os.path.exists(resolve_project_path(cfg['paths'].get('fes_ns_grid', '')))
 HAS_MDT = os.path.exists(resolve_project_path(cfg['paths'].get('mdt_nc', '')))
 HAS_EGM = os.path.exists(resolve_project_path(cfg['paths'].get('egm2008_tif', '')))
 HAS_DELTA_N = os.path.exists(resolve_project_path(cfg['paths'].get('delta_n_tif', '')))
@@ -74,7 +79,7 @@ class TestCoastTideX(unittest.TestCase):
         self.assertEqual(rel_path.replace("\\", "/"), "data/geoid/test.tif")
 
         # 外部路径保持原样 (正斜杠格式)
-        outside_path = "D:/SomeOutsideData/grid.nc"
+        outside_path = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "outside_data", "grid.nc")).replace('\\', '/')
         self.assertEqual(to_relative_project_path(outside_path), outside_path)
 
     @unittest.skipUnless(HAS_EGM and HAS_DELTA_N, "GeoTIFF 大地水准面文件不存在，跳过基准基准点验证")

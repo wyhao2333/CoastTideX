@@ -13,13 +13,21 @@ import os
 import warnings
 import numpy as np
 import pandas as pd
-import pyfes
-import pyfes.config as cfg
+
+try:
+    import pyfes
+    import pyfes.config as cfg
+    HAS_PYFES = True
+except ImportError:
+    pyfes = None
+    cfg = None
+    HAS_PYFES = False
 
 from .utils import normalize_longitude, convert_time_to_utc, load_app_config, resolve_project_path
 
 # 过滤 pyfes 分潮大小写 UserWarning 提示
-warnings.filterwarnings("ignore", category=UserWarning, module="pyfes")
+if HAS_PYFES:
+    warnings.filterwarnings("ignore", category=UserWarning, module="pyfes")
 
 # 34 个全分潮集合
 ALL_34_CONSTITUENTS = [
@@ -39,6 +47,9 @@ class FESTidePredictor:
     """
 
     def __init__(self, ns_grid_path: str = None):
+        if not HAS_PYFES:
+            raise ImportError("未找到 pyfes 模块。请确保在运行环境中已安装 CNES/AVISO pyfes 库。")
+
         config = load_app_config()
         if ns_grid_path is None:
             ns_grid_path = config['paths']['fes_ns_grid']
