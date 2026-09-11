@@ -15,17 +15,33 @@ from PyQt6.QtWidgets import (
     QTabWidget, QGroupBox, QLabel, QLineEdit, QComboBox,
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
-    QSplitter, QStatusBar, QScrollArea, QFrame
+    QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
-from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config
+from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
 from .settings_dialog import SettingsDialog
 from .manual_dialog import ManualDialog
 from .styles import DARK_THEME_QSS
+
+
+def _safe_float(val):
+    """安全解析为浮点数，若无效则返回 np.nan"""
+    if val is None:
+        return np.nan
+    if hasattr(val, '__len__') and not isinstance(val, (str, bytes)):
+        if len(val) == 0:
+            return np.nan
+        val = val[0]
+    try:
+        if pd.isna(val):
+            return np.nan
+        return float(val)
+    except (ValueError, TypeError):
+        return np.nan
 
 
 class SingleTideWorker(QThread):
@@ -34,7 +50,7 @@ class SingleTideWorker(QThread):
     finished = pyqtSignal(pd.DataFrame, dict)
     error = pyqtSignal(str)
 
-    def __init__(self, lon, lat, start_time, end_time, freq, constituents, source_tz='UTC', datum_mode='both'):
+    def __init__(self, lon, lat, start_time, end_time, freq, constituents, source_tz='UTC', datum_mode='both', inclusive='both'):
         super().__init__()
         self.lon = lon
         self.lat = lat
@@ -44,6 +60,7 @@ class SingleTideWorker(QThread):
         self.constituents = constituents
         self.source_tz = source_tz
         self.datum_mode = datum_mode
+        self.inclusive = inclusive
 
     def run(self):
         try:
@@ -59,6 +76,7 @@ class SingleTideWorker(QThread):
                 start_time=self.start_time,
                 end_time=self.end_time,
                 freq=self.freq,
+                inclusive=self.inclusive,
                 constituents=self.constituents,
                 source_tz=self.source_tz,
                 progress_callback=p_cb
@@ -71,9 +89,12 @@ class SingleTideWorker(QThread):
                 df['mdt_m'] = np.nan
                 df['delta_n_m'] = np.nan
                 df['n_egm2008_m'] = np.nan
+                df['h_mdt_ref_m'] = np.nan
                 df['h_goco06s_m'] = np.nan
                 df['h_egm2008_m'] = np.nan
                 df['h_wgs84_m'] = np.nan
+                df['datum_ref_geoid'] = 'MSL'
+                df['qc_warning'] = 'NORMAL'
 
                 scalar_datum = {
                     'mdt_m': np.nan,
@@ -86,33 +107,30 @@ class SingleTideWorker(QThread):
                 self.finished.emit(df, scalar_datum)
                 return
 
-            # 3. 运行严密四大垂直基准转换 (MSL -> GOCO06s -> EGM2008 -> WGS84)
-            p_cb(85, "严密转换四大垂直基准 (MSL/GOCO06s/EGM2008/WGS84)...")
+            # 3. 运行严密四大垂直基准转换 (MSL -> MDT_REF -> EGM2008 -> WGS84)
+            p_cb(85, "严密转换四大垂直基准 (MSL/MDT_REF/EGM2008/WGS84)...")
             transformer = DatumTransformer()
             datum_res = transformer.convert_tide_datums(
-                df['tide_total_m'].values, self.lon, self.lat
+                df['tide_total_m'].values, self.lon, self.lat, datum_target=self.datum_mode, strict=False
             )
 
             df['tide_msl_m'] = datum_res['tide_msl_m']
             df['mdt_m'] = datum_res['mdt_m']
             df['delta_n_m'] = datum_res['delta_n_m']
             df['n_egm2008_m'] = datum_res['n_egm2008_m']
+            df['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
             df['h_goco06s_m'] = datum_res['h_goco06s_m']
             df['h_egm2008_m'] = datum_res['h_egm2008_m']
             df['h_wgs84_m'] = datum_res['h_wgs84_m']
-
-            # 提取单点代表性标量基准参数
-            def _scalar_val(val):
-                if hasattr(val, '__len__'):
-                    return float(val[0]) if len(val) > 0 else np.nan
-                return float(val)
+            df['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+            df['qc_warning'] = datum_res['qc_warning']
 
             scalar_datum = {
-                'mdt_m': _scalar_val(datum_res['mdt_m']),
-                'delta_n_m': _scalar_val(datum_res['delta_n_m']),
-                'n_egm2008_m': _scalar_val(datum_res['n_egm2008_m']),
-                'datum_ref_geoid': str(datum_res.get('datum_ref_geoid', 'GOCO06s')),
-                'qc_warning': str(datum_res.get('qc_warning', 'NORMAL')),
+                'mdt_m': _safe_float(datum_res['mdt_m']),
+                'delta_n_m': _safe_float(datum_res['delta_n_m']),
+                'n_egm2008_m': _safe_float(datum_res['n_egm2008_m']),
+                'datum_ref_geoid': str(extract_scalar_metadata(datum_res.get('datum_ref_geoid', 'GOCO06s'), default='GOCO06s')),
+                'qc_warning': str(extract_scalar_metadata(datum_res.get('qc_warning', 'NORMAL'), default='NORMAL')),
             }
 
             p_cb(100, "全部计算完成！")
@@ -162,9 +180,12 @@ class BatchTideWorker(QThread):
                 df_out['mdt_m'] = np.nan
                 df_out['delta_n_m'] = np.nan
                 df_out['n_egm2008_m'] = np.nan
+                df_out['h_mdt_ref_m'] = np.nan
                 df_out['h_goco06s_m'] = np.nan
                 df_out['h_egm2008_m'] = np.nan
                 df_out['h_wgs84_m'] = np.nan
+                df_out['datum_ref_geoid'] = 'MSL'
+                df_out['qc_warning'] = 'NORMAL'
                 p_cb(100, "批量 MSL 计算完成！")
                 self.finished.emit(df_out)
                 return
@@ -176,15 +197,17 @@ class BatchTideWorker(QThread):
             lats = df_out[self.lat_col].astype(float).values
             tide_msl = df_out['tide_total_m'].values
 
-            datum_res = transformer.convert_tide_datums(tide_msl, lons, lats)
+            datum_res = transformer.convert_tide_datums(tide_msl, lons, lats, datum_target=self.datum_mode, strict=False)
             df_out['tide_msl_m'] = datum_res['tide_msl_m']
             df_out['mdt_m'] = datum_res['mdt_m']
             df_out['delta_n_m'] = datum_res['delta_n_m']
             df_out['n_egm2008_m'] = datum_res['n_egm2008_m']
+            df_out['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
             df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
             df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
             df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
-            df_out['datum_ref_geoid'] = datum_res.get('datum_ref_geoid', 'GOCO06s')
+            df_out['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+            df_out['qc_warning'] = datum_res['qc_warning']
 
             p_cb(100, "批量计算完成！")
             self.finished.emit(df_out)
@@ -197,7 +220,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.2")
+        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.3")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -244,7 +267,7 @@ class MainWindow(QMainWindow):
         self.tab_single = QWidget()
         self.tab_batch = QWidget()
 
-        self.tabs.addTab(self.tab_single, " 🌊 单点潮汐模拟与波形分析 ")
+        self.tabs.addTab(self.tab_single, " 🌊 单点/时段潮位序列 ")
         self.tabs.addTab(self.tab_batch, " 📊 批量站点多时刻解算 ")
 
         self._setup_single_tab()
@@ -255,7 +278,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.2")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.3")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -266,7 +289,7 @@ class MainWindow(QMainWindow):
         scroll_left.setWidgetResizable(True)
         scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_left.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_left.setFixedWidth(380)
+        scroll_left.setFixedWidth(390)
 
         left_panel = QWidget()
         layout_left = QVBoxLayout(left_panel)
@@ -301,30 +324,61 @@ class MainWindow(QMainWindow):
         layout_time = QGridLayout(grp_time)
         layout_time.setSpacing(8)
 
-        layout_time.addWidget(QLabel("起始时间:"), 0, 0)
+        layout_time.addWidget(QLabel("时间模式:"), 0, 0)
+        self.combo_time_mode = QComboBox()
+        self.combo_time_mode.addItem("自定义时段 (Custom Period)", "period")
+        self.combo_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
+        self.combo_time_mode.currentIndexChanged.connect(self._on_time_mode_changed)
+        layout_time.addWidget(self.combo_time_mode, 0, 1)
+
+        self.lbl_start = QLabel("起始时间:")
+        layout_time.addWidget(self.lbl_start, 1, 0)
         self.time_start = QDateTimeEdit(QDateTime.currentDateTime())
         self.time_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_start.setCalendarPopup(True)
-        layout_time.addWidget(self.time_start, 0, 1)
+        self.time_start.dateTimeChanged.connect(self._update_sample_estimate)
+        layout_time.addWidget(self.time_start, 1, 1)
 
-        layout_time.addWidget(QLabel("结束时间:"), 1, 0)
+        self.lbl_end = QLabel("结束时间:")
+        layout_time.addWidget(self.lbl_end, 2, 0)
         self.time_end = QDateTimeEdit(QDateTime.currentDateTime().addDays(1))
         self.time_end.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_end.setCalendarPopup(True)
-        layout_time.addWidget(self.time_end, 1, 1)
+        self.time_end.dateTimeChanged.connect(self._update_sample_estimate)
+        layout_time.addWidget(self.time_end, 2, 1)
 
-        layout_time.addWidget(QLabel("采样间隔:"), 2, 0)
+        self.lbl_year = QLabel("预测年份:")
+        layout_time.addWidget(self.lbl_year, 3, 0)
+        self.spin_year = QSpinBox()
+        self.spin_year.setRange(1950, 2099)
+        self.spin_year.setValue(2024)
+        self.spin_year.valueChanged.connect(self._update_sample_estimate)
+        layout_time.addWidget(self.spin_year, 3, 1)
+
+        layout_time.addWidget(QLabel("采样间隔:"), 4, 0)
         self.combo_freq = QComboBox()
-        self.combo_freq.addItems(["10分钟 (10min)", "15分钟 (15min)", "30分钟 (30min)", "1小时 (1h)", "2小时 (2h)"])
-        self.combo_freq.setCurrentIndex(3)
-        layout_time.addWidget(self.combo_freq, 2, 1)
+        self.combo_freq.addItem("5分钟 (5min)", "5min")
+        self.combo_freq.addItem("6分钟 (6min)", "6min")
+        self.combo_freq.addItem("10分钟 (10min)", "10min")
+        self.combo_freq.addItem("15分钟 (15min)", "15min")
+        self.combo_freq.addItem("30分钟 (30min)", "30min")
+        self.combo_freq.addItem("1小时 (1h)", "1h")
+        self.combo_freq.addItem("2小时 (2h)", "2h")
+        self.combo_freq.setCurrentIndex(4)  # 默认 30min
+        self.combo_freq.currentIndexChanged.connect(self._update_sample_estimate)
+        layout_time.addWidget(self.combo_freq, 4, 1)
 
-        layout_time.addWidget(QLabel("输入时区:"), 3, 0)
+        layout_time.addWidget(QLabel("输入时区:"), 5, 0)
         self.combo_tz = QComboBox()
         self.combo_tz.addItem("UTC (世界标准时)", "UTC")
         self.combo_tz.addItem("本地时间 (Local Time)", "local")
         self.combo_tz.currentIndexChanged.connect(self._on_timezone_changed)
-        layout_time.addWidget(self.combo_tz, 3, 1)
+        layout_time.addWidget(self.combo_tz, 5, 1)
+
+        layout_time.addWidget(QLabel("预期样本:"), 6, 0)
+        self.lbl_sample_count = QLabel("-")
+        self.lbl_sample_count.setStyleSheet("color: #38bdf8; font-weight: bold;")
+        layout_time.addWidget(self.lbl_sample_count, 6, 1)
 
         layout_left.addWidget(grp_time)
 
@@ -538,11 +592,10 @@ class MainWindow(QMainWindow):
             self.combo_const.setCurrentIndex(idx_const)
 
         # 联动 config.yaml 采样步长配置
-        def_freq = tide_cfg.get('default_freq', '1h')
-        for i in range(self.combo_freq.count()):
-            if def_freq in self.combo_freq.itemText(i):
-                self.combo_freq.setCurrentIndex(i)
-                break
+        def_freq = tide_cfg.get('default_freq', '30min')
+        idx_freq = self.combo_freq.findData(def_freq)
+        if idx_freq >= 0:
+            self.combo_freq.setCurrentIndex(idx_freq)
 
         if default_tz == 'UTC':
             now_dt = QDateTime.currentDateTimeUtc()
@@ -552,7 +605,52 @@ class MainWindow(QMainWindow):
         self.time_start.setDateTime(now_dt)
         self.time_end.setDateTime(now_dt.addDays(1))
 
+        self.lbl_year.setVisible(False)
+        self.spin_year.setVisible(False)
         self.current_scalar_datum = {}
+        self._update_sample_estimate()
+
+    def _on_time_mode_changed(self):
+        mode = self.combo_time_mode.currentData()
+        is_year = (mode == 'year')
+        self.lbl_start.setVisible(not is_year)
+        self.time_start.setVisible(not is_year)
+        self.lbl_end.setVisible(not is_year)
+        self.time_end.setVisible(not is_year)
+        self.lbl_year.setVisible(is_year)
+        self.spin_year.setVisible(is_year)
+        self._update_sample_estimate()
+
+    def _update_sample_estimate(self):
+        mode = self.combo_time_mode.currentData()
+        freq = self.combo_freq.currentData() or "30min"
+        freq_minutes = 30
+        if 'min' in freq:
+            try:
+                freq_minutes = int(freq.replace('min', ''))
+            except Exception:
+                freq_minutes = 30
+        elif 'h' in freq:
+            try:
+                freq_minutes = int(freq.replace('h', '')) * 60
+            except Exception:
+                freq_minutes = 60
+
+        if mode == 'year':
+            year = self.spin_year.value()
+            import calendar
+            days = 366 if calendar.isleap(year) else 365
+            total_samples = int(days * 24 * (60 / freq_minutes))
+            self.lbl_sample_count.setText(f"{total_samples:,} 点 (半开区间)")
+        else:
+            dt_start = self.time_start.dateTime().toPyDateTime()
+            dt_end = self.time_end.dateTime().toPyDateTime()
+            diff_sec = (dt_end - dt_start).total_seconds()
+            if diff_sec <= 0:
+                self.lbl_sample_count.setText("非法 (结束需晚于起始)")
+            else:
+                samples = int(diff_sec / (freq_minutes * 60)) + 1
+                self.lbl_sample_count.setText(f"约 {samples:,} 点 (闭区间)")
 
     def _on_timezone_changed(self):
         new_tz = self.combo_tz.currentData()
@@ -616,24 +714,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "纬度超界", "纬度范围必须在 -90° 到 +90° 之间！")
             return
 
-        t_start = self.time_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
-        t_end = self.time_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
-
-        if self.time_start.dateTime() >= self.time_end.dateTime():
-            QMessageBox.warning(self, "时间错误", "起始时间必须早于结束时间！")
-            return
-
-        freq_map = {
-            "10分钟 (10min)": "10min",
-            "15分钟 (15min)": "15min",
-            "30分钟 (30min)": "30min",
-            "1小时 (1h)": "1h",
-            "2小时 (2h)": "2h"
-        }
-        freq = freq_map.get(self.combo_freq.currentText(), "1h")
+        mode = self.combo_time_mode.currentData()
+        freq = self.combo_freq.currentData() or "30min"
         constituents = self.combo_const.currentData()
         source_tz = self.combo_tz.currentData()
         datum_mode = self.combo_datum.currentData()
+
+        if mode == 'year':
+            year = self.spin_year.value()
+            t_start = f"{year:04d}-01-01 00:00:00"
+            t_end = f"{year + 1:04d}-01-01 00:00:00"
+            inclusive = 'left'
+        else:
+            t_start = self.time_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+            t_end = self.time_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+            inclusive = 'both'
+            if self.time_start.dateTime() >= self.time_end.dateTime():
+                QMessageBox.warning(self, "时间错误", "起始时间必须早于结束时间！")
+                return
 
         self.btn_run_single.setEnabled(False)
         self.prog_single.setValue(5)
@@ -647,7 +745,8 @@ class MainWindow(QMainWindow):
             freq=freq,
             constituents=constituents,
             source_tz=source_tz,
-            datum_mode=datum_mode
+            datum_mode=datum_mode,
+            inclusive=inclusive
         )
         self.worker.progress.connect(self._on_single_progress)
         self.worker.finished.connect(self._on_single_finished)
@@ -665,7 +764,7 @@ class MainWindow(QMainWindow):
         self.btn_export_csv.setEnabled(True)
         self.btn_export_excel.setEnabled(True)
         self.prog_single.setValue(100)
-        self.status_bar.showMessage(f"模拟计算完成！共生成 {len(df)} 个时间步长点。")
+        self.status_bar.showMessage(f"模拟计算完成！共生成 {len(df):,} 个时间步长点。")
 
         # 更新极值指标卡片与常数
         self._update_stat_cards(df)
@@ -709,17 +808,17 @@ class MainWindow(QMainWindow):
                 self.lbl_range.setText("<span style='color:#94a3b8;'>-</span>")
 
         # 更新静态高程基准参数
-        mdt_v = self.current_scalar_datum.get('mdt_m', np.nan)
-        dn_v = self.current_scalar_datum.get('delta_n_m', np.nan)
-        geoid_v = self.current_scalar_datum.get('n_egm2008_m', np.nan)
-        ref_g = self.current_scalar_datum.get('datum_ref_geoid', 'GOCO06s')
+        mdt_v = _safe_float(self.current_scalar_datum.get('mdt_m', np.nan))
+        dn_v = _safe_float(self.current_scalar_datum.get('delta_n_m', np.nan))
+        geoid_v = _safe_float(self.current_scalar_datum.get('n_egm2008_m', np.nan))
+        ref_g = str(self.current_scalar_datum.get('datum_ref_geoid', 'GOCO06s'))
 
-        self.lbl_mdt.setText(f"<b>{mdt_v:+.4f} m</b>" if not np.isnan(mdt_v) else "<span style='color:#94a3b8;'>NaN</span>")
-        if not np.isnan(dn_v):
+        self.lbl_mdt.setText(f"<b>{mdt_v:+.4f} m</b>" if np.isfinite(mdt_v) else "<span style='color:#94a3b8;'>NaN</span>")
+        if np.isfinite(dn_v):
             self.lbl_delta_n.setText(f"<b>{dn_v:+.4f} m</b> <span style='font-size:10px;color:#94a3b8;'>({ref_g})</span>")
         else:
             self.lbl_delta_n.setText(f"<span style='color:#94a3b8;'>NaN ({ref_g})</span>")
-        self.lbl_geoid_n.setText(f"<b>{geoid_v:+.3f} m</b>" if not np.isnan(geoid_v) else "<span style='color:#94a3b8;'>NaN</span>")
+        self.lbl_geoid_n.setText(f"<b>{geoid_v:+.3f} m</b>" if np.isfinite(geoid_v) else "<span style='color:#94a3b8;'>NaN</span>")
 
         # 更新网格质量评价标识
         qc_warn = self.current_scalar_datum.get('qc_warning', 'NORMAL')
@@ -761,15 +860,20 @@ class MainWindow(QMainWindow):
         )
 
     def _populate_table(self, df):
+        preview_limit = 2000
+        total_rows = len(df)
+        df_view = df.iloc[:preview_limit] if total_rows > preview_limit else df
+
         self.table_single.setRowCount(0)
-        self.table_single.setRowCount(len(df))
+        self.table_single.setRowCount(len(df_view))
 
         def _fmt(val, decimals=3):
             if val is None or pd.isna(val):
                 return "NaN"
             return f"{float(val):+.{decimals}f}"
 
-        for row_idx, row in df.iterrows():
+        for row_idx in range(len(df_view)):
+            row = df_view.iloc[row_idx]
             t_utc = str(row.get('datetime_utc', ''))[:19]
             t_inp = str(row.get('datetime_input', row.get('datetime', '')))[:19]
             msl_val = _fmt(row.get('tide_msl_m', row.get('tide_total_m', np.nan)), 3)
@@ -793,6 +897,11 @@ class MainWindow(QMainWindow):
                 if text_color is not None:
                     item.setForeground(text_color)
                 self.table_single.setItem(row_idx, col_idx, item)
+
+        if total_rows > preview_limit:
+            self.status_bar.showMessage(
+                f"模拟计算完成！共生成 {total_rows:,} 个时间步长点 (界面表格已截断预览前 {preview_limit:,} 行，可通过导出按钮全量保存)。"
+            )
 
     def _export_csv(self):
         if self.current_result_df is None:
@@ -915,7 +1024,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.2</h3>"
+            "<h3>CoastTideX v1.3</h3>"
             "<p><b>全球海岸带潮位模拟与高程基准转换系统</b></p>"
             "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的潮汐预测与严密基准转换工具。</p>"
             "<ul>"
@@ -923,13 +1032,20 @@ class MainWindow(QMainWindow):
             "<li><b>四大多元基准体系</b>: "
             "<ul>"
             "<li>MSL (相对平均海平面)</li>"
-            "<li>GOCO06s (MDT 原始大地水准面基准 / 地中海与黑海 EIGEN-6C4)</li>"
+            "<li>MDT 原始大地水准面基准 (全球大洋 GOCO06s / 地中海与黑海 EIGEN-6C4 矢量多边形判定)</li>"
             "<li>EGM2008 (经 ΔN 改正的严密海拔正高)</li>"
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
-            "<li><b>平均动态地形</b>: CNES-CLS22 MDT (20年基准)</li>"
+            "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>新版增强 (v1.2)</b>: 窗口自由拉伸滚动布局、纯MSL解耦计算、动态时区换算、夏令时稳健支持</li>"
+            "<li><b>v1.3 新特性</b>: "
+            "<ul>"
+            "<li>地中海/黑海精确矢量多边形掩膜与双大地水准面差值引擎（内置 EIGEN-6C4 与 GOCO06s 差值栅格）；</li>"
+            "<li>单点连续时段与整年预测模式（2024 闰年 30min 采样严格生成 17,568 样本点）；</li>"
+            "<li>动态时间分块 (Time-Chunking) 引擎，支持多年长时序平稳流式计算与实时进度汇报；</li>"
+            "<li>潜在天文潮淹没频率 (ECDF/CCDF) 向量化分析与 10m DEM 栅格解算脚本；</li>"
+            "<li>表格 2,000 行极速预览与 100% 全量 CSV/Excel 导出解耦架构。</li>"
+            "</ul></li>"
             "</ul>"
             "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes & scipy</p>"
         )

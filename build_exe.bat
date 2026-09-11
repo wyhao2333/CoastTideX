@@ -14,8 +14,7 @@ if not exist ".venv\Scripts\pyinstaller.exe" (
 echo [*] Running PyInstaller...
 ".venv\Scripts\pyinstaller.exe" --noconfirm --onedir --windowed ^
     --name "CoastTideX" ^
-    --add-data "data/geoid/us_nga_egm08_25.tif;data/geoid" ^
-    --add-data "data/geoid/delta_n_goco06s_minus_egm2008.tif;data/geoid" ^
+    --add-data "data/geoid;data/geoid" ^
     --add-data "config.yaml;." ^
     --hidden-import "pyfes" ^
     --hidden-import "rasterio" ^

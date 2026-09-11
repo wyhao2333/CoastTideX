@@ -35,6 +35,8 @@ outputs/
 *.tiff
 !data/geoid/*.tif
 !data/geoid/*.tiff
+data/geoid/height_anomaly_ell_*.tiff
+data/geoid/height_anomaly_ell_*.tif
 
 # IDE 与操作系统临时文件
 .vscode/

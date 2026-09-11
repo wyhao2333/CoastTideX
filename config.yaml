@@ -1,5 +1,5 @@
 # CoastTideX 配置文件
-# 全球海岸带潮位模拟与高程基准转换系统 v1.2
+# 全球海岸带潮位模拟与高程基准转换系统 v1.3
 
 # 数据路径配置 (支持绝对路径或相对项目根目录路径)
 paths:
@@ -9,14 +9,19 @@ paths:
   # FES2022b 规则外推网格目录 (备用)
   fes_extrapolated_dir: "fes2022b/ocean_tide_extrapolated"
   
-  # CNES-CLS22 MDT 数据路径 (参考水准面为 GOCO06s)
+  # CNES-CLS22 MDT 数据路径 (全球大洋参考 GOCO06s，地中海/黑海参考 EIGEN-6C4)
   mdt_nc: "mdt_cls22/mdt_hybrid_cnes_cls22_cmems2020_global.nc"
   
   # EGM2008 2.5分高分辨率全球大地水准面起伏 GeoTIFF (项目内自带)
   egm2008_tif: "data/geoid/us_nga_egm08_25.tif"
 
-  # GOCO06s 与 EGM2008 大地水准面差值栅格 (项目内自带，Delta N = N_GOCO06s - N_EGM2008)
+  # 全球大洋 GOCO06s 与 EGM2008 大地水准面差值栅格 (项目内自带，Delta N = N_GOCO06s - N_EGM2008)
+  delta_n_goco06s_egm2008_tif: "data/geoid/delta_n_goco06s_minus_egm2008.tif"
+  # 兼容旧版键名
   delta_n_tif: "data/geoid/delta_n_goco06s_minus_egm2008.tif"
+
+  # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (可选外部补充，Delta N = N_EIGEN6C4 - N_EGM2008)
+  delta_n_eigen6c4_egm2008_tif: "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
 
 # 潮位计算配置
 tide:
@@ -29,6 +34,9 @@ tide:
   # 默认预测时间步长 (例如: '10min', '15min', '30min', '1h')
   default_freq: "1h"
 
+  # 整年预测模式默认时间步长 (推荐 30min，2024闰年严格对应 17,568 样本点)
+  annual_default_freq: "30min"
+
 # 界面与展示默认配置
 gui:
   theme: "dark"
@@ -36,3 +44,4 @@ gui:
   default_lon: 122.0
   default_lat: 31.0
   default_location_name: "长江口 (Changjiang Estuary)"
+

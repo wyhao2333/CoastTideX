@@ -1,10 +1,13 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface)
-用于脚本批处理、无人值守自动化以及与 GIS 工作流整合。
+CoastTideX 命令行工具 (Command-Line Interface v1.3)
+用于脚本批处理、无人值守自动化、年度连续模拟以及与 GIS 工作流整合。
 
 使用示例:
-    # 预测单点
+    # 自定义时段单点预测
     python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --output output.csv
+
+    # 2024 整年高密度预测 (30min步长，半开区间严格 17,568 样本点)
+    python cli.py single --lon 122.0 --lat 31.0 --year 2024 --step 30min --output tide_2024.csv
 
     # 批量计算
     python cli.py batch --input input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
@@ -32,17 +35,19 @@ from core.utils import export_dataframe
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.3")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点) 或 batch (批量)")
 
     # 单点模式参数
-    p_single = subparsers.add_parser("single", help="单点时间序列预测")
+    p_single = subparsers.add_parser("single", help="单点时间序列预测 (支持自定义时段或整年模式)")
     p_single.add_argument("--lon", type=float, required=True, help="目标经度 (-180~180 或 0~360)")
     p_single.add_argument("--lat", type=float, required=True, help="目标纬度 (-90~90)")
-    p_single.add_argument("--start", type=str, required=True, help="起始时间 (如 '2026-09-10 00:00:00')")
-    p_single.add_argument("--end", type=str, required=True, help="结束时间 (如 '2026-09-11 00:00:00')")
+    p_single.add_argument("--start", type=str, default=None, help="起始时间 (如 '2026-09-10 00:00:00')")
+    p_single.add_argument("--end", type=str, default=None, help="结束时间 (如 '2026-09-11 00:00:00')")
+    p_single.add_argument("--year", type=int, default=None, help="快捷整年预测年份 (如 2024，指定时自动采用半开区间整年模式)")
     p_single.add_argument("--step", type=str, default="1h", help="时间步长 (默认: 1h)")
+    p_single.add_argument("--inclusive", type=str, default="both", choices=["both", "left", "right", "neither"], help="时间区间包含模式 (默认: both，整年模式下自动为 left)")
     p_single.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
     p_single.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
     p_single.add_argument("--output", "-o", type=str, default="predicted_tide.csv", help="输出文件路径")
@@ -68,19 +73,34 @@ def main():
 
     if args.mode == "single":
         print(f"[*] 启动单点潮位预测: ({args.lon}°, {args.lat}°)")
-        print(f"[*] 时段: {args.start} -> {args.end}, 步长: {args.step}, 时区: {args.tz}")
 
-        df = predictor.predict_series(
-            lon=args.lon,
-            lat=args.lat,
-            start_time=args.start,
-            end_time=args.end,
-            freq=args.step,
-            constituents=args.constituents,
-            source_tz=args.tz
-        )
+        if args.year is not None:
+            print(f"[*] 运行模式: 整年预测模式 ({args.year} 年), 步长: {args.step}, 时区: {args.tz}")
+            df = predictor.predict_year(
+                lon=args.lon,
+                lat=args.lat,
+                year=args.year,
+                freq=args.step,
+                constituents=args.constituents,
+                source_tz=args.tz
+            )
+        else:
+            if not args.start or not args.end:
+                print("[ERROR] 自定义时段模式必须同时提供 --start 和 --end 参数，或提供 --year 指定整年！")
+                sys.exit(1)
+            print(f"[*] 运行模式: 自定义时段 ({args.start} -> {args.end}), 步长: {args.step}, 包含语义: {args.inclusive}, 时区: {args.tz}")
+            df = predictor.predict_series(
+                lon=args.lon,
+                lat=args.lat,
+                start_time=args.start,
+                end_time=args.end,
+                freq=args.step,
+                inclusive=args.inclusive,
+                constituents=args.constituents,
+                source_tz=args.tz
+            )
 
-        print("[*] 严密计算四大垂直基准 (MSL, GOCO06s, EGM2008, WGS84)...")
+        print("[*] 严密计算多元垂直基准 (MSL, MDT_REF, GOCO06s, EGM2008, WGS84)...")
         datum_res = transformer.convert_tide_datums(
             df['tide_total_m'].values, args.lon, args.lat
         )
@@ -89,9 +109,12 @@ def main():
         df['mdt_m'] = datum_res['mdt_m']
         df['delta_n_m'] = datum_res['delta_n_m']
         df['n_egm2008_m'] = datum_res['n_egm2008_m']
+        df['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
         df['h_goco06s_m'] = datum_res['h_goco06s_m']
         df['h_egm2008_m'] = datum_res['h_egm2008_m']
         df['h_wgs84_m'] = datum_res['h_wgs84_m']
+        df['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+        df['qc_warning'] = datum_res['qc_warning']
 
         if 'quality_flag' in df.columns:
             flags = df['quality_flag'].values
@@ -101,7 +124,7 @@ def main():
                 print("[WARN] 提示: 预测序列中包含近岸动力学外推点（Flag < 0），潮位精度可能低于开阔海域！")
 
         export_dataframe(df, args.output)
-        print(f"[OK] 预测成功，包含完整四大基准列，结果已保存至: {args.output}")
+        print(f"[OK] 预测成功，共生成 {len(df):,} 行记录，结果已保存至: {args.output}")
 
     elif args.mode == "batch":
         print(f"[*] 读取批量输入文件: {args.input}")
@@ -117,7 +140,7 @@ def main():
             source_tz=args.tz
         )
 
-        print("[*] 向量化批量计算四大垂直基准...")
+        print("[*] 向量化批量计算多元垂直基准...")
         lons = df_out[args.lon_col].astype(float).values
         lats = df_out[args.lat_col].astype(float).values
         tide_msl = df_out['tide_total_m'].values
@@ -127,9 +150,12 @@ def main():
         df_out['mdt_m'] = datum_res['mdt_m']
         df_out['delta_n_m'] = datum_res['delta_n_m']
         df_out['n_egm2008_m'] = datum_res['n_egm2008_m']
+        df_out['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
         df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
         df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
         df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
+        df_out['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+        df_out['qc_warning'] = datum_res['qc_warning']
 
         if 'quality_flag' in df_out.columns:
             flags = df_out['quality_flag'].values
@@ -141,7 +167,7 @@ def main():
                 print(f"[WARN] 提示: 批量解算中包含 {n_neg} 个近岸外推点 (Flag < 0)。")
 
         export_dataframe(df_out, args.output)
-        print(f"[OK] 批量解算完成，已导出至: {args.output}")
+        print(f"[OK] 批量解算完成，共生成 {len(df_out):,} 行记录，已导出至: {args.output}")
 
 
 if __name__ == '__main__':

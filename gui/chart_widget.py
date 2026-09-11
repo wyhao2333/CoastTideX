@@ -171,10 +171,24 @@ class TideChartWidget(QWidget):
                 peaks = [p for p in peaks if valid_mask[p]]
                 troughs = [t for t in troughs if valid_mask[t]]
 
-                # 标记高潮点 (波峰)
+                # 标记高潮点 (波峰) 与低潮点 (波谷)
+                # 当数据点较多 (例如整年 17,568 点) 时，避免绘制数百个文本框导致界面卡顿和视觉重叠
+                is_dense = len(peaks) > 20 or len(times) > 2000
+                annot_peaks = set()
+                annot_troughs = set()
+
+                if is_dense:
+                    # 仅标注全局极值与前2大峰值/谷值
+                    if len(peaks) > 0:
+                        top_p_indices = np.argsort([primary_series[p] for p in peaks])[-2:]
+                        annot_peaks = {peaks[i] for i in top_p_indices}
+                    if len(troughs) > 0:
+                        top_t_indices = np.argsort([primary_series[t] for t in troughs])[:2]
+                        annot_troughs = {troughs[i] for i in top_t_indices}
+
                 if len(peaks) > 0:
-                    self.ax.scatter(times[peaks], primary_series[peaks], color='#ef4444', s=45, zorder=6, label='高潮点 (High Tide)')
-                    for p in peaks:
+                    self.ax.scatter(times[peaks], primary_series[peaks], color='#ef4444', s=25 if is_dense else 45, zorder=6, label='高潮点 (High Tide)')
+                    for p in (annot_peaks if is_dense else peaks):
                         t_str = pd.to_datetime(times[p]).strftime('%m-%d %H:%M')
                         self.ax.annotate(
                             f"{primary_series[p]:.2f}m\n{t_str}",
@@ -186,8 +200,8 @@ class TideChartWidget(QWidget):
 
                 # 标记低潮点 (波谷)
                 if len(troughs) > 0:
-                    self.ax.scatter(times[troughs], primary_series[troughs], color='#10b981', s=45, zorder=6, label='低潮点 (Low Tide)')
-                    for tr in troughs:
+                    self.ax.scatter(times[troughs], primary_series[troughs], color='#10b981', s=25 if is_dense else 45, zorder=6, label='低潮点 (Low Tide)')
+                    for tr in (annot_troughs if is_dense else troughs):
                         t_str = pd.to_datetime(times[tr]).strftime('%m-%d %H:%M')
                         self.ax.annotate(
                             f"{primary_series[tr]:.2f}m\n{t_str}",
@@ -205,8 +219,14 @@ class TideChartWidget(QWidget):
         self.ax.set_title(f"潮位模拟波形曲线 - {location_title} ({tz_label})", color='#f8fafc', fontsize=13, pad=12, fontweight='bold')
         self.ax.set_ylabel("高程 / 水位高度 (米, m)", color='#cbd5e1', fontsize=11)
 
-        # 时间格式化
-        self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+        # 自适应时间格式化 (长序列跨度自动切换显示格式)
+        time_span_days = (pd.to_datetime(times[-1]) - pd.to_datetime(times[0])).total_seconds() / 86400.0 if len(times) > 1 else 1.0
+        if time_span_days > 60:
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+        elif time_span_days > 7:
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+        else:
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
         self.figure.autofmt_xdate(rotation=20, ha='right')
 
         self.ax.grid(True, linestyle='--', alpha=0.25, color='#94a3b8')

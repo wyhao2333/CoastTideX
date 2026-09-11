@@ -1,7 +1,7 @@
 # CoastTideX: High-Precision Global Coastal Tide Simulation & Vertical Datum System
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.2-blue.svg" alt="Release v1.2">
+  <img src="https://img.shields.io/badge/Release-v1.3-blue.svg" alt="Release v1.3">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -27,27 +27,32 @@ The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global oce
 ### ✨ Key Features
 
 * 🌊 **FES2022b Native Non-Structured Mesh**: Directly loads the 3.77 GB native triangular mesh, providing ultimate fidelity in coastal zones with 34 diurnal, semi-diurnal, shallow-water non-linear, and long-period constituents.
+* 📅 **Full-Year & Long Time-Series High-Density Prediction (v1.3)**:
+  * **Custom Period & Year Mode Toggle**: Seamlessly switch between arbitrary date intervals and convenient annual presets (e.g. Year 2024);
+  * **Strict Half-Open Interval & Sample Count Fidelity**: Employs $[start, end)$ half-open interval, rigorously generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years) with zero boundary overlap or drops;
+  * **Real-time Sample Budget**: Instantly updates expected sample count label to prevent accidental memory blowup.
+* ⏳ **Adaptive Time-Chunking Stream Engine (v1.3)**:
+  * The evaluation engine introduces an automated 5,000-point time-chunking pipeline for continuous multi-year or high-frequency (5min/6min/10min) simulations, reporting progress per slice and completely eliminating GUI freezes and unhandled crash risks;
+  * Validated through continuous 2-year simulation stress testing (35,089 timestamps) without interruption.
 * ⚡ **Adaptive Spatial Chunking & Local BBox Caching**:
   * **Single Station Mode**: Automatically bounds the region of interest around input coordinates, indexing only local topology in memory for sub-second query speeds and minimal RAM footprint (~1.2 GB);
   * **Global Discrete Batch Mode**: Employs $5^\circ \times 5^\circ$ adaptive spatial mesh chunking, preventing memory blowup when processing scattered worldwide points.
-* 📐 **Rigorous Four-Tier Vertical Datum Pipeline**:
-  * **MSL Datum**: Instantaneous tidal oscillation relative to local Mean Sea Level;
-  * **GOCO06s Datum**: Relative to the raw CNES-CLS22 MDT reference geoid ($H_{\text{GOCO06S}} = \text{Tide} + \text{MDT}$);
-  * **EGM2008 Orthometric Datum**: Rigorously calibrated with the geoid difference correction term $\Delta N = N_{\text{GOCO06S}} - N_{\text{EGM2008}}$ ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N$);
-  * **WGS84 Ellipsoidal Datum**: 3D geometric ellipsoidal height ($h_{\text{WGS84}} = H_{\text{EGM2008}} + N_{\text{EGM2008}}$), immediately compatible with GNSS/RTK observations;
-  * **Mediterranean & Black Sea Geoid Datum Identification (v1.2)**: Automatically distinguishes the regional EIGEN-6C4 ($d/o=2190$) geoid datum employed by Hybrid MDT in the Mediterranean and Black Sea.
-* 🎯 **True Bilinear Spatial Interpolation & Strict NaN Propagation**:
+* 📐 **Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3)**:
+  * **Open Oceans Geoid**: GOCO06s reference datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$);
+  * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, with `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` bundled);
+  * **Unified Primary Variable & Semantic Truth**: Primary variable `h_mdt_ref_m` denotes height relative to MDT reference geoid; `h_goco06s_m` is strictly `NaN` in Mediterranean/Black Sea (no faking); deep inland points strictly propagate `NaN`;
+  * **Precise Closed Polygon Masks**: Replaces loose bounding boxes with closed polygons (`matplotlib.path.Path`), eliminating misclassification around the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea.
+* 🌊 **Potential Astronomical Tidal Inundation Frequency Analysis & 10m DEM Raster Tool (v1.3)**:
+  * Vectorized complementary empirical cumulative distribution function (CCDF / 1 - ECDF) with `np.searchsorted` for instant coastal terrain elevation inundation probability and duration analysis;
+  * Provides dedicated tool `scripts/calculate_inundation_raster.py` for block-streaming 10m/30m coastal DEMs into 0~100% annual potential astronomical inundation GeoTIFF rasters.
+* 🎯 **True Bilinear Spatial Interpolation & Target-Aware Loading (v1.3)**:
   * Applies true bilinear interpolation (`map_coordinates(order=1)`) to EGM2008 and $\Delta N$ GeoTIFFs;
-  * Inland land points or queries outside valid ocean domain strictly propagate `NaN`—never faking `0.0`.
-* 🖥️ **Modern Desktop GUI (PyQt6) & Enhancements (v1.2)**:
-  * **Adaptive Scrolling & Arbitrary Window Resizing**: The control panel is enclosed in a `QScrollArea`, completely removing vertical resizing limits for 768p/1080p and high-DPI displays;
-  * **Decoupled Pure MSL Mode**: Enables instant tidal predictions without requiring external MDT or Geoid rasters;
-  * **Dynamic Timezone Switching**: Instantaneously re-indexes chart axes and tabular data when switching timezone without re-running calculations;
-  * **DST Boundary Safety**: Handles daylight saving time transitions smoothly without NaT drops;
-  * One-click presets for major world estuaries and ports (Yangtze, Pearl River, Hangzhou Bay, Bohai, Rotterdam, New York, San Francisco, Sydney, etc.);
-  * Interactive Matplotlib canvas with pan/zoom and **automatic peak & trough detection calibrated to semi-diurnal physical windows (~10-12h)**;
-  * Multi-datum dynamic curve overlay, real-time statistical cards, and dual timezone support (UTC / Local Time);
-  * **Integrated User Manual Dialog**: Access complete documentation directly via `Help -> 📖 User Manual & Documentation`.
+  * Decouples target datums: pure MSL or EGM2008 workflows do not require loading unneeded WGS84 rasters; missing rasters raise explicit `DatumDataError` in `strict=True` or output `qc_warning`.
+* 🖥️ **Modern Desktop GUI (PyQt6) & Big Data Safety (v1.3)**:
+  * **Safe Preview Truncation**: Capped to first 2,000 rows in GUI table preview to eliminate freezing while exporting 100% full dataset to CSV/Excel;
+  * **Smart Chart Downsampling & Adaptive Peaks**: Automatic decimation and adaptive peak/trough annotation filtering for responsive exploration of 10,000+ points;
+  * **Adaptive Scrolling Panel**: Control panel wrapped in `QScrollArea`, completely removing vertical resizing limits for 768p/1080p displays;
+  * **Dynamic Timezone & DST Resilience**: Instant re-indexing of chart axes and tables upon changing timezone without recalculation; safe transitions across daylight saving time.
 * 📑 **Batch File Processing & Vectorized Export**: High-throughput vectorized resolution for large tabular CSV files with export to CSV or Excel.
 * 📦 **Standalone Executable (.exe) Readiness**: Launch via `run_gui.bat` or compile into a standalone Windows `.exe` application via `build_exe.bat`.
 
@@ -109,25 +114,30 @@ $$\eta(t) = \sum_{i=1}^{34} f_i(t) \cdot H_i(\lambda, \phi) \cdot \cos\left( \om
 * $f_i(t), u_i(t)$: Nodal modulation factors covering the 18.61-year lunar nodal cycle;
 * $h_{\text{LP}}(t)$: Equilibrium long-period tide.
 
-### 2. Rigorous Four-Tier Vertical Datum Pipeline
+#### 2. Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3)
 In simplified workflows, practitioners often equate $\text{Tide} + \text{MDT}$ directly to EGM2008 height. **This is scientifically inaccurate**.
-The CNES-CLS22 MDT model is computed with respect to the **GOCO06s satellite gravity geoid**, which differs globally from the **EGM2008 geoid** by $-6.63\text{m} \sim +6.79\text{m}$ (standard deviation $0.34\text{m}$).
+The CNES-CLS22 MDT model is a **hybrid geodetic product**:
+* **Global Open Oceans**: Referenced to the **GOCO06s satellite-only gravity geoid**, which globally diverges from the **EGM2008 geoid** by $-6.63\text{m} \sim +6.79\text{m}$ (standard deviation $0.34\text{m}$);
+* **Mediterranean & Black Sea**: Referenced to the regional ultra-high-degree **EIGEN-6C4 ($d/o=2190$)** geoid model.
 
-CoastTideX resolves this discrepancy through a mathematically rigorous geodetic transformation:
+CoastTideX v1.3 resolves this discrepancy through a mathematically rigorous geodetic transformation:
 
 1. **Instantaneous Tide relative to Mean Sea Level (MSL)**:
    $$\text{Tide}_{\text{MSL}}(\lambda, \phi, t) = \eta(t)$$
-2. **Sea Surface Height relative to GOCO06s Geoid**:
-   $$H_{\text{GOCO06S}}(\lambda, \phi, t) = \text{Tide}_{\text{MSL}}(\lambda, \phi, t) + \text{MDT}_{\text{CLS22}}(\lambda, \phi)$$
-3. **Orthometric Height relative to EGM2008 Geoid** (incorporating the geoid difference correction $\Delta N$):
-   $$H_{\text{EGM2008}}(\lambda, \phi, t) = H_{\text{GOCO06S}}(\lambda, \phi, t) + \Delta N(\lambda, \phi)$$
-   where $\Delta N(\lambda, \phi) = N_{\text{GOCO06S}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$.
+2. **Sea Surface Height relative to MDT Reference Geoid (Primary Variable)**:
+   $$H_{\text{MDT-REF}}(\lambda, \phi, t) = \text{Tide}_{\text{MSL}}(\lambda, \phi, t) + \text{MDT}_{\text{CLS22}}(\lambda, \phi)$$
+   * In open oceans, this represents height above the GOCO06s geoid ($H_{\text{GOCO06S}}$);
+   * In the Mediterranean and Black Sea, `h_goco06s_m` is strictly `NaN` (no faking), with the reference geoid automatically transitioning to EIGEN-6C4.
+3. **Orthometric Height relative to EGM2008 Geoid** (incorporating geoid difference correction $\Delta N$):
+   $$H_{\text{EGM2008}}(\lambda, \phi, t) = H_{\text{MDT-REF}}(\lambda, \phi, t) + \Delta N(\lambda, \phi)$$
+   * Global Ocean: $\Delta N(\lambda, \phi) = N_{\text{GOCO06S}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$;
+   * Mediterranean & Black Sea: $\Delta N(\lambda, \phi) = N_{\text{EIGEN-6C4}}(\lambda, \phi) - N_{\text{EGM2008}}(\lambda, \phi)$.
 4. **WGS84 3D Geometric Ellipsoidal Height**:
    $$h_{\text{WGS84}}(\lambda, \phi, t) = H_{\text{EGM2008}}(\lambda, \phi, t) + N_{\text{EGM2008}}(\lambda, \phi)$$
    where $N_{\text{EGM2008}}$ is extracted via true bilinear interpolation from the bundled global 2.5' EGM2008 raster (strictly eliminating the 1.25' half-pixel offset).
 
 ### 3. Quality Control (QC) Flags
-Every prediction point is tagged with an evaluation `quality_flag`:
+Every prediction point is tagged with an evaluation `quality_flag` and `qc_warning`:
 
 | Quality Flag | Definition | Scientific Meaning & Processing |
 | :---: | :---: | :--- |
@@ -136,16 +146,24 @@ Every prediction point is tagged with an evaluation `quality_flag`:
 | **Flag = 0** | Missing / Inland | Inland point or no tidal solution available. Tide and datums are set to `NaN` (no silent zeros). Highlighted in red. |
 
 ### 4. International Standard Tidal Prediction Intervals (Literature Benchmarks)
-CoastTideX supports 1min, 5min, 6min, 10min, 15min, 30min, and 1h sampling steps based on authoritative international standards:
+CoastTideX supports 5min, 6min, 10min, 15min, 30min, 1h, and 2h sampling steps based on authoritative international standards:
 
 | Recommended Step | Standard & Operational Scenario | Scientific Basis & Literature Citations |
 | :--- | :--- | :--- |
 | **6 minutes (0.1 h)** | **NOAA Operational Tide Gauges & Real-time Predictions** | **NOAA CO-OPS Operational Specification**: The gold standard across US real-time tide gauge networks. High frequency is essential for capturing shallow-water non-linear overtides ($M_4, MS_4, M_6$) and peak turning points. |
 | **10 ~ 15 minutes** | **IOC / GLOSS Global Tide Stations** | **UNESCO IOC / GLOSS Specifications**: Standard operational cadence for global sea-level monitoring stations, balancing wave peak fidelity with data volume. |
+| **30 minutes (0.5 h)** | **Annual High-Density Coastal Simulations (v1.3)** | **Coastal Hydrodynamic Modeling**: Optimal trade-off between computational efficiency and waveform fidelity. Rigorously yields 17,568 samples for leap year 2024. |
 | **1 hour (60 minutes)** | **Classical Harmonic Analysis & Long-term Sea Level** | **Foreman (1977) & Pawlowicz et al. (2002, T_TIDE)**: The standard input interval for classic harmonic tidal analysis and multi-decadal sea level variation research. |
 
----
+### 5. Potential Astronomical Tidal Inundation Frequency Analysis
+For coastal wetland conservation, mangrove zonation, and flood defense planning, evaluating the hydroperiod and inundation frequency under astronomical tidal forcing is critical.
+CoastTideX provides a vectorized complementary empirical cumulative distribution function (CCDF / 1 - ECDF):
 
+$$P_{\text{inundation}}(z) = P(\eta_{\text{tide}} > z) = 1 - F(z) = \frac{1}{N}\sum_{i=1}^N \mathbb{I}(\eta_i > z)$$
+
+Leveraging `np.searchsorted`, this $O(M \log N)$ algorithm calculates inundation frequency over annual time-series for single point elevations or massive Digital Elevation Model (DEM) arrays in sub-second time.
+
+---
 
 ## 🚀 Quick Start
 
@@ -154,8 +172,11 @@ Run `setup_env.bat` in the project root to automatically configure the dedicated
 
 Manual setup:
 ```bash
+# Create virtual environment
 python -m venv .venv
+# Activate environment (Windows)
 .venv\Scripts\activate
+# Install requirements
 pip install -r requirements.txt
 ```
 
@@ -166,47 +187,66 @@ Double-click `run_gui.bat` or run:
 ```
 
 ### 3. Command-Line Interface (CLI)
-Automate predictions using `cli.py`, with full support for timezones and all 4 datums:
-* **Single Location Time-Series**:
+Automate predictions using `cli.py`, with full support for timezones, annual presets, and all 4 datums:
+* **Single Location Time-Series (Custom Period)**:
   ```bash
   python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --tz UTC --output output.csv
+  ```
+* **Single Location Annual High-Density Prediction (Strictly 17,568 samples for 2024)**:
+  ```bash
+  python cli.py single --lon 122.0 --lat 31.0 --year 2024 --step 30min --output tide_2024.csv
   ```
 * **Batch Tabular Processing**:
   ```bash
   python cli.py batch --input points.csv --lon-col longitude --lat-col latitude --time-col datetime --tz UTC --output batch_out.csv
   ```
+* **Tidal Flat 10m DEM Inundation Frequency Raster Calculation**:
+  ```bash
+  python scripts/calculate_inundation_raster.py --dem tidal_flat_10m_dem.tif --out inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008
+  ```
 
 ### 4. Python API Usage
+
+#### (1) Annual 30-min High-Density Prediction (Strictly 17,568 samples for leap year 2024)
 ```python
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
+from core.utils import compute_inundation_frequency
 
 predictor = FESTidePredictor()
 transformer = DatumTransformer()
 
-# 1. 24-hour tidal simulation (UTC timezone)
-df = predictor.predict_series(
+# Predict full-year 2024 at 30-min resolution ([2024-01-01, 2025-01-01) half-open interval)
+df_year = predictor.predict_year(
     lon=122.0, lat=31.0,
-    start_time="2026-09-10 00:00:00",
-    end_time="2026-09-11 00:00:00",
-    freq="1h",
-    constituents="all",
+    year=2024,
+    freq="30min",
     source_tz="UTC"
 )
+print(f"2024 Sample Count: {len(df_year)}")  # Outputs exactly: 17568
 
-# 2. Rigorous vertical datum conversion
+# Rigorous vertical datum conversion
 datum_res = transformer.convert_tide_datums(
-    tide_msl_m=df['tide_total_m'].values,
+    tide_msl_m=df_year['tide_total_m'].values,
     lons=122.0,
     lats=31.0
 )
 
-df['tide_msl_m'] = datum_res['tide_msl_m']
-df['h_goco06s_m'] = datum_res['h_goco06s_m']
-df['h_egm2008_m'] = datum_res['h_egm2008_m']
-df['h_wgs84_m'] = datum_res['h_wgs84_m']
+df_year['tide_msl_m'] = datum_res['tide_msl_m']
+df_year['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
+df_year['h_goco06s_m'] = datum_res['h_goco06s_m']
+df_year['h_egm2008_m'] = datum_res['h_egm2008_m']
+df_year['h_wgs84_m'] = datum_res['h_wgs84_m']
 
-print(df[['datetime_utc', 'tide_msl_m', 'h_egm2008_m', 'h_wgs84_m']].head())
+# (2) Inundation frequency evaluation across coastal elevations (+1.5m, +2.0m, +2.5m)
+elevations = [1.5, 2.0, 2.5]
+freq_pct = compute_inundation_frequency(
+    water_levels_m=df_year['tide_msl_m'].values,
+    terrain_elevations_m=elevations,
+    as_percentage=True
+)
+for elev, pct in zip(elevations, freq_pct):
+    print(f"Inundation probability at elevation {elev:+.1f} m: {pct:.2f}%")
 ```
 
 ---
@@ -228,24 +268,26 @@ CoastTideX/
 ├── app.py                          # Desktop GUI entrypoint
 ├── cli.py                          # Headless CLI entrypoint
 ├── scripts/
-│   └── generate_delta_n.py         # ΔN geoid difference raster generation script
+│   ├── generate_delta_n.py         # Generalized ΔN raster generator (GOCO06s, EIGEN-6C4, etc.)
+│   └── calculate_inundation_raster.py # Coastal tidal flat 10m/30m DEM inundation frequency raster tool
 ├── data/
 │   └── geoid/
 │       ├── README_GEOID.md         # Geodetic provenance & ICGEM specifications
-│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (~72.5MB)
-│       └── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (~11.8MB)
+│       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (~76.9MB)
+│       ├── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (~22.7MB)
+│       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 - EGM2008 correction raster (~22.5MB, bundled)
 ├── core/                           # Core computation modules
-│   ├── tide_engine.py              # FES2022b tide evaluator & spatial chunking
-│   ├── datum_engine.py             # 4-tier vertical datum transformation & bilinear interpolation
-│   └── utils.py                    # Presets, coordinates, timezones (DST) & relative paths
+│   ├── tide_engine.py              # FES2022b evaluator, time-chunking, spatial chunking & annual prediction
+│   ├── datum_engine.py             # Dual-geoid Hybrid MDT transformation & polygon masks
+│   └── utils.py                    # Presets, coordinates, timezones (DST), inundation & safe metadata
 ├── gui/                            # PyQt6 desktop application
-│   ├── main_window.py              # Main window implementation (with QC badges)
-│   ├── chart_widget.py             # Matplotlib multi-datum waveform component
-│   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog
+│   ├── main_window.py              # Main window (single point, period, annual mode & safe table preview)
+│   ├── chart_widget.py             # Matplotlib waveform component (smart decimation & adaptive peaks)
+│   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog (v1.3)
 │   ├── settings_dialog.py          # Data source path configuration dialog
 │   └── styles.py                   # High-contrast dark QSS stylesheet
 └── tests/                          # Automated unit and integration test suite
-    └── test_engines.py             # Decoupled ground truth, closure, DST & portability tests
+    └── test_engines.py             # Comprehensive 22-test suite (full FES chain, leap year, closures)
 ```
 
 ---
@@ -257,6 +299,16 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 2. Find the standalone application in `dist/CoastTideX/CoastTideX.exe`.
 
 ## 📝 Changelog
+
+### v1.3 (2026-09)
+* **[Annual Mode & Long Time-Series]** Added Year Mode toggle with strict $[start, end)$ half-open interval, generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years), with dynamic sample budget estimation and coordinate validation;
+* **[Adaptive Time-Chunking Engine]** Implemented 5,000-point dynamic chunking with real-time per-slice progress callback in the tide engine, validated across 2-year continuous stress testing (35,089 timestamps) with zero memory/UI stalls;
+* **[Dual-Geoid Hybrid MDT]** Rigorously separated open oceans (GOCO06s) and Mediterranean/Black Sea (EIGEN-6C4) geodetic reference datums; introduced unified primary variable `h_mdt_ref_m`; strictly enforces `NaN` for `h_goco06s_m` in European hybrid zones to prevent datum spoofing; bundled `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`;
+* **[High-Precision Closed Polygon Masks]** Implemented `matplotlib.path.Path` closed boundary polygons for the Mediterranean and Black Sea, eliminating rectangular BBox misclassification in the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea;
+* **[Potential Inundation Frequency Analysis & 10m DEM Tool]** Added `compute_inundation_frequency` vectorized complementary empirical cumulative distribution function (CCDF) and released `scripts/calculate_inundation_raster.py` for block-streaming 10m/30m coastal DEMs into annual potential astronomical inundation GeoTIFFs;
+* **[GUI Performance & Big Data Safety]** Capped table preview to 2,000 rows while preserving 100% full dataset export for CSV/Excel; added chart decimation and adaptive peak/trough text labeling thresholds for responsive navigation across 10,000+ points;
+* **[Generalized ΔN Generation Script]** Upgraded `scripts/generate_delta_n.py` to support arbitrary reference models (GOCO06s / EIGEN-6C4) with strict spatial alignment checks and GeoTIFF tag metadata;
+* **[Comprehensive Test Suite Upgrade]** Expanded automated testing to **22/22 passing tests**, validating full FES2022b mesh operations, 2024 leap year 17,568-point fidelity, target-aware datum resolution, and DST boundary safety.
 
 ### v1.2 (2026-09)
 * **[UI Adaptive Resizing]** Enclosed the left control panel in a `QScrollArea` to remove vertical resizing limits on 768p/1080p and high-DPI displays;

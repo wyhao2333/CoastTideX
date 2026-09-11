@@ -1,12 +1,14 @@
 """
-CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.2)
+CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.3)
 基于 CNES/AVISO 官方 pyfes 库，利用原生非结构有限元网格 (LGP2) 进行高保真海岸带潮位解算。
 
 特性:
     1. 自适应局部 BBox 空间缓存，杜绝无意义的全网格扫描；
     2. 全球批量散点自适应空间网格分块 (Spatial Chunking)，彻底解决全球离散点退化为全地球加载的性能陷阱；
-    3. 严格的 UTC 时间尺度锚定与多时区自动规范化转换；
-    4. 跨子午线与反子午线（0°/360° 接缝）环形安全边界防御。
+    3. 长时间序列自适应时间分块（Time-Chunking）流式解算，保障年际与高密度时序计算平稳及实时进度反馈；
+    4. 整年高分辨率预测（predict_year）半开区间严格点数保真（2024 闰年精确生成 17,568 样本点）；
+    5. 严格的 UTC 时间尺度锚定与多时区自动规范化转换；
+    6. 跨子午线与反子午线（0°/360° 接缝）环形安全边界防御。
 """
 
 import os
@@ -23,7 +25,11 @@ except ImportError:
     cfg = None
     HAS_PYFES = False
 
-from .utils import normalize_longitude, convert_time_to_utc, load_app_config, resolve_project_path
+from .utils import (
+    normalize_longitude, convert_time_to_utc, load_app_config, resolve_project_path,
+    validate_coordinates, validate_time_params, build_time_index
+)
+from .datum_engine import DatumTransformer, DatumDataError, get_mdt_reference_geoid
 
 # 过滤 pyfes 分潮大小写 UserWarning 提示
 if HAS_PYFES:
@@ -126,6 +132,7 @@ class FESTidePredictor:
         start_time: str | pd.Timestamp,
         end_time: str | pd.Timestamp,
         freq: str = None,
+        inclusive: str = 'both',
         constituents: str | list = None,
         buffer_deg: float = None,
         source_tz: str = 'UTC',
@@ -140,6 +147,7 @@ class FESTidePredictor:
             start_time: 起始时间
             end_time: 结束时间
             freq: 采样间隔 (如 '10min', '1h')，若为 None 则使用 config 默认配置
+            inclusive: 区间包含语义: 'both' (默认闭区间 [start, end]), 'left' ([start, end)), 'right' ((start, end]), 'neither'
             constituents: 'all' 或 'major8' 或列表，若为 None 则使用 config 默认配置
             buffer_deg: 局部空间缓冲半径 (度)，若为 None 则使用 config 默认配置
             source_tz: 输入时间源时区 (如 'UTC' 或 'local')
@@ -151,6 +159,8 @@ class FESTidePredictor:
         if progress_callback:
             progress_callback(10, "解析时空参数并校准时区...")
 
+        lon, lat = validate_coordinates(lon, lat)
+
         if freq is None:
             freq = self.default_freq
         if constituents is None:
@@ -158,14 +168,20 @@ class FESTidePredictor:
         if buffer_deg is None:
             buffer_deg = self.default_buffer
 
+        validate_time_params(start_time, end_time, freq)
         const_list = validate_constituents(constituents)
 
         lon_norm = float(normalize_longitude(lon, to_360=True))
         lat_norm = float(lat)
 
-        # 1. 严格的时区校准与时间网格生成
-        local_series = pd.date_range(start=start_time, end=end_time, freq=freq)
-        utc_idx, dates_np = convert_time_to_utc(local_series, source_tz=source_tz)
+        # 1. 严格的时区校准与时间网格生成 (利用 build_time_index 防御 DST 跳变并支持 inclusive 语义)
+        local_series, utc_idx, dates_np = build_time_index(
+            start_time=start_time,
+            end_time=end_time,
+            freq=freq,
+            source_tz=source_tz,
+            inclusive=inclusive
+        )
 
         # 2. 计算局部 BBox (允许跨越 0°/360° 环形边界，由 pyfes 自动加载环形网格拓扑)
         bbox = (
@@ -180,15 +196,36 @@ class FESTidePredictor:
 
         model = self._get_model(bbox, const_list)
 
-        if progress_callback:
-            progress_callback(70, "执行高精度调和潮位解算...")
+        chunk_size = 5000
+        n_dates = len(dates_np)
 
-        lons_np = np.full(len(dates_np), lon_norm)
-        lats_np = np.full(len(dates_np), lat_norm)
-
-        short_period, long_period, flags = pyfes.evaluate_tide(
-            model, dates_np, lons_np, lats_np
-        )
+        if n_dates <= chunk_size:
+            if progress_callback:
+                progress_callback(70, "执行高精度调和潮位解算...")
+            lons_np = np.full(n_dates, lon_norm)
+            lats_np = np.full(n_dates, lat_norm)
+            short_period, long_period, flags = pyfes.evaluate_tide(
+                model, dates_np, lons_np, lats_np
+            )
+        else:
+            short_list, long_list, flag_list = [], [], []
+            n_chunks = int(np.ceil(n_dates / chunk_size))
+            for i in range(n_chunks):
+                idx_s = i * chunk_size
+                idx_e = min(idx_s + chunk_size, n_dates)
+                sub_dates = dates_np[idx_s:idx_e]
+                sub_lons = np.full(len(sub_dates), lon_norm)
+                sub_lats = np.full(len(sub_dates), lat_norm)
+                if progress_callback:
+                    pct = 30 + int(45 * (i + 1) / n_chunks)
+                    progress_callback(pct, f"执行调和潮位解算 (时间分块 {i+1}/{n_chunks}, {len(sub_dates)}点)...")
+                sp, lp, fl = pyfes.evaluate_tide(model, sub_dates, sub_lons, sub_lats)
+                short_list.append(sp)
+                long_list.append(lp)
+                flag_list.append(fl)
+            short_period = np.concatenate(short_list)
+            long_period = np.concatenate(long_list)
+            flags = np.concatenate(flag_list)
 
         total_cm = short_period + long_period
         total_m = total_cm / 100.0
@@ -209,6 +246,100 @@ class FESTidePredictor:
             progress_callback(100, "潮位时序解算完成")
 
         return df
+
+    def predict_point_period(
+        self,
+        lon: float,
+        lat: float,
+        start_time: str | pd.Timestamp,
+        end_time: str | pd.Timestamp,
+        freq: str = '30min',
+        inclusive: str = 'both',
+        constituents: str | list = None,
+        buffer_deg: float = None,
+        source_tz: str = 'UTC',
+        datum_mode: str = 'both',
+        strict: bool = False,
+        datum_transformer: DatumTransformer = None,
+        progress_callback = None
+    ) -> pd.DataFrame:
+        """
+        单点连续时段潮位预测并联合多元垂直基准转换。
+        可一键输出 Tide(MSL)、MDT、h_mdt_ref、h_goco06s、h_egm2008、h_wgs84 等完整基准序列。
+        """
+        df = self.predict_series(
+            lon=lon,
+            lat=lat,
+            start_time=start_time,
+            end_time=end_time,
+            freq=freq,
+            inclusive=inclusive,
+            constituents=constituents,
+            buffer_deg=buffer_deg,
+            source_tz=source_tz,
+            progress_callback=progress_callback
+        )
+
+        if datum_mode is not None:
+            if datum_transformer is None:
+                datum_transformer = DatumTransformer()
+            datums = datum_transformer.convert_tide_datums(
+                tide_msl_m=df['tide_total_m'].values,
+                lons=lon,
+                lats=lat,
+                datum_target=datum_mode,
+                strict=strict
+            )
+            df['tide_msl_m'] = datums['tide_msl_m']
+            df['mdt_m'] = datums['mdt_m']
+            df['delta_n_m'] = datums['delta_n_m']
+            df['n_egm2008_m'] = datums['n_egm2008_m']
+            df['h_mdt_ref_m'] = datums['h_mdt_ref_m']
+            df['h_goco06s_m'] = datums['h_goco06s_m']
+            df['h_egm2008_m'] = datums['h_egm2008_m']
+            df['h_wgs84_m'] = datums['h_wgs84_m']
+            df['datum_ref_geoid'] = datums['datum_ref_geoid']
+            df['qc_warning'] = datums['qc_warning']
+
+        return df
+
+    def predict_year(
+        self,
+        lon: float,
+        lat: float,
+        year: int = 2024,
+        freq: str = '30min',
+        inclusive: str = 'left',
+        constituents: str | list = None,
+        buffer_deg: float = None,
+        source_tz: str = 'UTC',
+        datum_mode: str = 'both',
+        strict: bool = False,
+        datum_transformer: DatumTransformer = None,
+        progress_callback = None
+    ) -> pd.DataFrame:
+        """
+        单点整年潮位高分辨率预测。
+        默认采用严密半开区间 [year-01-01 00:00:00, (year+1)-01-01 00:00:00)。
+        对于 2024 闰年 (366 天)，30min 采样率严格输出 366 * 48 = 17,568 行。
+        """
+        start_time = f"{int(year):04d}-01-01 00:00:00"
+        end_time = f"{int(year) + 1:04d}-01-01 00:00:00"
+        return self.predict_point_period(
+            lon=lon,
+            lat=lat,
+            start_time=start_time,
+            end_time=end_time,
+            freq=freq,
+            inclusive=inclusive,
+            constituents=constituents,
+            buffer_deg=buffer_deg,
+            source_tz=source_tz,
+            datum_mode=datum_mode,
+            strict=strict,
+            datum_transformer=datum_transformer,
+            progress_callback=progress_callback
+        )
 
     def predict_batch(
         self,
@@ -231,6 +362,11 @@ class FESTidePredictor:
 
         lons = df_records[lon_col].astype(float).values
         lats = df_records[lat_col].astype(float).values
+
+        # 检查并校验坐标
+        for x, y in zip(lons, lats):
+            validate_coordinates(x, y)
+
         lons_norm = np.array([normalize_longitude(x, to_360=True) for x in lons])
 
         # 严格进行时区校准转换为 UTC
@@ -247,6 +383,10 @@ class FESTidePredictor:
         df_out['tide_total_cm'] = np.nan
         df_out['tide_total_m'] = np.nan
         df_out['quality_flag'] = 0
+
+        # 获取质量控制提示 (地中海/黑海 EIGEN-6C4 区域标记)
+        ref_geoids = get_mdt_reference_geoid(lons, lats)
+        df_out['qc_warning'] = np.where(ref_geoids == 'EIGEN-6C4', 'QC_MED_BLACK_SEA_EIGEN6C4', 'NORMAL')
 
         # 如果所有点集中在 8°x8° 范围之内，直接使用单局部 BBox 计算
         if lon_span <= 8.0 and lat_span <= 8.0:
