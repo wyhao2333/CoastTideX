@@ -22,6 +22,23 @@ warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 from .utils import normalize_longitude, load_app_config, resolve_project_path
 
 
+def is_mediterranean_or_black_sea(lons: float | np.ndarray, lats: float | np.ndarray) -> np.ndarray:
+    """
+    判断空间坐标是否位于地中海或黑海区域 (CMEMS 区域高分辨率 MDT 覆盖范围)。
+
+    大地测量学背景与科学基准定义:
+        CNES-CLS22 MDT 官方产品 (mdt_hybrid_cnes_cls22_cmems2020_global.nc) 为复合型混合模型：
+        - 全球开阔大洋 (Global Ocean): 基于纯卫星重力模型 GOCO06s (d/o 300) 大地水准面；
+        - 地中海 (Mediterranean Sea: -6.0°E ~ 36.5°E, 30.0°N ~ 46.0°N): 基于 EIGEN-6C4 (d/o 2190)；
+        - 黑海 (Black Sea: 27.0°E ~ 42.0°E, 40.0°N ~ 47.5°N): 基于 EIGEN-6C4 (d/o 2190)。
+    """
+    lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
+    lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+    is_med = (lons_arr >= -6.0) & (lons_arr <= 36.5) & (lats_arr >= 30.0) & (lats_arr <= 46.0)
+    is_blk = (lons_arr >= 27.0) & (lons_arr <= 42.0) & (lats_arr >= 40.0) & (lats_arr <= 47.5)
+    return is_med | is_blk
+
+
 class DatumTransformer:
     """
     严密的海洋与大地测量垂直基准转换器。
@@ -54,11 +71,14 @@ class DatumTransformer:
         self._delta_n_data = None
         self._delta_n_inv_transform = None
 
-    def _init_mdt(self):
+    def _init_mdt(self, strict: bool = False):
         """初始化 MDT 全局向量化插值器"""
         if self._mdt_interpolator is None:
             if not os.path.exists(self.mdt_path):
-                raise FileNotFoundError(f"未找到 CNES-CLS22 MDT 文件: {self.mdt_path}")
+                if strict:
+                    raise FileNotFoundError(f"未找到 CNES-CLS22 MDT 文件: {self.mdt_path}")
+                warnings.warn(f"CNES-CLS22 MDT 文件未找到: {self.mdt_path}，MDT 查询将返回 NaN")
+                return
             ds = xr.open_dataset(self.mdt_path)
             lats = ds.latitude.values
             lons = ds.longitude.values
@@ -70,20 +90,26 @@ class DatumTransformer:
                 (lats, lons), mdt_grid, bounds_error=False, fill_value=np.nan
             )
 
-    def _init_egm2008(self):
+    def _init_egm2008(self, strict: bool = False):
         """加载 EGM2008 GeoTIFF 栅格与仿射变换"""
         if self._egm_data is None:
             if not os.path.exists(self.egm2008_path):
-                raise FileNotFoundError(f"未找到 EGM2008 栅格文件: {self.egm2008_path}")
+                if strict:
+                    raise FileNotFoundError(f"未找到 EGM2008 栅格文件: {self.egm2008_path}")
+                warnings.warn(f"EGM2008 栅格文件未找到: {self.egm2008_path}，正高查询将返回 NaN")
+                return
             with rasterio.open(self.egm2008_path) as src:
                 self._egm_data = src.read(1).astype(np.float32)
                 self._egm_inv_transform = ~src.transform
 
-    def _init_delta_n(self):
+    def _init_delta_n(self, strict: bool = False):
         """加载 Delta N (GOCO06s - EGM2008) 差值栅格与仿射变换"""
         if self._delta_n_data is None:
             if not os.path.exists(self.delta_n_path):
-                raise FileNotFoundError(f"未找到 Delta N 差值栅格文件: {self.delta_n_path}")
+                if strict:
+                    raise FileNotFoundError(f"未找到 Delta N 差值栅格文件: {self.delta_n_path}")
+                warnings.warn(f"Delta N 栅格文件未找到: {self.delta_n_path}，水准面差值查询将返回 NaN")
+                return
             with rasterio.open(self.delta_n_path) as src:
                 self._delta_n_data = src.read(1).astype(np.float32)
                 self._delta_n_inv_transform = ~src.transform
@@ -98,6 +124,10 @@ class DatumTransformer:
         lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
+        if self._mdt_interpolator is None:
+            res = np.full(len(lons_arr), np.nan, dtype=float)
+            return float(res[0]) if is_scalar else res
+
         points = np.column_stack([lats_arr, lons_arr])
         res = self._mdt_interpolator(points)
         return float(res[0]) if is_scalar else res
@@ -111,7 +141,11 @@ class DatumTransformer:
         lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
-        cols, rows = self._egm_inv_transform * (lons_arr, lats_arr)
+        if self._egm_data is None:
+            res = np.full(len(lons_arr), np.nan, dtype=float)
+            return float(res[0]) if is_scalar else res
+
+        cols, rows = self._egm_inv_transform @ (lons_arr, lats_arr)
         # GDAL/Rasterio 栅格连续坐标中像素中心位于 (col+0.5, row+0.5)，
         # 而 scipy map_coordinates 将数组元素 [0, 0] 定位于整数坐标 (0, 0)。
         # 此处严格扣除 0.5 半像元偏置，彻底消除 ~2.3km (1.25') 空间平移误差。
@@ -130,7 +164,11 @@ class DatumTransformer:
         lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
-        cols, rows = self._delta_n_inv_transform * (lons_arr, lats_arr)
+        if self._delta_n_data is None:
+            res = np.full(len(lons_arr), np.nan, dtype=float)
+            return float(res[0]) if is_scalar else res
+
+        cols, rows = self._delta_n_inv_transform @ (lons_arr, lats_arr)
         cols_map = cols - 0.5
         rows_map = rows - 0.5
         vals = map_coordinates(self._delta_n_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
@@ -153,6 +191,8 @@ class DatumTransformer:
             'h_goco06s_m': 相对 GOCO06s 基准面的海面高 (m) = Tide + MDT
             'h_egm2008_m': 相对 EGM2008 大地水准面的正高 (m) = Tide + MDT + Delta_N
             'h_wgs84_m': WGS84 几何空间椭球高 (m) = H_EGM2008 + N_EGM2008
+            'datum_ref_geoid': 当地 MDT 参考大地水准面 ('GOCO06s' 或 'EIGEN-6C4 (CMEMS2020)')
+            'qc_warning': 地理水准面质量提示 ('NORMAL' 或 'QC_MED_BLACK_SEA_EIGEN6C4')
         """
         is_scalar = np.isscalar(tide_msl_m) and np.isscalar(lons) and np.isscalar(lats)
         t_arr = np.atleast_1d(np.asarray(tide_msl_m, dtype=float))
@@ -164,9 +204,14 @@ class DatumTransformer:
         delta_n_vals = np.atleast_1d(self.get_delta_n(lons_arr, lats_arr))
         n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr))
 
+        # 检查地中海与黑海区域 (CMEMS 2020 MDT 基于 EIGEN-6C4 大地水准面)
+        is_med_blk = is_mediterranean_or_black_sea(lons_arr, lats_arr)
+        ref_geoids = np.where(is_med_blk, 'EIGEN-6C4 (CMEMS2020)', 'GOCO06s')
+        qc_warning = np.where(is_med_blk, 'QC_MED_BLACK_SEA_EIGEN6C4', 'NORMAL')
+
         # 2. 自动对齐广播维度 (解决单点时序预测中经纬度为 1 个点、潮位有时序 N 个点的不匹配问题)
-        t_arr, mdt_vals, delta_n_vals, n_egm_vals = np.broadcast_arrays(
-            t_arr, mdt_vals, delta_n_vals, n_egm_vals
+        t_arr, mdt_vals, delta_n_vals, n_egm_vals, ref_geoids, qc_warning = np.broadcast_arrays(
+            t_arr, mdt_vals, delta_n_vals, n_egm_vals, ref_geoids, qc_warning
         )
 
         # 3. 严格的科学级基准转换运算
@@ -188,6 +233,8 @@ class DatumTransformer:
                 'h_goco06s_m': float(h_goco06s[0]) if not np.isnan(h_goco06s[0]) else np.nan,
                 'h_egm2008_m': float(h_egm2008[0]) if not np.isnan(h_egm2008[0]) else np.nan,
                 'h_wgs84_m': float(h_wgs84[0]) if not np.isnan(h_wgs84[0]) else np.nan,
+                'datum_ref_geoid': str(ref_geoids[0]),
+                'qc_warning': str(qc_warning[0]),
             }
 
         return {
@@ -198,4 +245,6 @@ class DatumTransformer:
             'h_goco06s_m': h_goco06s,
             'h_egm2008_m': h_egm2008,
             'h_wgs84_m': h_wgs84,
+            'datum_ref_geoid': ref_geoids,
+            'qc_warning': qc_warning,
         }

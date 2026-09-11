@@ -18,7 +18,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.datum_engine import DatumTransformer
+from core.datum_engine import DatumTransformer, is_mediterranean_or_black_sea
 from core.utils import (
     normalize_longitude, COASTAL_PRESETS,
     load_app_config, resolve_project_path,
@@ -26,10 +26,11 @@ from core.utils import (
 )
 
 try:
-    from core.tide_engine import FESTidePredictor, HAS_PYFES
+    from core.tide_engine import FESTidePredictor, HAS_PYFES, validate_constituents
 except ImportError:
     FESTidePredictor = None
     HAS_PYFES = False
+    validate_constituents = None
 
 cfg = load_app_config()
 HAS_FES = HAS_PYFES and os.path.exists(resolve_project_path(cfg['paths'].get('fes_ns_grid', '')))
@@ -194,6 +195,74 @@ class TestCoastTideX(unittest.TestCase):
         )
         self.assertEqual(len(datums['h_egm2008_m']), 4)
         self.assertFalse(np.isnan(datums['h_egm2008_m']).any())
+
+    def test_mediterranean_and_black_sea_detection(self):
+        """测试地中海与黑海空间区域判定 (EIGEN-6C4 基准)"""
+        # 地中海坐标 (12.0°E, 40.0°N) -> True
+        self.assertTrue(is_mediterranean_or_black_sea(12.0, 40.0)[0])
+        # 黑海坐标 (35.0°E, 43.0°N) -> True
+        self.assertTrue(is_mediterranean_or_black_sea(35.0, 43.0)[0])
+        # 长江口 (122.0°E, 31.0°N) -> False
+        self.assertFalse(is_mediterranean_or_black_sea(122.0, 31.0)[0])
+        # 大西洋 (-40.0°W, 30.0°N) -> False
+        self.assertFalse(is_mediterranean_or_black_sea(-40.0, 30.0)[0])
+
+    def test_validate_constituents(self):
+        """测试分潮参数统一严格校验"""
+        if validate_constituents is not None:
+            self.assertEqual(len(validate_constituents('all')), 34)
+            self.assertEqual(len(validate_constituents('major8')), 8)
+            self.assertEqual(validate_constituents(['M2', 'S2']), ['M2', 'S2'])
+
+            with self.assertRaises(ValueError):
+                validate_constituents(['INVALID_TIDE_NAME'])
+
+            with self.assertRaises(ValueError):
+                validate_constituents(99999)
+
+    def test_msl_mode_and_graceful_missing_data(self):
+        """测试仅 MSL 模式与缺失外部栅格时的软着陆机制 (不抛未捕获异常崩溃)"""
+        dummy_trans = DatumTransformer(
+            mdt_path='nonexistent_mdt.nc',
+            egm2008_path='nonexistent_egm.tif',
+            delta_n_path='nonexistent_delta_n.tif'
+        )
+        res = dummy_trans.convert_tide_datums(1.85, 122.0, 31.0)
+        self.assertEqual(res['tide_msl_m'], 1.85)
+        self.assertTrue(np.isnan(res['mdt_m']))
+        self.assertTrue(np.isnan(res['h_egm2008_m']))
+        self.assertTrue(np.isnan(res['h_wgs84_m']))
+        self.assertIn('datum_ref_geoid', res)
+
+    def test_ci_mock_end_to_end_pipeline(self):
+        """测试无大模型数据文件环境下的端到端 Mock 模拟与全基准计算 (保障 CI 真实链路覆盖)"""
+        dates = pd.date_range('2026-09-10 00:00:00', periods=5, freq='1h')
+        mock_tide_m = np.array([1.10, 1.45, 0.80, -0.35, -0.90])
+        df_mock = pd.DataFrame({
+            'datetime_utc': dates,
+            'datetime_input': dates,
+            'longitude': 122.0,
+            'latitude': 31.0,
+            'tide_total_m': mock_tide_m,
+            'quality_flag': np.ones(5, dtype=int)
+        })
+
+        # 运行基准转换
+        res = self.transformer.convert_tide_datums(df_mock['tide_total_m'].values, 122.0, 31.0)
+        self.assertIn('tide_msl_m', res)
+        self.assertIn('datum_ref_geoid', res)
+        self.assertEqual(len(res['tide_msl_m']), 5)
+        # 验证地中海点输入
+        med_res = self.transformer.convert_tide_datums(mock_tide_m, 12.0, 40.0)
+        self.assertEqual(med_res['datum_ref_geoid'][0], 'EIGEN-6C4 (CMEMS2020)')
+        self.assertEqual(med_res['qc_warning'][0], 'QC_MED_BLACK_SEA_EIGEN6C4')
+
+    def test_dst_transition_safety(self):
+        """测试夏令时回拨重叠小时，确保不产生静默非法 NaT"""
+        times = ['2026-11-01 01:00:00', '2026-11-01 01:30:00', '2026-11-01 02:00:00']
+        utc_idx, _ = convert_time_to_utc(times, source_tz='America/New_York')
+        self.assertFalse(utc_idx.isna().any())
+        self.assertEqual(len(utc_idx), 3)
 
 
 if __name__ == '__main__':

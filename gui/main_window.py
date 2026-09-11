@@ -6,6 +6,7 @@ CoastTideX 桌面主窗口 (Main Window)
 import os
 import numpy as np
 import pandas as pd
+import dateutil.tz
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime
@@ -14,7 +15,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QGroupBox, QLabel, QLineEdit, QComboBox,
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
-    QSplitter, QStatusBar
+    QSplitter, QStatusBar, QScrollArea, QFrame
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor
 
@@ -33,7 +34,7 @@ class SingleTideWorker(QThread):
     finished = pyqtSignal(pd.DataFrame, dict)
     error = pyqtSignal(str)
 
-    def __init__(self, lon, lat, start_time, end_time, freq, constituents, source_tz='UTC'):
+    def __init__(self, lon, lat, start_time, end_time, freq, constituents, source_tz='UTC', datum_mode='both'):
         super().__init__()
         self.lon = lon
         self.lat = lat
@@ -42,11 +43,11 @@ class SingleTideWorker(QThread):
         self.freq = freq
         self.constituents = constituents
         self.source_tz = source_tz
+        self.datum_mode = datum_mode
 
     def run(self):
         try:
             predictor = FESTidePredictor()
-            transformer = DatumTransformer()
 
             def p_cb(percent, msg):
                 self.progress.emit(percent, msg)
@@ -63,8 +64,31 @@ class SingleTideWorker(QThread):
                 progress_callback=p_cb
             )
 
-            # 2. 运行严密四大垂直基准转换 (MSL -> GOCO06s -> EGM2008 -> WGS84)
+            # 2. 判断是否为仅 MSL 模式 (解耦大地测量基准文件依赖)
+            if self.datum_mode == 'msl':
+                p_cb(90, "已选定仅 MSL 模式，无需加载大地水准面与 MDT 栅格...")
+                df['tide_msl_m'] = df['tide_total_m']
+                df['mdt_m'] = np.nan
+                df['delta_n_m'] = np.nan
+                df['n_egm2008_m'] = np.nan
+                df['h_goco06s_m'] = np.nan
+                df['h_egm2008_m'] = np.nan
+                df['h_wgs84_m'] = np.nan
+
+                scalar_datum = {
+                    'mdt_m': np.nan,
+                    'delta_n_m': np.nan,
+                    'n_egm2008_m': np.nan,
+                    'datum_ref_geoid': '局部平均海平面 (MSL)',
+                    'qc_warning': 'NORMAL'
+                }
+                p_cb(100, "单点 MSL 潮位模拟完成！")
+                self.finished.emit(df, scalar_datum)
+                return
+
+            # 3. 运行严密四大垂直基准转换 (MSL -> GOCO06s -> EGM2008 -> WGS84)
             p_cb(85, "严密转换四大垂直基准 (MSL/GOCO06s/EGM2008/WGS84)...")
+            transformer = DatumTransformer()
             datum_res = transformer.convert_tide_datums(
                 df['tide_total_m'].values, self.lon, self.lat
             )
@@ -87,6 +111,8 @@ class SingleTideWorker(QThread):
                 'mdt_m': _scalar_val(datum_res['mdt_m']),
                 'delta_n_m': _scalar_val(datum_res['delta_n_m']),
                 'n_egm2008_m': _scalar_val(datum_res['n_egm2008_m']),
+                'datum_ref_geoid': str(datum_res.get('datum_ref_geoid', 'GOCO06s')),
+                'qc_warning': str(datum_res.get('qc_warning', 'NORMAL')),
             }
 
             p_cb(100, "全部计算完成！")
@@ -102,7 +128,7 @@ class BatchTideWorker(QThread):
     finished = pyqtSignal(pd.DataFrame)
     error = pyqtSignal(str)
 
-    def __init__(self, df_records, lon_col, lat_col, time_col, constituents='all', source_tz='UTC'):
+    def __init__(self, df_records, lon_col, lat_col, time_col, constituents='all', source_tz='UTC', datum_mode='both'):
         super().__init__()
         self.df_records = df_records
         self.lon_col = lon_col
@@ -110,11 +136,11 @@ class BatchTideWorker(QThread):
         self.time_col = time_col
         self.constituents = constituents
         self.source_tz = source_tz
+        self.datum_mode = datum_mode
 
     def run(self):
         try:
             predictor = FESTidePredictor()
-            transformer = DatumTransformer()
 
             def p_cb(percent, msg):
                 self.progress.emit(percent, msg)
@@ -129,8 +155,23 @@ class BatchTideWorker(QThread):
                 progress_callback=p_cb
             )
 
+            # 判断是否为仅 MSL 模式 (解耦大地测量基准要求)
+            if self.datum_mode == 'msl':
+                p_cb(90, "已选定仅 MSL 模式，跳过批量大地水准面与 MDT 转换...")
+                df_out['tide_msl_m'] = df_out['tide_total_m']
+                df_out['mdt_m'] = np.nan
+                df_out['delta_n_m'] = np.nan
+                df_out['n_egm2008_m'] = np.nan
+                df_out['h_goco06s_m'] = np.nan
+                df_out['h_egm2008_m'] = np.nan
+                df_out['h_wgs84_m'] = np.nan
+                p_cb(100, "批量 MSL 计算完成！")
+                self.finished.emit(df_out)
+                return
+
             # 向量化批量基准转换 (无慢速循环)
             p_cb(75, "向量化匹配 MDT, Delta_N 与 EGM2008 基准...")
+            transformer = DatumTransformer()
             lons = df_out[self.lon_col].astype(float).values
             lats = df_out[self.lat_col].astype(float).values
             tide_msl = df_out['tide_total_m'].values
@@ -143,6 +184,7 @@ class BatchTideWorker(QThread):
             df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
             df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
             df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
+            df_out['datum_ref_geoid'] = datum_res.get('datum_ref_geoid', 'GOCO06s')
 
             p_cb(100, "批量计算完成！")
             self.finished.emit(df_out)
@@ -156,7 +198,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.1")
-        self.resize(1280, 850)
+        self.resize(1280, 800)
+        self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
 
         self.current_result_df = None
@@ -218,11 +261,16 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(self.tab_single)
         layout.setSpacing(10)
 
-        # 左侧控制面板 (固定宽度)
+        # 左侧控制面板 (包装在 QScrollArea 内，支持自适应垂直滚动，彻底解除窗口垂直缩放锁定)
+        scroll_left = QScrollArea()
+        scroll_left.setWidgetResizable(True)
+        scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_left.setFixedWidth(380)
+
         left_panel = QWidget()
-        left_panel.setFixedWidth(360)
         layout_left = QVBoxLayout(left_panel)
-        layout_left.setContentsMargins(0, 0, 0, 0)
+        layout_left.setContentsMargins(2, 2, 8, 2)
         layout_left.setSpacing(12)
 
         # 1. 空间位置设置分组
@@ -337,7 +385,7 @@ class MainWindow(QMainWindow):
         layout_stat.addWidget(self.lbl_range, 3, 1)
         layout_stat.addWidget(QLabel("当地 MDT 偏置:"), 4, 0)
         layout_stat.addWidget(self.lbl_mdt, 4, 1)
-        layout_stat.addWidget(QLabel("ΔN (GOCO-EGM):"), 5, 0)
+        layout_stat.addWidget(QLabel("ΔN 改正 / 基准面:"), 5, 0)
         layout_stat.addWidget(self.lbl_delta_n, 5, 1)
         layout_stat.addWidget(QLabel("EGM2008 水准面 N:"), 6, 0)
         layout_stat.addWidget(self.lbl_geoid_n, 6, 1)
@@ -346,7 +394,8 @@ class MainWindow(QMainWindow):
         layout_left.addWidget(grp_stat)
 
         layout_left.addStretch()
-        layout.addWidget(left_panel)
+        scroll_left.setWidget(left_panel)
+        layout.addWidget(scroll_left)
 
         # 右侧图表与表格展示 (分割器)
         splitter_right = QSplitter(Qt.Orientation.Vertical)
@@ -429,15 +478,22 @@ class MainWindow(QMainWindow):
         self.combo_batch_tz.addItem("本地时间 (Local Time)", "local")
         layout_bc.addWidget(self.combo_batch_tz, 4, 1)
 
+        # 基准面模式
+        layout_bc.addWidget(QLabel("基准面模式:"), 5, 0)
+        self.combo_batch_datum = QComboBox()
+        self.combo_batch_datum.addItem("全部基准面 (MSL/GOCO/EGM/WGS)", "all")
+        self.combo_batch_datum.addItem("仅 MSL (相对平均海平面)", "msl")
+        layout_bc.addWidget(self.combo_batch_datum, 5, 1)
+
         self.btn_run_batch = QPushButton("⚡ 开始批量解算")
         self.btn_run_batch.setFixedHeight(36)
         self.btn_run_batch.setEnabled(False)
         self.btn_run_batch.clicked.connect(self._run_batch_simulation)
-        layout_bc.addWidget(self.btn_run_batch, 5, 1)
+        layout_bc.addWidget(self.btn_run_batch, 6, 1)
 
         self.prog_batch = QProgressBar()
         self.prog_batch.setValue(0)
-        layout_bc.addWidget(self.prog_batch, 5, 2)
+        layout_bc.addWidget(self.prog_batch, 6, 2)
 
         layout.addWidget(grp_batch_ctrl)
 
@@ -462,6 +518,8 @@ class MainWindow(QMainWindow):
     def _set_default_values(self):
         app_cfg = load_app_config()
         gui_cfg = app_cfg.get('gui', {})
+        tide_cfg = app_cfg.get('tide', {})
+
         default_loc = gui_cfg.get('default_location_name', "长江口 (Changjiang Estuary)")
         idx = self.combo_presets.findText(default_loc)
         if idx >= 0:
@@ -472,6 +530,19 @@ class MainWindow(QMainWindow):
         idx_tz = self.combo_tz.findData(default_tz)
         if idx_tz >= 0:
             self.combo_tz.setCurrentIndex(idx_tz)
+
+        # 联动 config.yaml 分潮配置
+        def_const = tide_cfg.get('default_constituents', 'all')
+        idx_const = self.combo_const.findData(def_const)
+        if idx_const >= 0:
+            self.combo_const.setCurrentIndex(idx_const)
+
+        # 联动 config.yaml 采样步长配置
+        def_freq = tide_cfg.get('default_freq', '1h')
+        for i in range(self.combo_freq.count()):
+            if def_freq in self.combo_freq.itemText(i):
+                self.combo_freq.setCurrentIndex(i)
+                break
 
         if default_tz == 'UTC':
             now_dt = QDateTime.currentDateTimeUtc()
@@ -507,6 +578,17 @@ class MainWindow(QMainWindow):
 
         self._current_tz_mode = new_tz
         if self.current_result_df is not None:
+            # 动态根据当前选定时区重算 datetime_input 列并刷新表格与图表
+            if new_tz == 'local':
+                utc_series = pd.to_datetime(self.current_result_df['datetime_utc'])
+                tz_loc = dateutil.tz.tzlocal()
+                self.current_result_df['datetime_input'] = (
+                    utc_series.dt.tz_localize('UTC').dt.tz_convert(tz_loc).dt.tz_localize(None)
+                )
+            else:
+                self.current_result_df['datetime_input'] = pd.to_datetime(self.current_result_df['datetime_utc'])
+
+            self._populate_table(self.current_result_df)
             self._update_chart()
 
     def _on_preset_changed(self, index):
@@ -551,6 +633,7 @@ class MainWindow(QMainWindow):
         freq = freq_map.get(self.combo_freq.currentText(), "1h")
         constituents = self.combo_const.currentData()
         source_tz = self.combo_tz.currentData()
+        datum_mode = self.combo_datum.currentData()
 
         self.btn_run_single.setEnabled(False)
         self.prog_single.setValue(5)
@@ -563,7 +646,8 @@ class MainWindow(QMainWindow):
             end_time=t_end,
             freq=freq,
             constituents=constituents,
-            source_tz=source_tz
+            source_tz=source_tz,
+            datum_mode=datum_mode
         )
         self.worker.progress.connect(self._on_single_progress)
         self.worker.finished.connect(self._on_single_finished)
@@ -628,13 +712,20 @@ class MainWindow(QMainWindow):
         mdt_v = self.current_scalar_datum.get('mdt_m', np.nan)
         dn_v = self.current_scalar_datum.get('delta_n_m', np.nan)
         geoid_v = self.current_scalar_datum.get('n_egm2008_m', np.nan)
+        ref_g = self.current_scalar_datum.get('datum_ref_geoid', 'GOCO06s')
 
-        self.lbl_mdt.setText(f"<b>{mdt_v:+.4f} m</b>" if not np.isnan(mdt_v) else "<span style='color:#94a3b8;'>NaN (陆地)</span>")
-        self.lbl_delta_n.setText(f"<b>{dn_v:+.4f} m</b>" if not np.isnan(dn_v) else "<span style='color:#94a3b8;'>NaN</span>")
+        self.lbl_mdt.setText(f"<b>{mdt_v:+.4f} m</b>" if not np.isnan(mdt_v) else "<span style='color:#94a3b8;'>NaN</span>")
+        if not np.isnan(dn_v):
+            self.lbl_delta_n.setText(f"<b>{dn_v:+.4f} m</b> <span style='font-size:10px;color:#94a3b8;'>({ref_g})</span>")
+        else:
+            self.lbl_delta_n.setText(f"<span style='color:#94a3b8;'>NaN ({ref_g})</span>")
         self.lbl_geoid_n.setText(f"<b>{geoid_v:+.3f} m</b>" if not np.isnan(geoid_v) else "<span style='color:#94a3b8;'>NaN</span>")
 
         # 更新网格质量评价标识
-        if 'quality_flag' in df.columns:
+        qc_warn = self.current_scalar_datum.get('qc_warning', 'NORMAL')
+        if qc_warn == 'QC_MED_BLACK_SEA_EIGEN6C4':
+            self.lbl_qc_status.setText("<span style='color:#38bdf8;font-weight:bold;'>ℹ️ 地中海/黑海 (MDT参考 EIGEN-6C4)</span>")
+        elif 'quality_flag' in df.columns:
             flags = df['quality_flag'].values
             if (flags == 0).any():
                 self.lbl_qc_status.setText("<span style='color:#ef4444;font-weight:bold;'>⚠️ 包含无数据/陆地点 (Flag 0)</span>")
@@ -739,9 +830,9 @@ class MainWindow(QMainWindow):
                 # 智能推断列名
                 for col in cols:
                     cl = col.lower()
-                    if 'lon' in cl:
+                    if 'lon' in cl or '经度' in cl:
                         self.combo_col_lon.setCurrentText(col)
-                    elif 'lat' in cl:
+                    elif 'lat' in cl or '纬度' in cl:
                         self.combo_col_lat.setCurrentText(col)
                     elif 'time' in cl or 'date' in cl:
                         self.combo_col_time.setCurrentText(col)
@@ -763,6 +854,7 @@ class MainWindow(QMainWindow):
         lat_col = self.combo_col_lat.currentText()
         time_col = self.combo_col_time.currentText()
         source_tz = self.combo_batch_tz.currentData()
+        datum_mode = self.combo_batch_datum.currentData()
 
         self.btn_run_batch.setEnabled(False)
         self.prog_batch.setValue(10)
@@ -773,7 +865,8 @@ class MainWindow(QMainWindow):
             lat_col=lat_col,
             time_col=time_col,
             constituents='all',
-            source_tz=source_tz
+            source_tz=source_tz,
+            datum_mode=datum_mode
         )
         self.batch_worker.progress.connect(lambda p, m: (self.prog_batch.setValue(p), self.status_bar.showMessage(m)))
         self.batch_worker.finished.connect(self._on_batch_finished)

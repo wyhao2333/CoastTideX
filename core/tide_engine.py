@@ -40,6 +40,24 @@ ALL_34_CONSTITUENTS = [
 MAJOR_8_CONSTITUENTS = ['M2', 'S2', 'K1', 'O1', 'N2', 'K2', 'P1', 'Q1']
 
 
+def validate_constituents(constituents: str | list | tuple | None) -> list[str]:
+    """
+    统一严谨校验分潮参数，支持 'all', 'major8' 以及用户自定义分潮列表。
+    若存在未知分潮名称或非法类型，抛出明确的 ValueError。
+    """
+    if constituents is None or constituents == 'all':
+        return ALL_34_CONSTITUENTS.copy()
+    if constituents == 'major8':
+        return MAJOR_8_CONSTITUENTS.copy()
+    if isinstance(constituents, (list, tuple, set)):
+        const_list = [str(c).strip() for c in constituents]
+        unknown = set(const_list) - set(ALL_34_CONSTITUENTS)
+        if unknown:
+            raise ValueError(f"检测到未知的 FES2022 分潮名称: {sorted(list(unknown))}。合法分潮列表: {ALL_34_CONSTITUENTS}")
+        return const_list
+    raise ValueError(f"无效的分潮参数: {constituents}。允许选项: 'all', 'major8', 或分潮名称列表。")
+
+
 class FESTidePredictor:
     """
     FES2022b 潮位预测引擎。
@@ -51,6 +69,12 @@ class FESTidePredictor:
             raise ImportError("未找到 pyfes 模块。请确保在运行环境中已安装 CNES/AVISO pyfes 库。")
 
         config = load_app_config()
+        self.config = config
+        tide_cfg = config.get('tide', {})
+        self.default_buffer = float(tide_cfg.get('spatial_buffer_deg', 1.0))
+        self.default_freq = str(tide_cfg.get('default_freq', '1h'))
+        self.default_constituents = str(tide_cfg.get('default_constituents', 'all'))
+
         if ns_grid_path is None:
             ns_grid_path = config['paths']['fes_ns_grid']
 
@@ -101,9 +125,9 @@ class FESTidePredictor:
         lat: float,
         start_time: str | pd.Timestamp,
         end_time: str | pd.Timestamp,
-        freq: str = '1h',
-        constituents: str | list = 'all',
-        buffer_deg: float = 1.0,
+        freq: str = None,
+        constituents: str | list = None,
+        buffer_deg: float = None,
         source_tz: str = 'UTC',
         progress_callback = None
     ) -> pd.DataFrame:
@@ -115,9 +139,9 @@ class FESTidePredictor:
             lat: 目标纬度 (-90~90)
             start_time: 起始时间
             end_time: 结束时间
-            freq: 采样间隔 (如 '10min', '1h')
-            constituents: 'all' 或 'major8'
-            buffer_deg: 局部空间缓冲半径 (度)
+            freq: 采样间隔 (如 '10min', '1h')，若为 None 则使用 config 默认配置
+            constituents: 'all' 或 'major8' 或列表，若为 None 则使用 config 默认配置
+            buffer_deg: 局部空间缓冲半径 (度)，若为 None 则使用 config 默认配置
             source_tz: 输入时间源时区 (如 'UTC' 或 'local')
             progress_callback: 进度回调 (0~100)
 
@@ -127,17 +151,17 @@ class FESTidePredictor:
         if progress_callback:
             progress_callback(10, "解析时空参数并校准时区...")
 
+        if freq is None:
+            freq = self.default_freq
+        if constituents is None:
+            constituents = self.default_constituents
+        if buffer_deg is None:
+            buffer_deg = self.default_buffer
+
+        const_list = validate_constituents(constituents)
+
         lon_norm = float(normalize_longitude(lon, to_360=True))
         lat_norm = float(lat)
-
-        if constituents == 'all':
-            const_list = ALL_34_CONSTITUENTS
-        elif constituents == 'major8':
-            const_list = MAJOR_8_CONSTITUENTS
-        elif isinstance(constituents, list):
-            const_list = constituents
-        else:
-            const_list = ALL_34_CONSTITUENTS
 
         # 1. 严格的时区校准与时间网格生成
         local_series = pd.date_range(start=start_time, end=end_time, freq=freq)
@@ -192,7 +216,7 @@ class FESTidePredictor:
         lon_col: str = 'longitude',
         lat_col: str = 'latitude',
         time_col: str = 'datetime',
-        constituents: str = 'all',
+        constituents: str | list = None,
         source_tz: str = 'UTC',
         progress_callback = None
     ) -> pd.DataFrame:
@@ -200,7 +224,9 @@ class FESTidePredictor:
         批量预测多个离散点/离散时刻的潮位。
         采用先进的空间网格分块 (Spatial Chunking) 机制，避免全地球大 BBox 退化。
         """
-        const_list = ALL_34_CONSTITUENTS if constituents == 'all' else MAJOR_8_CONSTITUENTS
+        if constituents is None:
+            constituents = self.default_constituents
+        const_list = validate_constituents(constituents)
         total_rows = len(df_records)
 
         lons = df_records[lon_col].astype(float).values

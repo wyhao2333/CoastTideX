@@ -26,6 +26,14 @@ echo [*] Running PyInstaller...
     --hidden-import "matplotlib.backends.backend_qtagg" ^
     app.py
 
+if errorlevel 1 (
+    echo ==============================================================================
+    echo [ERROR] PyInstaller build failed with exit code %errorlevel%!
+    echo ==============================================================================
+    pause
+    exit /b %errorlevel%
+)
+
 echo ==============================================================================
 echo [OK] Build completed! Output directory: dist\CoastTideX\
 echo ==============================================================================

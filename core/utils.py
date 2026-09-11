@@ -6,6 +6,7 @@ CoastTideX 通用工具与常量定义
 import os
 import copy
 import yaml
+import warnings
 import numpy as np
 import pandas as pd
 import dateutil.tz
@@ -93,17 +94,23 @@ def convert_time_to_utc(
             utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
         else:
             utc_idx = dt_idx
-    elif str(source_tz).lower() == 'local':
-        # 采用 dateutil.tz.tzlocal() 动态依据每个日期的 OS 时区规则处理夏令时 (DST)
-        tz_loc = dateutil.tz.tzlocal()
-        if dt_idx.tz is None:
-            utc_idx = dt_idx.tz_localize(tz_loc, ambiguous='NaT', nonexistent='shift_forward').tz_convert('UTC').tz_localize(None)
-        else:
-            utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
     else:
-        # 指定特定时区字符串 (如 'Asia/Shanghai', 'America/New_York')
+        target_tz = dateutil.tz.tzlocal() if str(source_tz).lower() == 'local' else source_tz
         if dt_idx.tz is None:
-            utc_idx = dt_idx.tz_localize(source_tz, ambiguous='NaT', nonexistent='shift_forward').tz_convert('UTC').tz_localize(None)
+            try:
+                # 优先根据时间序列单调性自动推断夏令时跳变 (ambiguous='infer')
+                localized = dt_idx.tz_localize(target_tz, ambiguous='infer', nonexistent='shift_forward')
+            except Exception:
+                # 无法推断时，先标记检测，再安全对齐，杜绝静默产生 NaT 崩溃
+                temp_loc = dt_idx.tz_localize(target_tz, ambiguous='NaT', nonexistent='shift_forward')
+                if temp_loc.isna().any():
+                    nat_cnt = int(temp_loc.isna().sum())
+                    warnings.warn(
+                        f"检测到输入时序中包含 {nat_cnt} 个处于夏令时回拨重复区间 (Fall-back ambiguous hour) 的时间点，"
+                        "已自动按夏令时初次出现时段对齐解析，消除非法 NaT。"
+                    )
+                localized = dt_idx.tz_localize(target_tz, ambiguous=True, nonexistent='shift_forward')
+            utc_idx = localized.tz_convert('UTC').tz_localize(None)
         else:
             utc_idx = dt_idx.tz_convert('UTC').tz_localize(None)
 

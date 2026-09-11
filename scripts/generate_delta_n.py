@@ -24,11 +24,14 @@ import sys
 import argparse
 import numpy as np
 import rasterio
+from rasterio.warp import reproject, Resampling
 
 
 def generate_delta_n_raster(goco06s_tif_path: str, egm2008_tif_path: str, output_tif_path: str):
     """
-    计算 GOCO06s 与 EGM2008 的大地水准面高差栅格并输出为压缩 GeoTIFF。
+    严密计算 GOCO06s 与 EGM2008 的大地水准面高差栅格并输出为压缩 GeoTIFF。
+    自动检测 CRS、仿射变换 Transform、空间范围 Bounds 与分辨率 Resolution，
+    并在网格属性存在差异时执行严密双线性重投影重采样对齐。
     """
     print(f"[*] 读取 GOCO06s 栅格: {goco06s_tif_path}")
     if not os.path.exists(goco06s_tif_path):
@@ -38,30 +41,53 @@ def generate_delta_n_raster(goco06s_tif_path: str, egm2008_tif_path: str, output
     if not os.path.exists(egm2008_tif_path):
         raise FileNotFoundError(f"未找到 EGM2008 栅格: {egm2008_tif_path}")
 
-    with rasterio.open(goco06s_tif_path) as src_goco:
+    with rasterio.open(goco06s_tif_path) as src_goco, rasterio.open(egm2008_tif_path) as src_egm:
         goco_data = src_goco.read(1)
         profile = src_goco.profile.copy()
         goco_nodata = src_goco.nodata
-
-    with rasterio.open(egm2008_tif_path) as src_egm:
         egm_data = src_egm.read(1)
         egm_nodata = src_egm.nodata
 
-    if goco_data.shape != egm_data.shape:
-        raise ValueError(
-            f"栅格维度不匹配: GOCO06s={goco_data.shape}, EGM2008={egm_data.shape}。"
-            "请确保两者基于相同的分辨率与全球范围网格。"
+        # 检查空间参考系统与网格配准
+        print(f"[*] GOCO06s 空间属性: 形状={src_goco.shape}, CRS={src_goco.crs}, 分辨率={src_goco.res}, 范围={src_goco.bounds}")
+        print(f"[*] EGM2008 空间属性: 形状={src_egm.shape}, CRS={src_egm.crs}, 分辨率={src_egm.res}, 范围={src_egm.bounds}")
+
+        needs_reproject = (
+            src_goco.shape != src_egm.shape or
+            src_goco.transform != src_egm.transform or
+            src_goco.bounds != src_egm.bounds or
+            src_goco.crs != src_egm.crs
         )
+
+        if needs_reproject:
+            print("[*] 检测到 GOCO06s 与 EGM2008 空间网格配准存在差异，执行严密双线性重采样 (Bilinear Resampling) 对齐...")
+            egm_aligned = np.empty(goco_data.shape, dtype=np.float32)
+            reproject(
+                source=egm_data.astype(np.float32),
+                destination=egm_aligned,
+                src_transform=src_egm.transform,
+                src_crs=src_egm.crs,
+                dst_transform=src_goco.transform,
+                dst_crs=src_goco.crs,
+                resampling=Resampling.bilinear,
+                src_nodata=egm_nodata,
+                dst_nodata=np.nan
+            )
+            egm_nodata_aligned = np.nan
+        else:
+            print("[+] 空间网格完全一致，直接执行代数差值。")
+            egm_aligned = egm_data.astype(np.float32)
+            egm_nodata_aligned = egm_nodata
 
     # 掩膜无效值
     mask_invalid = np.zeros(goco_data.shape, dtype=bool)
     if goco_nodata is not None:
         mask_invalid |= (goco_data == goco_nodata) | np.isnan(goco_data)
-    if egm_nodata is not None:
-        mask_invalid |= (egm_data == egm_nodata) | np.isnan(egm_data)
+    if egm_nodata_aligned is not None:
+        mask_invalid |= (egm_aligned == egm_nodata_aligned) | np.isnan(egm_aligned)
 
     print("[*] 计算差值栅格: Delta_N = N_GOCO06s - N_EGM2008 ...")
-    delta_n = goco_data.astype(np.float32) - egm_data.astype(np.float32)
+    delta_n = goco_data.astype(np.float32) - egm_aligned
     delta_n[mask_invalid] = np.nan
 
     valid_vals = delta_n[~mask_invalid]
