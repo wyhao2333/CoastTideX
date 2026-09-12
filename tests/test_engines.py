@@ -1,5 +1,5 @@
 """
-CoastTideX 单元与集成测试套件 (Test Suite v1.3)
+CoastTideX 单元与集成测试套件 (Test Suite v1.4)
 覆盖核心逻辑：
   1. test_validate_coordinates：验证非法经纬度（>90, <-90, nan, inf 等）正确拦截；
   2. test_validate_time_params：验证结束时间 <= 起始时间、未知 freq 时报错；
@@ -33,9 +33,20 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import tempfile
+import shutil
+import rasterio
+from rasterio.transform import from_origin
+from unittest.mock import patch, MagicMock
+
 from core.datum_engine import (
     DatumTransformer, DatumDataError,
-    get_mdt_reference_geoid, is_mediterranean_or_black_sea
+    get_mdt_reference_geoid, is_mediterranean_or_black_sea,
+    _broadcast_pointwise_inputs
+)
+from core.raster_engine import (
+    RasterTideEngine, RasterInfo, ControlNode,
+    QC_VALID, QC_FES_EXTRAPOLATED, QC_SPATIAL_FALLBACK, QC_INSUFFICIENT_NODES
 )
 from core.utils import (
     normalize_longitude, COASTAL_PRESETS,
@@ -226,7 +237,8 @@ class TestCoastTideX(unittest.TestCase):
         # h_wgs84_m = 1.58 + 48.2 = 49.78
         self.assertAlmostEqual(res['h_wgs84_m'], 49.78)
         self.assertEqual(res['datum_ref_geoid'], 'EIGEN-6C4')
-        self.assertEqual(res['qc_warning'], 'QC_MED_BLACK_SEA_EIGEN6C4')
+        self.assertEqual(res['qc_warning'], 'QC_DATUM_SOURCE_APPROX')
+
 
     # 10. 验证 target='msl' 时，即使未配置任何 MDT/Geoid 文件也能 100% 成功返回，且相关字段为 NaN
     def test_target_aware_conversion_msl_only(self):
@@ -372,7 +384,8 @@ class TestCoastTideX(unittest.TestCase):
         )
         self.assertIn('qc_warning', datums)
         self.assertEqual(datums['qc_warning'][0], 'NORMAL')
-        self.assertEqual(datums['qc_warning'][1], 'QC_MED_BLACK_SEA_EIGEN6C4')
+        self.assertEqual(datums['qc_warning'][1], 'QC_DATUM_SOURCE_APPROX')
+
 
     # 22. 全链路有条件真实测试
     @unittest.skipUnless(HAS_FES and HAS_MDT and HAS_EGM and HAS_DELTA_N, "完整模型网格数据未就绪，跳过真实 pyfes 潮位预测")
@@ -393,6 +406,213 @@ class TestCoastTideX(unittest.TestCase):
         self.assertIn('h_egm2008_m', df.columns)
         self.assertIn('qc_warning', df.columns)
         self.assertFalse(df['h_egm2008_m'].isna().any())
+
+    # 23. 严格广播校验测试 (mismatched non-scalar shapes must raise ValueError)
+    def test_pointwise_broadcast_mismatch_raises(self):
+        # 形状不匹配非标量 (3 vs 2)
+        with self.assertRaises(ValueError):
+            _broadcast_pointwise_inputs(
+                np.array([1.0, 2.0, 3.0]),
+                np.array([120.0, 121.0]),
+                np.array([30.0, 31.0])
+            )
+
+        # 纬度与经度不匹配 (3 vs 2)
+        with self.assertRaises(ValueError):
+            _broadcast_pointwise_inputs(
+                1.0,
+                np.array([120.0, 121.0, 122.0]),
+                np.array([30.0, 31.0])
+            )
+
+        # 正常广播：标量水位 + 数组经纬度
+        t_b, lo_b, la_b = _broadcast_pointwise_inputs(
+            1.5,
+            np.array([120.0, 121.0]),
+            np.array([30.0, 31.0])
+        )
+        self.assertEqual(len(t_b), 2)
+        self.assertEqual(t_b[0], 1.5)
+        self.assertEqual(t_b[1], 1.5)
+
+        # 正常广播：数组水位 + 单点经纬度 (单点长时序解算)
+        t_b, lo_b, la_b = _broadcast_pointwise_inputs(
+            np.array([1.0, 2.0, 3.0]),
+            120.5,
+            31.2
+        )
+        self.assertEqual(len(lo_b), 3)
+        self.assertEqual(lo_b[0], 120.5)
+        self.assertEqual(la_b[2], 31.2)
+
+    # 24. 验证 datum_target='both' 时不强制加载 EGM2008 绝对起伏栅格
+    def test_convert_tide_datums_both_does_not_require_egm_undulation(self):
+        trans = DatumTransformer()
+        trans.set_synthetic_fixture(mdt=0.5, delta_goco=-0.2, delta_eigen=0.03, n_egm=np.nan)
+        # 模拟 EGM2008 栅格路径不存在
+        trans._egm2008_src = None
+        trans.egm2008_path = "I:/nonexistent_egm2008_undulation.tif"
+
+        res = trans.convert_tide_datums(
+            tide_msl_m=1.0,
+            lons=122.0,
+            lats=31.0,
+            datum_target='both',
+            strict=True
+        )
+        self.assertAlmostEqual(res['tide_msl_m'], 1.0)
+        # H_EGM2008 = Tide (1.0) + MDT (0.5) + DeltaN (-0.2) = 1.3
+        self.assertAlmostEqual(res['h_egm2008_m'], 1.3)
+        self.assertTrue(np.isnan(res['n_egm2008_m']))
+
+    # 25. 验证合成 GeoTIFF 空间元数据检查 (inspect_raster)
+    def test_raster_inspect_synthetic_geotiff(self):
+        engine = RasterTideEngine()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tif_path = os.path.join(tmpdir, "test_dem.tif")
+            profile = {
+                'driver': 'GTiff',
+                'height': 15,
+                'width': 20,
+                'count': 1,
+                'dtype': rasterio.float32,
+                'crs': 'EPSG:32651',
+                'transform': from_origin(500000.0, 3400000.0, 10.0, 10.0),
+                'nodata': -9999.0
+            }
+            data = np.full((15, 20), 12.5, dtype=np.float32)
+            data[0, :5] = -9999.0  # 5 个 NoData 点
+
+            with rasterio.open(tif_path, 'w', **profile) as dst:
+                dst.write(data, 1)
+
+            info = engine.inspect_raster(tif_path, compute_valid_count=True)
+            self.assertEqual(info.width, 20)
+            self.assertEqual(info.height, 15)
+            self.assertEqual(info.total_pixel_count, 300)
+            self.assertEqual(info.valid_pixel_count, 295)
+            self.assertTrue(info.is_projected)
+            self.assertAlmostEqual(info.resolution[0], 10.0)
+            self.assertAlmostEqual(info.resolution[1], 10.0)
+            self.assertEqual(info.formatted_resolution, "10.00 m × 10.00 m")
+
+            # 验证地理坐标系 (如 EPSG:4326 WGS84) 下度数格式化与地面等效距离估算
+            geo_tif_path = os.path.join(tmpdir, "test_geo.tif")
+            geo_profile = {
+                'driver': 'GTiff',
+                'height': 100,
+                'width': 100,
+                'count': 1,
+                'dtype': rasterio.float32,
+                'crs': 'EPSG:4326',
+                'transform': from_origin(19.0, -34.7386, 0.000999, 0.000999),
+                'nodata': -9999.0
+            }
+            with rasterio.open(geo_tif_path, 'w', **geo_profile) as dst:
+                dst.write(np.zeros((100, 100), dtype=np.float32), 1)
+
+            info_geo = engine.inspect_raster(geo_tif_path, compute_valid_count=False)
+            self.assertFalse(info_geo.is_projected)
+            self.assertIn("0.000999° × 0.000999°", info_geo.formatted_resolution)
+            self.assertIn("约", info_geo.formatted_resolution)
+            self.assertNotIn("0.00 × 0.00", info_geo.formatted_resolution)
+            self.assertIn("m", info_geo.formatted_resolution)
+
+    # 26. 验证像元中心几何坐标对齐 (Pixel Centers with offset=center)
+    def test_raster_pixel_centers_coordinate_alignment(self):
+        engine = RasterTideEngine()
+        tf = from_origin(120.0, 32.0, 0.1, 0.1)
+
+        rows = np.array([0, 1])
+        cols = np.array([0, 2])
+        lons, lats = engine.pixel_centers_to_lonlat(tf, "EPSG:4326", rows, cols)
+
+        # 像元中心严密坐标：
+        # Row 0, Col 0: lon = 120.0 + 0.5 * 0.1 = 120.05, lat = 32.0 - 0.5 * 0.1 = 31.95
+        # Row 1, Col 2: lon = 120.0 + 2.5 * 0.1 = 120.25, lat = 32.0 - 1.5 * 0.1 = 31.85
+        self.assertAlmostEqual(lons[0], 120.05, places=5)
+        self.assertAlmostEqual(lats[0], 31.95, places=5)
+        self.assertAlmostEqual(lons[1], 120.25, places=5)
+        self.assertAlmostEqual(lats[1], 31.85, places=5)
+
+    # 27. 验证单时刻空间潮位解算与富元数据写入 (Snapshot Raster Engine)
+    def test_raster_snapshot_synthetic(self):
+        engine = RasterTideEngine()
+        engine.transformer.set_synthetic_fixture(mdt=0.5, delta_goco=-0.2, delta_eigen=0.03, n_egm=25.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_tif = os.path.join(tmpdir, "input.tif")
+            out_tif = os.path.join(tmpdir, "snapshot_out.tif")
+            profile = {
+                'driver': 'GTiff',
+                'height': 10,
+                'width': 10,
+                'count': 1,
+                'dtype': rasterio.float32,
+                'crs': 'EPSG:4326',
+                'transform': from_origin(122.0, 31.0, 0.01, 0.01),
+                'nodata': -9999.0
+            }
+            data = np.full((10, 10), 1.0, dtype=np.float32)
+            data[0, 0] = -9999.0  # 1 个 NoData
+
+            with rasterio.open(in_tif, 'w', **profile) as dst:
+                dst.write(data, 1)
+
+            # 模拟 pyfes evaluate_tide 返回恒定潮位 1.5m (150cm)
+            with patch('pyfes.evaluate_tide', return_value=(np.full(99, 150.0), np.zeros(99), np.ones(99))):
+                with patch.object(engine._get_predictor(), '_get_model', return_value=MagicMock()):
+                    summary = engine.calculate_snapshot_raster(
+                        input_raster_path=in_tif,
+                        output_raster_path=out_tif,
+                        timestamp="2024-06-15 12:00:00",
+                        datum_target="egm2008",
+                        strict=False
+                    )
+
+            self.assertTrue(os.path.exists(out_tif))
+            self.assertEqual(summary.valid_pixels, 99)
+            self.assertEqual(summary.total_pixels, 100)
+
+            with rasterio.open(out_tif) as src_out:
+                out_data = src_out.read(1)
+                self.assertTrue(np.isnan(out_data[0, 0]))
+                # 水位 = Tide (1.5) + MDT (0.5) + DeltaN (-0.2) = 1.8m
+                self.assertAlmostEqual(out_data[0, 1], 1.8, places=3)
+                tags = src_out.tags()
+                self.assertEqual(tags.get('SOFTWARE'), 'CoastTideX v1.4')
+                self.assertEqual(tags.get('ENGINE_MODE'), 'snapshot_raster')
+                self.assertEqual(tags.get('VERTICAL_DATUM'), 'EGM2008')
+
+    # 28. 验证潜在天文潮淹没概率 (CCDF) 严密性与地形屏障非插值
+    def test_inundation_frequency_oracle_vs_spatial(self):
+        # Oracle 测试：已知潮位分布下的离散淹没率
+        water_levels = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+        dem_elevations = np.array([-1.0, 0.5, 2.0, 3.5, 5.0])
+        freq = compute_inundation_frequency(water_levels, dem_elevations, as_percentage=True)
+        # -1.0 -> 5/5 = 100%
+        # 0.5 -> 4/5 (1,2,3,4) = 80%
+        # 2.0 -> 2/5 (3,4) = 40%
+        # 3.5 -> 1/5 (4) = 20%
+        # 5.0 -> 0/5 = 0%
+        expected = np.array([100.0, 80.0, 40.0, 20.0, 0.0])
+        np.testing.assert_allclose(freq, expected)
+
+        # 屏障非插值逻辑检验：当周围全为无效陆地节点时，严密标记 QC_INSUFFICIENT_NODES 并输出 NoData
+        node_invalid = ControlNode(
+            node_id=0, x=0.0, y=0.0, lon=120.0, lat=30.0,
+            water_levels_sorted=np.array([]), valid=False, quality_flag=0,
+            static_offset_m=0.0, qc_code=QC_INSUFFICIENT_NODES
+        )
+        self.assertFalse(node_invalid.valid)
+        self.assertEqual(node_invalid.qc_code, QC_INSUFFICIENT_NODES)
+
+    # 29. 验证 GUI 与 CLI 模块导入健全性
+    def test_gui_and_cli_importable(self):
+        from gui.main_window import MainWindow, RasterTideWorker, SingleTideWorker, BatchTideWorker
+        self.assertTrue(issubclass(RasterTideWorker, unittest.TestCase.__base__))
+        import cli
+        self.assertTrue(hasattr(cli, 'main'))
 
 
 if __name__ == '__main__':

@@ -8,6 +8,15 @@ import numpy as np
 import pandas as pd
 import dateutil.tz
 from datetime import datetime, timedelta
+# 关键机制：在 Windows 下在加载 PyQt6 前预加载 pyfes / rasterio C++ 库，避免 Qt6 运行时内存/DLL冲突
+try:
+    import pyfes
+except ImportError:
+    pass
+try:
+    import rasterio
+except ImportError:
+    pass
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime
 from PyQt6.QtWidgets import (
@@ -15,12 +24,15 @@ from PyQt6.QtWidgets import (
     QTabWidget, QGroupBox, QLabel, QLineEdit, QComboBox,
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
-    QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox
+    QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
+    QCheckBox, QDoubleSpinBox
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor
+import threading
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
+from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary
 from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
 from .settings_dialog import SettingsDialog
@@ -215,12 +227,80 @@ class BatchTideWorker(QThread):
             self.error.emit(str(e))
 
 
+class RasterTideWorker(QThread):
+    """空间栅格解算后台工作线程 (Snapshot / Inundation)"""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(object)  # RasterResultSummary
+    error = pyqtSignal(str)
+
+    def __init__(self, mode: str, params: dict):
+        super().__init__()
+        self.mode = mode
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            engine = RasterTideEngine()
+
+            def p_cb(percent, msg):
+                if not self._is_cancelled:
+                    self.progress.emit(percent, msg)
+
+            if self.mode == 'snapshot':
+                summary = engine.calculate_snapshot_raster(
+                    input_raster_path=self.params['input_path'],
+                    output_raster_path=self.params['output_path'],
+                    timestamp=self.params['timestamp'],
+                    datum_target=self.params['datum_target'],
+                    constituents=self.params['constituents'],
+                    source_tz=self.params['source_tz'],
+                    block_size=self.params['block_size'],
+                    strict=self.params['strict'],
+                    progress_callback=p_cb,
+                    cancel_event=self.cancel_event
+                )
+            elif self.mode == 'inundation':
+                summary = engine.calculate_inundation_raster(
+                    dem_path=self.params['input_path'],
+                    output_path=self.params['output_path'],
+                    qc_output_path=self.params.get('qc_output_path'),
+                    year=self.params.get('year', 2024),
+                    start_time=self.params.get('start_time'),
+                    end_time=self.params.get('end_time'),
+                    freq=self.params.get('freq', '30min'),
+                    dem_datum=self.params.get('dem_datum', 'egm2008'),
+                    constituents=self.params.get('constituents', 'all'),
+                    source_tz=self.params.get('source_tz', 'UTC'),
+                    initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
+                    min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
+                    inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
+                    block_size=self.params.get('block_size', 512),
+                    strict=self.params.get('strict', True),
+                    progress_callback=p_cb,
+                    cancel_event=self.cancel_event
+                )
+            else:
+                raise ValueError(f"未知栅格模式: {self.mode}")
+
+            if not self._is_cancelled:
+                self.finished.emit(summary)
+        except Exception as e:
+            if not self._is_cancelled:
+                self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """CoastTideX 桌面客户端主窗口"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.3")
+        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.4")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -228,6 +308,9 @@ class MainWindow(QMainWindow):
         self.current_result_df = None
         self.batch_result_df = None
         self._current_tz_mode = "UTC"
+        self._user_selected_freq = "30min"
+        self.raster_worker = None
+        self.current_raster_info = None
 
         self._init_menu()
         self._init_ui()
@@ -266,19 +349,22 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_single = QWidget()
         self.tab_batch = QWidget()
+        self.tab_raster = QWidget()
 
         self.tabs.addTab(self.tab_single, " 🌊 单点/时段潮位序列 ")
         self.tabs.addTab(self.tab_batch, " 📊 批量站点多时刻解算 ")
+        self.tabs.addTab(self.tab_raster, " 🗺️ 空间栅格解算 (Raster Engine) ")
 
         self._setup_single_tab()
         self._setup_batch_tab()
+        self._setup_raster_tab()
 
         main_layout.addWidget(self.tabs)
 
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.3")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.4")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -366,6 +452,7 @@ class MainWindow(QMainWindow):
         self.combo_freq.addItem("2小时 (2h)", "2h")
         self.combo_freq.setCurrentIndex(4)  # 默认 30min
         self.combo_freq.currentIndexChanged.connect(self._update_sample_estimate)
+        self.combo_freq.activated.connect(self._on_freq_user_changed)
         layout_time.addWidget(self.combo_freq, 4, 1)
 
         layout_time.addWidget(QLabel("输入时区:"), 5, 0)
@@ -393,16 +480,23 @@ class MainWindow(QMainWindow):
         self.combo_const.addItem("8 个核心主分潮 (快速预览)", "major8")
         layout_model.addWidget(self.combo_const, 0, 1)
 
-        layout_model.addWidget(QLabel("显示基准面:"), 1, 0)
-        self.combo_datum = QComboBox()
-        self.combo_datum.addItem("对比输出 (MSL & EGM2008)", "both")
-        self.combo_datum.addItem("全部基准面 (MSL/GOCO/EGM/WGS)", "all")
-        self.combo_datum.addItem("仅 EGM2008 (大地水准面正高)", "egm")
-        self.combo_datum.addItem("仅 MSL (相对平均海平面)", "msl")
-        self.combo_datum.addItem("仅 GOCO06s (Tide+MDT)", "goco")
-        self.combo_datum.addItem("仅 WGS84 (空间几何椭球高)", "wgs")
-        self.combo_datum.currentIndexChanged.connect(self._on_datum_display_changed)
-        layout_model.addWidget(self.combo_datum, 1, 1)
+        layout_model.addWidget(QLabel("计算基准面:"), 1, 0)
+        self.combo_compute_datum = QComboBox()
+        self.combo_compute_datum.addItem("对比输出 (MSL & EGM2008)", "both")
+        self.combo_compute_datum.addItem("全部基准面 (MSL/GOCO/EGM/WGS)", "all")
+        self.combo_compute_datum.addItem("仅 EGM2008 (大地水准面正高)", "egm2008")
+        self.combo_compute_datum.addItem("仅 MSL (相对平均海平面)", "msl")
+        self.combo_compute_datum.currentIndexChanged.connect(self._on_compute_datum_changed)
+        layout_model.addWidget(self.combo_compute_datum, 1, 1)
+
+        layout_model.addWidget(QLabel("显示/统计基准:"), 2, 0)
+        self.combo_display_datum = QComboBox()
+        self.combo_display_datum.addItem("EGM2008 (大地水准面正高)", "egm")
+        self.combo_display_datum.addItem("MSL (相对平均海平面)", "msl")
+        self.combo_display_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco")
+        self.combo_display_datum.addItem("WGS84 (空间几何椭球高)", "wgs")
+        self.combo_display_datum.currentIndexChanged.connect(self._on_datum_display_changed)
+        layout_model.addWidget(self.combo_display_datum, 2, 1)
 
         layout_left.addWidget(grp_model)
 
@@ -569,6 +663,283 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(layout_batch_table)
 
+    def _setup_raster_tab(self):
+        scroll = QScrollArea(self.tab_raster)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        panel = QWidget()
+        layout_main = QVBoxLayout(panel)
+        layout_main.setContentsMargins(10, 10, 10, 10)
+        layout_main.setSpacing(12)
+
+        # 1. 输入栅格与空间属性卡片
+        grp_in = QGroupBox("1. 输入栅格与空间元数据检查")
+        layout_in = QGridLayout(grp_in)
+        layout_in.setSpacing(8)
+
+        layout_in.addWidget(QLabel("输入 GeoTIFF 文件:"), 0, 0)
+        self.edit_raster_input = QLineEdit()
+        self.edit_raster_input.setPlaceholderText("请选择具备有效坐标参考系 (CRS) 的 GeoTIFF 影像或 DEM...")
+        self.edit_raster_input.textChanged.connect(self._on_raster_input_changed)
+        layout_in.addWidget(self.edit_raster_input, 0, 1)
+
+        btn_browse_in = QPushButton("浏览文件...")
+        btn_browse_in.setObjectName("btn_secondary")
+        btn_browse_in.clicked.connect(self._browse_raster_input)
+        layout_in.addWidget(btn_browse_in, 0, 2)
+
+        btn_inspect = QPushButton("🔍 检查元数据")
+        btn_inspect.setObjectName("btn_secondary")
+        btn_inspect.clicked.connect(self._inspect_raster_ui)
+        layout_in.addWidget(btn_inspect, 0, 3)
+
+        # 元数据展示卡片
+        frame_meta = QFrame()
+        frame_meta.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 6px;")
+        layout_meta = QGridLayout(frame_meta)
+        layout_meta.setSpacing(6)
+
+        layout_meta.addWidget(QLabel("影像规格:"), 0, 0)
+        self.lbl_raster_dims = QLabel("-")
+        self.lbl_raster_dims.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_meta.addWidget(self.lbl_raster_dims, 0, 1)
+
+        layout_meta.addWidget(QLabel("坐标系统 (CRS):"), 0, 2)
+        self.lbl_raster_crs = QLabel("-")
+        self.lbl_raster_crs.setStyleSheet("font-weight: bold; color: #a78bfa;")
+        layout_meta.addWidget(self.lbl_raster_crs, 0, 3)
+
+        layout_meta.addWidget(QLabel("空间分辨率:"), 1, 0)
+        self.lbl_raster_res = QLabel("-")
+        layout_meta.addWidget(self.lbl_raster_res, 1, 1)
+
+        layout_meta.addWidget(QLabel("NoData 值:"), 1, 2)
+        self.lbl_raster_nodata = QLabel("-")
+        layout_meta.addWidget(self.lbl_raster_nodata, 1, 3)
+
+        layout_meta.addWidget(QLabel("空间范围 (Bounds):"), 2, 0)
+        self.lbl_raster_bounds = QLabel("-")
+        layout_meta.addWidget(self.lbl_raster_bounds, 2, 1, 1, 3)
+
+        layout_in.addWidget(frame_meta, 1, 0, 1, 4)
+        layout_main.addWidget(grp_in)
+
+        # 2. 空间解算模式选择
+        grp_mode = QGroupBox("2. 空间栅格解算任务模式")
+        layout_mode = QGridLayout(grp_mode)
+        layout_mode.setSpacing(8)
+
+        layout_mode.addWidget(QLabel("任务类型:"), 0, 0)
+        self.combo_raster_mode = QComboBox()
+        self.combo_raster_mode.addItem("🌊 单时刻空间潮位 / 水面高程 (Snapshot Raster Mode)", "snapshot")
+        self.combo_raster_mode.addItem("📊 潜在天文潮淹没频率 (Annual / Period Inundation Frequency)", "inundation")
+        self.combo_raster_mode.currentIndexChanged.connect(self._on_raster_mode_changed)
+        layout_mode.addWidget(self.combo_raster_mode, 0, 1)
+
+        layout_main.addWidget(grp_mode)
+
+        # 3. 模式专属参数配置
+        self.grp_params = QGroupBox("3. 模拟计算参数配置")
+        layout_params = QVBoxLayout(self.grp_params)
+
+        # 3.1 Snapshot 容器
+        self.container_snapshot = QWidget()
+        layout_snap = QGridLayout(self.container_snapshot)
+        layout_snap.setContentsMargins(0, 0, 0, 0)
+        layout_snap.setSpacing(8)
+
+        layout_snap.addWidget(QLabel("解算快照时刻:"), 0, 0)
+        self.time_raster_snap = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        self.time_raster_snap.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self.time_raster_snap.setCalendarPopup(True)
+        layout_snap.addWidget(self.time_raster_snap, 0, 1)
+
+        layout_snap.addWidget(QLabel("输入时刻时区:"), 0, 2)
+        self.combo_snap_tz = QComboBox()
+        self.combo_snap_tz.addItem("UTC (世界标准时)", "UTC")
+        self.combo_snap_tz.addItem("本地时间 (Local Time)", "local")
+        layout_snap.addWidget(self.combo_snap_tz, 0, 3)
+
+        layout_snap.addWidget(QLabel("目标垂直基准:"), 1, 0)
+        self.combo_snap_datum = QComboBox()
+        self.combo_snap_datum.addItem("EGM2008 (大地水准面严密海拔正高)", "egm2008")
+        self.combo_snap_datum.addItem("MSL (相对平均海平面)", "msl")
+        self.combo_snap_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
+        self.combo_snap_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        layout_snap.addWidget(self.combo_snap_datum, 1, 1)
+
+        layout_snap.addWidget(QLabel("分潮方案:"), 1, 2)
+        self.combo_snap_const = QComboBox()
+        self.combo_snap_const.addItem("全部 34 个主分潮 (全精度)", "all")
+        self.combo_snap_const.addItem("8 个核心主分潮 (快速预览)", "major8")
+        layout_snap.addWidget(self.combo_snap_const, 1, 3)
+
+        layout_params.addWidget(self.container_snapshot)
+
+        # 3.2 Inundation 容器
+        self.container_inund = QWidget()
+        layout_inund = QGridLayout(self.container_inund)
+        layout_inund.setContentsMargins(0, 0, 0, 0)
+        layout_inund.setSpacing(8)
+
+        layout_inund.addWidget(QLabel("时段模式:"), 0, 0)
+        self.combo_inund_time_mode = QComboBox()
+        self.combo_inund_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
+        self.combo_inund_time_mode.addItem("自定义时段 (Custom Period)", "period")
+        self.combo_inund_time_mode.currentIndexChanged.connect(self._on_inund_time_mode_changed)
+        layout_inund.addWidget(self.combo_inund_time_mode, 0, 1)
+
+        self.lbl_inund_year = QLabel("预测年份:")
+        layout_inund.addWidget(self.lbl_inund_year, 0, 2)
+        self.spin_inund_year = QSpinBox()
+        self.spin_inund_year.setRange(1950, 2099)
+        self.spin_inund_year.setValue(2024)
+        layout_inund.addWidget(self.spin_inund_year, 0, 3)
+
+        self.lbl_inund_start = QLabel("起始时间:")
+        layout_inund.addWidget(self.lbl_inund_start, 1, 0)
+        self.time_inund_start = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        self.time_inund_start.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.time_inund_start.setCalendarPopup(True)
+        layout_inund.addWidget(self.time_inund_start, 1, 1)
+
+        self.lbl_inund_end = QLabel("结束时间:")
+        layout_inund.addWidget(self.lbl_inund_end, 1, 2)
+        self.time_inund_end = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(30))
+        self.time_inund_end.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.time_inund_end.setCalendarPopup(True)
+        layout_inund.addWidget(self.time_inund_end, 1, 3)
+
+        self.lbl_inund_start.setVisible(False)
+        self.time_inund_start.setVisible(False)
+        self.lbl_inund_end.setVisible(False)
+        self.time_inund_end.setVisible(False)
+
+        layout_inund.addWidget(QLabel("采样步长:"), 2, 0)
+        self.combo_inund_freq = QComboBox()
+        self.combo_inund_freq.addItem("30分钟 (30min - 标准推荐)", "30min")
+        self.combo_inund_freq.addItem("1小时 (1h - 快速解算)", "1h")
+        self.combo_inund_freq.addItem("15分钟 (15min - 高精度)", "15min")
+        self.combo_inund_freq.addItem("10分钟 (10min)", "10min")
+        self.combo_inund_freq.addItem("5分钟 (5min)", "5min")
+        layout_inund.addWidget(self.combo_inund_freq, 2, 1)
+
+        layout_inund.addWidget(QLabel("DEM基准面:"), 2, 2)
+        self.combo_inund_datum = QComboBox()
+        self.combo_inund_datum.addItem("EGM2008 (大地水准面绝对正高)", "egm2008")
+        self.combo_inund_datum.addItem("MSL (相对平均海平面)", "msl")
+        self.combo_inund_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
+        self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        layout_inund.addWidget(self.combo_inund_datum, 2, 3)
+
+        layout_inund.addWidget(QLabel("QC掩膜输出:"), 3, 0)
+        self.edit_inund_qc = QLineEdit()
+        self.edit_inund_qc.setPlaceholderText("留空则自动保存为 <主输出>_qc.tif")
+        layout_inund.addWidget(self.edit_inund_qc, 3, 1, 1, 2)
+
+        btn_browse_qc = QPushButton("浏览...")
+        btn_browse_qc.setObjectName("btn_secondary")
+        btn_browse_qc.clicked.connect(self._browse_inund_qc)
+        layout_inund.addWidget(btn_browse_qc, 3, 3)
+
+        layout_params.addWidget(self.container_inund)
+        self.container_inund.setVisible(False)
+
+        layout_main.addWidget(self.grp_params)
+
+        # 4. 自适应网格高级参数
+        self.grp_grid = QGroupBox("4. 自适应潮位控制网格与性能优化参数")
+        layout_grid = QGridLayout(self.grp_grid)
+        layout_grid.setSpacing(8)
+
+        layout_grid.addWidget(QLabel("初始网格间距:"), 0, 0)
+        self.spin_grid_init = QDoubleSpinBox()
+        self.spin_grid_init.setRange(500.0, 50000.0)
+        self.spin_grid_init.setValue(4000.0)
+        self.spin_grid_init.setSingleStep(500.0)
+        self.spin_grid_init.setSuffix(" m")
+        layout_grid.addWidget(self.spin_grid_init, 0, 1)
+
+        layout_grid.addWidget(QLabel("最小允许间距:"), 0, 2)
+        self.spin_grid_min = QDoubleSpinBox()
+        self.spin_grid_min.setRange(50.0, 10000.0)
+        self.spin_grid_min.setValue(500.0)
+        self.spin_grid_min.setSingleStep(100.0)
+        self.spin_grid_min.setSuffix(" m")
+        layout_grid.addWidget(self.spin_grid_min, 0, 3)
+
+        layout_grid.addWidget(QLabel("容错误差阈值:"), 1, 0)
+        self.spin_grid_tol = QDoubleSpinBox()
+        self.spin_grid_tol.setRange(0.1, 20.0)
+        self.spin_grid_tol.setValue(1.0)
+        self.spin_grid_tol.setSingleStep(0.2)
+        self.spin_grid_tol.setSuffix(" %")
+        layout_grid.addWidget(self.spin_grid_tol, 1, 1)
+
+        layout_grid.addWidget(QLabel("2D 分块大小:"), 1, 2)
+        self.spin_grid_block = QSpinBox()
+        self.spin_grid_block.setRange(64, 4096)
+        self.spin_grid_block.setValue(512)
+        self.spin_grid_block.setSingleStep(64)
+        self.spin_grid_block.setSuffix(" px")
+        layout_grid.addWidget(self.spin_grid_block, 1, 3)
+
+        self.chk_raster_strict = QCheckBox("严密基准校验 (若关键大地水准面/差值网格缺失则中断拦截，防止粗糙外推)")
+        self.chk_raster_strict.setChecked(True)
+        layout_grid.addWidget(self.chk_raster_strict, 2, 0, 1, 4)
+
+        layout_main.addWidget(self.grp_grid)
+        self.grp_grid.setVisible(False)
+
+        # 5. 输出路径与任务执行
+        grp_exec = QGroupBox("5. 输出路径配置与任务执行")
+        layout_exec = QGridLayout(grp_exec)
+        layout_exec.setSpacing(8)
+
+        layout_exec.addWidget(QLabel("输出 GeoTIFF 文件:"), 0, 0)
+        self.edit_raster_output = QLineEdit()
+        self.edit_raster_output.setPlaceholderText("输出 GeoTIFF 路径...")
+        layout_exec.addWidget(self.edit_raster_output, 0, 1)
+
+        btn_browse_out = QPushButton("浏览...")
+        btn_browse_out.setObjectName("btn_secondary")
+        btn_browse_out.clicked.connect(self._browse_raster_output)
+        layout_exec.addWidget(btn_browse_out, 0, 2)
+
+        # 执行与取消按钮
+        btn_box = QHBoxLayout()
+        self.btn_run_raster = QPushButton("🚀 开始空间栅格解算")
+        self.btn_run_raster.setFixedHeight(40)
+        self.btn_run_raster.clicked.connect(self._run_raster_simulation)
+
+        self.btn_cancel_raster = QPushButton("🛑 取消任务")
+        self.btn_cancel_raster.setFixedHeight(40)
+        self.btn_cancel_raster.setEnabled(False)
+        self.btn_cancel_raster.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_cancel_raster.clicked.connect(self._cancel_raster_simulation)
+
+        btn_box.addWidget(self.btn_run_raster, stretch=3)
+        btn_box.addWidget(self.btn_cancel_raster, stretch=1)
+        layout_exec.addLayout(btn_box, 1, 0, 1, 3)
+
+        self.prog_raster = QProgressBar()
+        self.prog_raster.setValue(0)
+        self.prog_raster.setTextVisible(True)
+        layout_exec.addWidget(self.prog_raster, 2, 0, 1, 3)
+
+        self.lbl_raster_status = QLabel("就绪 - 请选择输入 GeoTIFF 影像并配置解算参数")
+        self.lbl_raster_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_exec.addWidget(self.lbl_raster_status, 3, 0, 1, 3)
+
+        layout_main.addWidget(grp_exec)
+        layout_main.addStretch()
+
+        scroll.setWidget(panel)
+        tab_layout = QVBoxLayout(self.tab_raster)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+
     def _set_default_values(self):
         app_cfg = load_app_config()
         gui_cfg = app_cfg.get('gui', {})
@@ -593,6 +964,7 @@ class MainWindow(QMainWindow):
 
         # 联动 config.yaml 采样步长配置
         def_freq = tide_cfg.get('default_freq', '30min')
+        self._user_selected_freq = def_freq
         idx_freq = self.combo_freq.findData(def_freq)
         if idx_freq >= 0:
             self.combo_freq.setCurrentIndex(idx_freq)
@@ -610,6 +982,31 @@ class MainWindow(QMainWindow):
         self.current_scalar_datum = {}
         self._update_sample_estimate()
 
+    def _on_freq_user_changed(self, index):
+        self._user_selected_freq = self.combo_freq.currentData()
+        self._update_sample_estimate()
+
+    def _on_compute_datum_changed(self):
+        compute_mode = self.combo_compute_datum.currentData()
+        if compute_mode == 'msl':
+            idx = self.combo_display_datum.findData('msl')
+            if idx >= 0:
+                self.combo_display_datum.setCurrentIndex(idx)
+            self.combo_display_datum.setEnabled(False)
+        elif compute_mode == 'egm2008':
+            self.combo_display_datum.setEnabled(True)
+            cur = self.combo_display_datum.currentData()
+            if cur not in ['egm', 'msl']:
+                idx = self.combo_display_datum.findData('egm')
+                if idx >= 0:
+                    self.combo_display_datum.setCurrentIndex(idx)
+        else:
+            self.combo_display_datum.setEnabled(True)
+
+        if self.current_result_df is not None:
+            self._update_stat_cards(self.current_result_df)
+            self._update_chart()
+
     def _on_time_mode_changed(self):
         mode = self.combo_time_mode.currentData()
         is_year = (mode == 'year')
@@ -619,6 +1016,23 @@ class MainWindow(QMainWindow):
         self.time_end.setVisible(not is_year)
         self.lbl_year.setVisible(is_year)
         self.spin_year.setVisible(is_year)
+
+        if is_year:
+            if self.combo_freq.currentData() != '30min':
+                idx = self.combo_freq.findData('30min')
+                if idx >= 0:
+                    self.combo_freq.blockSignals(True)
+                    self.combo_freq.setCurrentIndex(idx)
+                    self.combo_freq.blockSignals(False)
+                self.status_bar.showMessage("已自动切换至整年模式推荐采样间隔 (30min)。")
+        else:
+            if hasattr(self, '_user_selected_freq') and self._user_selected_freq:
+                idx = self.combo_freq.findData(self._user_selected_freq)
+                if idx >= 0:
+                    self.combo_freq.blockSignals(True)
+                    self.combo_freq.setCurrentIndex(idx)
+                    self.combo_freq.blockSignals(False)
+
         self._update_sample_estimate()
 
     def _update_sample_estimate(self):
@@ -718,7 +1132,7 @@ class MainWindow(QMainWindow):
         freq = self.combo_freq.currentData() or "30min"
         constituents = self.combo_const.currentData()
         source_tz = self.combo_tz.currentData()
-        datum_mode = self.combo_datum.currentData()
+        datum_mode = self.combo_compute_datum.currentData()
 
         if mode == 'year':
             year = self.spin_year.value()
@@ -775,7 +1189,7 @@ class MainWindow(QMainWindow):
 
     def _update_stat_cards(self, df):
         """根据用户选定的显示基准面，动态更新极值统计卡片"""
-        datum_mode = self.combo_datum.currentData()
+        datum_mode = self.combo_display_datum.currentData()
 
         if datum_mode == 'msl':
             col = 'tide_msl_m' if 'tide_msl_m' in df.columns else 'tide_total_m'
@@ -845,7 +1259,7 @@ class MainWindow(QMainWindow):
         if self.current_result_df is None:
             return
 
-        datum_mode = self.combo_datum.currentData()
+        datum_mode = self.combo_display_datum.currentData()
         time_mode = self.combo_tz.currentData()
         time_col = 'datetime_utc' if time_mode == 'UTC' else 'datetime_input'
 
@@ -1014,6 +1428,215 @@ class MainWindow(QMainWindow):
             export_dataframe(self.batch_result_df, path)
             QMessageBox.information(self, "导出成功", f"批量结果已导出至:\n{path}")
 
+    # ================= 空间栅格解算逻辑 (Raster Engine v1.4) =================
+    def _on_raster_input_changed(self, text):
+        path = text.strip()
+        if os.path.exists(path) and os.path.isfile(path):
+            self._propose_raster_output(path)
+            self._inspect_raster_ui(path)
+
+    def _propose_raster_output(self, input_path):
+        base, ext = os.path.splitext(input_path)
+        mode = self.combo_raster_mode.currentData()
+        if mode == 'snapshot':
+            self.edit_raster_output.setText(f"{base}_tide_snapshot{ext}")
+        else:
+            year = self.spin_inund_year.value() if self.combo_inund_time_mode.currentData() == 'year' else 'period'
+            self.edit_raster_output.setText(f"{base}_inundation_{year}{ext}")
+            self.edit_inund_qc.setText(f"{base}_inundation_{year}_qc{ext}")
+
+    def _browse_raster_input(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选择输入 GeoTIFF 影像", "", "GeoTIFF (*.tif *.tiff *.geotiff);;All Files (*.*)")
+        if f:
+            self.edit_raster_input.setText(f)
+
+    def _browse_raster_output(self):
+        f, _ = QFileDialog.getSaveFileName(self, "指定输出 GeoTIFF 路径", self.edit_raster_output.text().strip() or "output.tif", "GeoTIFF (*.tif *.tiff)")
+        if f:
+            self.edit_raster_output.setText(f)
+
+    def _browse_inund_qc(self):
+        f, _ = QFileDialog.getSaveFileName(self, "指定 QC 质量掩膜路径", self.edit_inund_qc.text().strip() or "output_qc.tif", "GeoTIFF (*.tif *.tiff)")
+        if f:
+            self.edit_inund_qc.setText(f)
+
+    def _inspect_raster_ui(self, target_path=None):
+        path = target_path if isinstance(target_path, str) else self.edit_raster_input.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "文件不存在", "请先选择有效的输入 GeoTIFF 文件！")
+            return
+        try:
+            engine = RasterTideEngine()
+            info = engine.inspect_raster(path, compute_valid_count=False)
+            self.current_raster_info = info
+            self.lbl_raster_dims.setText(f"{info.width} × {info.height} (总计 {info.total_pixel_count:,} 像元)")
+            self.lbl_raster_crs.setText(info.formatted_crs)
+            self.lbl_raster_crs.setToolTip(f"完整坐标参考系统定义 (CRS):\n{info.crs}")
+            self.lbl_raster_res.setText(info.formatted_resolution)
+            self.lbl_raster_res.setToolTip(
+                f"原始分辨率数值: ({info.resolution[0]}, {info.resolution[1]})\n"
+                f"坐标系类型: {'投影坐标系 (Projected, 单位: 米)' if info.is_projected else '地理坐标系 (Geographic, 单位: 度)'}"
+            )
+            nodata_str = f"{info.nodata}" if info.nodata is not None else "未定义 (None)"
+            self.lbl_raster_nodata.setText(nodata_str)
+            b = info.bounds
+            self.lbl_raster_bounds.setText(f"[{b[0]:.4f}, {b[1]:.4f}] -> [{b[2]:.4f}, {b[3]:.4f}]")
+            self.status_bar.showMessage(f"已加载栅格元数据: {os.path.basename(path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "检查失败", f"无法解析 GeoTIFF 元数据:\n{e}")
+
+    def _on_raster_mode_changed(self):
+        mode = self.combo_raster_mode.currentData()
+        is_snap = (mode == 'snapshot')
+        self.container_snapshot.setVisible(is_snap)
+        self.container_inund.setVisible(not is_snap)
+        self.grp_grid.setVisible(not is_snap)
+        inp = self.edit_raster_input.text().strip()
+        if inp:
+            self._propose_raster_output(inp)
+
+    def _on_inund_time_mode_changed(self):
+        mode = self.combo_inund_time_mode.currentData()
+        is_year = (mode == 'year')
+        self.lbl_inund_year.setVisible(is_year)
+        self.spin_inund_year.setVisible(is_year)
+        self.lbl_inund_start.setVisible(not is_year)
+        self.time_inund_start.setVisible(not is_year)
+        self.lbl_inund_end.setVisible(not is_year)
+        self.time_inund_end.setVisible(not is_year)
+        inp = self.edit_raster_input.text().strip()
+        if inp:
+            self._propose_raster_output(inp)
+
+    def _run_raster_simulation(self):
+        inp_path = self.edit_raster_input.text().strip()
+        out_path = self.edit_raster_output.text().strip()
+        if not inp_path or not os.path.exists(inp_path):
+            QMessageBox.warning(self, "输入错误", "请输入并确认有效的 GeoTIFF 栅格路径！")
+            return
+        if not out_path:
+            QMessageBox.warning(self, "输入错误", "请指定输出 GeoTIFF 文件路径！")
+            return
+
+        mode = self.combo_raster_mode.currentData()
+        strict = self.chk_raster_strict.isChecked()
+
+        if mode == 'snapshot':
+            snap_time = self.time_raster_snap.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+            params = {
+                'input_path': inp_path,
+                'output_path': out_path,
+                'timestamp': snap_time,
+                'datum_target': self.combo_snap_datum.currentData(),
+                'constituents': self.combo_snap_const.currentData(),
+                'source_tz': self.combo_snap_tz.currentData(),
+                'block_size': self.spin_grid_block.value(),
+                'strict': strict
+            }
+        else:
+            time_mode = self.combo_inund_time_mode.currentData()
+            qc_out = self.edit_inund_qc.text().strip() or None
+            params = {
+                'input_path': inp_path,
+                'output_path': out_path,
+                'qc_output_path': qc_out,
+                'freq': self.combo_inund_freq.currentData(),
+                'dem_datum': self.combo_inund_datum.currentData(),
+                'constituents': 'all',
+                'source_tz': 'UTC',
+                'initial_control_spacing_m': self.spin_grid_init.value(),
+                'min_control_spacing_m': self.spin_grid_min.value(),
+                'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
+                'block_size': self.spin_grid_block.value(),
+                'strict': strict
+            }
+            if time_mode == 'year':
+                params['year'] = self.spin_inund_year.value()
+                params['start_time'] = None
+                params['end_time'] = None
+            else:
+                params['year'] = None
+                params['start_time'] = self.time_inund_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                params['end_time'] = self.time_inund_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                if self.time_inund_start.dateTime() >= self.time_inund_end.dateTime():
+                    QMessageBox.warning(self, "时间错误", "起始时间必须早于结束时间！")
+                    return
+
+        self.btn_run_raster.setEnabled(False)
+        self.btn_cancel_raster.setEnabled(True)
+        self.prog_raster.setValue(5)
+        self.lbl_raster_status.setText("正在初始化空间解算引擎...")
+
+        self.raster_worker = RasterTideWorker(mode=mode, params=params)
+        self.raster_worker.progress.connect(self._on_raster_progress)
+        self.raster_worker.finished.connect(self._on_raster_finished)
+        self.raster_worker.error.connect(self._on_raster_error)
+        self.raster_worker.start()
+
+    def _cancel_raster_simulation(self):
+        if self.raster_worker and self.raster_worker.isRunning():
+            self.raster_worker.cancel()
+            self.lbl_raster_status.setText("正在取消任务并清理临时文件...")
+            self.btn_cancel_raster.setEnabled(False)
+
+    def _on_raster_progress(self, pct, msg):
+        self.prog_raster.setValue(pct)
+        self.lbl_raster_status.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _on_raster_finished(self, summary):
+        try:
+            self.btn_run_raster.setEnabled(True)
+            self.btn_cancel_raster.setEnabled(False)
+            self.prog_raster.setValue(100)
+            self.lbl_raster_status.setText(f"解算圆满完成！耗时 {summary.elapsed_seconds:.2f} 秒。")
+            self.status_bar.showMessage("空间栅格解算圆满完成！")
+
+            mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
+            qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
+            nodes_cnt = summary.control_nodes_count
+            if nodes_cnt is not None and nodes_cnt > 0:
+                nodes_line = f"<li><b>控制节点总数</b>: {nodes_cnt:,} 个</li>"
+            else:
+                nodes_line = ""
+
+            info_box = QMessageBox(self)
+            info_box.setWindowTitle("解算完成")
+            info_box.setIcon(QMessageBox.Icon.Information)
+            info_box.setText(f"<h3>🎉 空间栅格解算成功！</h3>")
+            info_box.setInformativeText(
+                f"<p><b>任务模式</b>: {mode_name}</p>"
+                f"<ul>"
+                f"<li><b>影像规格</b>: {summary.width} × {summary.height} ({summary.total_pixels:,} 像元)</li>"
+                f"<li><b>有效解算像元</b>: {summary.valid_pixels:,}</li>"
+                f"{nodes_line}"
+                f"<li><b>解算总耗时</b>: {summary.elapsed_seconds:.2f} 秒</li>"
+                f"<li><b>输出文件路径</b>: <code>{summary.output_path}</code></li>"
+                f"{qc_line}"
+                f"</ul>"
+            )
+            btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+            info_box.addButton(QMessageBox.StandardButton.Ok)
+            info_box.exec()
+
+            if info_box.clickedButton() == btn_open_dir:
+                out_dir = os.path.dirname(os.path.abspath(summary.output_path))
+                if os.path.exists(out_dir):
+                    import subprocess
+                    subprocess.Popen(f'explorer "{out_dir}"')
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{summary.output_path}\n\n但弹窗提示异常: {e}")
+
+    def _on_raster_error(self, err_msg):
+        self.btn_run_raster.setEnabled(True)
+        self.btn_cancel_raster.setEnabled(False)
+        self.prog_raster.setValue(0)
+        self.lbl_raster_status.setText("解算失败")
+        self.status_bar.showMessage("栅格解算发生错误")
+        QMessageBox.critical(self, "解算错误", f"空间栅格解算失败:\n{err_msg}")
+
     def _open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
@@ -1024,29 +1647,29 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.3</h3>"
-            "<p><b>全球海岸带潮位模拟与高程基准转换系统</b></p>"
-            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的潮汐预测与严密基准转换工具。</p>"
+            "<h3>CoastTideX v1.4</h3>"
+            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统</b></p>"
+            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
             "<li><b>四大多元基准体系</b>: "
             "<ul>"
             "<li>MSL (相对平均海平面)</li>"
-            "<li>MDT 原始大地水准面基准 (全球大洋 GOCO06s / 地中海与黑海 EIGEN-6C4 矢量多边形判定)</li>"
+            "<li>MDT 原始大地水准面基准 (全球大洋 GOCO06s / 地中海与黑海 EIGEN-6C4)</li>"
             "<li>EGM2008 (经 ΔN 改正的严密海拔正高)</li>"
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>v1.3 新特性</b>: "
+            "<li><b>v1.4 新特性 (Spatial Raster Engine)</b>: "
             "<ul>"
-            "<li>地中海/黑海精确矢量多边形掩膜与双大地水准面差值引擎（内置 EIGEN-6C4 与 GOCO06s 差值栅格）；</li>"
-            "<li>单点连续时段与整年预测模式（2024 闰年 30min 采样严格生成 17,568 样本点）；</li>"
-            "<li>动态时间分块 (Time-Chunking) 引擎，支持多年长时序平稳流式计算与实时进度汇报；</li>"
-            "<li>潜在天文潮淹没频率 (ECDF/CCDF) 向量化分析与 10m DEM 栅格解算脚本；</li>"
-            "<li>表格 2,000 行极速预览与 100% 全量 CSV/Excel 导出解耦架构。</li>"
+            "<li><b>空间栅格解算引擎 (Tab 3)</b>: 支持 GeoTIFF 空间单时刻潮位计算与高分辨率 DEM 潜在天文潮淹没频率解算；</li>"
+            "<li><b>自适应潮位控制网格 (Adaptive Tide Control Grid)</b>: 采用空间梯度自适应四叉树细分与经验互补分布 (CCDF)，防跨陆地盲插值；</li>"
+            "<li><b>基准计算与显示解耦</b>: 单点解算区分计算目标与显示/统计目标，切换显示零计算开销；</li>"
+            "<li><b>权威混合 MDT 掩膜优先</b>: 优先加载权威 GeoTIFF 掩膜，多边形作为安全备用并标记 QC_DATUM_SOURCE_APPROX；</li>"
+            "<li><b>流式 2D 矩形分块 I/O</b>: 512x512 内存安全分块流式吞吐，支持原子级写入保护与富元数据 (Provenance) 嵌入。</li>"
             "</ul></li>"
             "</ul>"
-            "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes & scipy</p>"
+            "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)

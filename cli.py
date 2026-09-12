@@ -1,6 +1,6 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface v1.3)
-用于脚本批处理、无人值守自动化、年度连续模拟以及与 GIS 工作流整合。
+CoastTideX 命令行工具 (Command-Line Interface v1.4)
+用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算与淹没频率分析。
 
 使用示例:
     # 自定义时段单点预测
@@ -11,6 +11,12 @@ CoastTideX 命令行工具 (Command-Line Interface v1.3)
 
     # 批量计算
     python cli.py batch --input input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
+
+    # 空间栅格单时刻解算 (Snapshot Raster)
+    python cli.py raster snapshot --input water_boundary.tif --output tide_snapshot.tif --time "2024-06-15 12:00:00" --datum egm2008
+
+    # 潮滩 DEM 潜在天文潮淹没频率解算 (Annual Inundation Frequency)
+    python cli.py raster inundation --dem coastal_dem.tif --output inundation_freq.tif --year 2024 --step 30min --dem-datum egm2008
 """
 
 import os
@@ -31,15 +37,16 @@ if project_root not in sys.path:
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
+from core.raster_engine import RasterTideEngine
 from core.utils import export_dataframe
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.3")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.4")
 
-    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点) 或 batch (批量)")
+    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
 
-    # 单点模式参数
+    # 1. 单点模式参数
     p_single = subparsers.add_parser("single", help="单点时间序列预测 (支持自定义时段或整年模式)")
     p_single.add_argument("--lon", type=float, required=True, help="目标经度 (-180~180 或 0~360)")
     p_single.add_argument("--lat", type=float, required=True, help="目标纬度 (-90~90)")
@@ -52,7 +59,7 @@ def main():
     p_single.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
     p_single.add_argument("--output", "-o", type=str, default="predicted_tide.csv", help="输出文件路径")
 
-    # 批量模式参数
+    # 2. 批量模式参数
     p_batch = subparsers.add_parser("batch", help="批量 CSV 文件点位潮位计算")
     p_batch.add_argument("--input", "-i", type=str, required=True, help="输入 CSV 文件路径")
     p_batch.add_argument("--lon-col", type=str, default="longitude", help="经度列名")
@@ -61,6 +68,39 @@ def main():
     p_batch.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
     p_batch.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
     p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
+
+    # 3. 空间栅格模式参数
+    p_raster = subparsers.add_parser("raster", help="空间栅格解算模式 (snapshot 单时刻空间潮位 / inundation 潜在淹没频率)")
+    raster_subparsers = p_raster.add_subparsers(dest="raster_submode", help="栅格子模式: snapshot 或 inundation")
+
+    # 3.1 栅格单时刻快照
+    p_snap = raster_subparsers.add_parser("snapshot", help="单时刻空间潮位 / 水面高程 GeoTIFF 解算")
+    p_snap.add_argument("--input", "-i", type=str, required=True, help="输入 GeoTIFF 路径")
+    p_snap.add_argument("--output", "-o", type=str, required=True, help="输出 GeoTIFF 路径")
+    p_snap.add_argument("--time", type=str, required=True, help="解算时刻 (如 '2024-06-15 12:00:00')")
+    p_snap.add_argument("--datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="目标垂直基准 (默认: egm2008)")
+    p_snap.add_argument("--constituents", type=str, default="all", help="分潮集合 (all 或 major8)")
+    p_snap.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时刻时区 (默认: UTC)")
+    p_snap.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
+    p_snap.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
+
+    # 3.2 栅格潜在淹没频率
+    p_inund = raster_subparsers.add_parser("inundation", help="自适应控制网格潜在天文潮淹没频率 GeoTIFF 解算")
+    p_inund.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
+    p_inund.add_argument("--output", "-o", type=str, required=True, help="输出淹没频率 GeoTIFF 路径")
+    p_inund.add_argument("--qc-output", type=str, default=None, help="输出质量掩膜 GeoTIFF 路径 (默认: <output>_qc.tif)")
+    p_inund.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
+    p_inund.add_argument("--start", type=str, default=None, help="自定义起始时间")
+    p_inund.add_argument("--end", type=str, default=None, help="自定义结束时间")
+    p_inund.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
+    p_inund.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_inund.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
+    p_inund.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时间时区 (默认: UTC)")
+    p_inund.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
+    p_inund.add_argument("--min-spacing", type=float, default=500.0, help="最小控制网格间距 (米，默认: 500)")
+    p_inund.add_argument("--tolerance", type=float, default=1.0, help="淹没频率容错阈值 (%%，默认: 1.0)")
+    p_inund.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
+    p_inund.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
     args = parser.parse_args()
 
@@ -169,6 +209,74 @@ def main():
         export_dataframe(df_out, args.output)
         print(f"[OK] 批量解算完成，共生成 {len(df_out):,} 行记录，已导出至: {args.output}")
 
+    elif args.mode == "raster":
+        if not getattr(args, 'raster_submode', None):
+            p_raster.print_help()
+            sys.exit(0)
+
+        raster_engine = RasterTideEngine()
+
+        if args.raster_submode == "snapshot":
+            print(f"[*] 启动单时刻空间潮位解算 (Snapshot Raster Mode)...")
+            print(f"[*] 输入栅格: {args.input}")
+            info = raster_engine.inspect_raster(args.input, compute_valid_count=False)
+            print(f"[*] 栅格规格: {info.width} × {info.height}, 坐标系: {info.crs}")
+            print(f"[*] 空间分辨率: {info.formatted_resolution}")
+            print(f"[*] 输出路径: {args.output}")
+            print(f"[*] 解算时刻: {args.time} ({args.tz}), 目标基准: {args.datum.upper()}")
+
+            summary = raster_engine.calculate_snapshot_raster(
+                input_raster_path=args.input,
+                output_raster_path=args.output,
+                timestamp=args.time,
+                datum_target=args.datum,
+                constituents=args.constituents,
+                source_tz=args.tz,
+                block_size=args.block_size,
+                strict=not args.non_strict,
+                progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}")
+            )
+            print(f"[OK] 单时刻空间潮位解算成功！")
+            print(f"     有效解算像元数: {summary.valid_pixels:,} / {summary.total_pixels:,}")
+            print(f"     计算耗时: {summary.elapsed_seconds:.2f} 秒")
+            print(f"     输出文件: {summary.output_path}")
+
+        elif args.raster_submode == "inundation":
+            print(f"[*] 启动自适应控制网格潜在天文潮淹没频率解算...")
+            print(f"[*] 输入 DEM: {args.dem}")
+            info = raster_engine.inspect_raster(args.dem, compute_valid_count=False)
+            print(f"[*] DEM 规格: {info.width} × {info.height}, 坐标系: {info.crs}")
+            print(f"[*] 空间分辨率: {info.formatted_resolution}")
+            print(f"[*] 输出路径: {args.output}")
+            print(f"[*] 采样间隔: {args.step}, DEM基准: {args.dem_datum.upper()}")
+            print(f"[*] 自适应网格: 初始间距={args.initial_spacing}m, 最小间距={args.min_spacing}m, 容差={args.tolerance}%")
+
+            summary = raster_engine.calculate_inundation_raster(
+                dem_path=args.dem,
+                output_path=args.output,
+                qc_output_path=args.qc_output,
+                year=args.year,
+                start_time=args.start,
+                end_time=args.end,
+                freq=args.step,
+                dem_datum=args.dem_datum,
+                constituents=args.constituents,
+                source_tz=args.tz,
+                initial_control_spacing_m=args.initial_spacing,
+                min_control_spacing_m=args.min_spacing,
+                inundation_error_tolerance_pct=args.tolerance,
+                block_size=args.block_size,
+                strict=not args.non_strict,
+                progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}")
+            )
+            print(f"[OK] 潜在天文潮淹没频率解算成功！")
+            print(f"     有效 DEM 像元数: {summary.valid_pixels:,} / {summary.total_pixels:,}")
+            print(f"     控制节点总数: {summary.control_nodes_count:,}")
+            print(f"     计算耗时: {summary.elapsed_seconds:.2f} 秒")
+            print(f"     淹没频率栅格: {summary.output_path}")
+            print(f"     质量控制掩膜: {summary.qc_output_path}")
+
 
 if __name__ == '__main__':
     main()
+

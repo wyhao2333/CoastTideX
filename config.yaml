@@ -1,5 +1,5 @@
 # CoastTideX 配置文件
-# 全球海岸带潮位模拟与高程基准转换系统 v1.3
+# 全球海岸带潮位模拟与高程基准转换系统 v1.4
 
 # 数据路径配置 (支持绝对路径或相对项目根目录路径)
 paths:
@@ -23,6 +23,9 @@ paths:
   # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (可选外部补充，Delta N = N_EIGEN6C4 - N_EGM2008)
   delta_n_eigen6c4_egm2008_tif: "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
 
+  # CNES-CLS22 Hybrid MDT 权威来源与基准参考掩膜栅格 (可选，0:无效, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK))
+  hybrid_mdt_source_mask: "data/geoid/hybrid_mdt_source_mask.tif"
+
 # 潮位计算配置
 tide:
   # 默认使用的分潮集合：'all' 表示全套34个分潮，'major8' 表示8大主分潮
@@ -37,6 +40,23 @@ tide:
   # 整年预测模式默认时间步长 (推荐 30min，2024闰年严格对应 17,568 样本点)
   annual_default_freq: "30min"
 
+# 空间栅格潮汐计算引擎配置 (Spatial Raster Tide Engine v1.4)
+raster:
+  # FES 空间批量评估最大单次点数 (防止 M 空间点 × T 时间步一次性爆内存)
+  max_fes_evaluate_points: 500000
+
+  # 自适应控制网格初始点间距 (米)
+  initial_control_spacing_m: 4000
+
+  # 自适应控制网格最小允许间距 (米)
+  min_control_spacing_m: 500
+
+  # 潜在天文潮淹没频率误差细分阈值 (百分点)
+  inundation_error_tolerance_pct: 1.0
+
+  # 2D 栅格读写块默认尺寸 (像元)
+  default_block_size: 512
+
 # 界面与展示默认配置
 gui:
   theme: "dark"
@@ -44,4 +64,5 @@ gui:
   default_lon: 122.0
   default_lat: 31.0
   default_location_name: "长江口 (Changjiang Estuary)"
+
 

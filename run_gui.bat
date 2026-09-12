@@ -11,7 +11,7 @@ if not exist ".venv\Scripts\python.exe" (
     call setup_env.bat
 )
 
-echo [*] Launching application...
+echo [*] Launching application with .venv...
 ".venv\Scripts\python.exe" app.py
 
 if errorlevel 1 (

@@ -1,7 +1,7 @@
 # CoastTideX: High-Precision Global Coastal Tide Simulation & Vertical Datum System
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.3-blue.svg" alt="Release v1.3">
+  <img src="https://img.shields.io/badge/Release-v1.4-blue.svg" alt="Release v1.4">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -22,38 +22,43 @@
 
 The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global ocean tide model** (featuring native non-structured triangular finite-element meshes with LGP2 polynomial interpolation across all 34 primary tidal constituents). This resolves the jagged boundary and staircase errors traditional regular grid models suffer along intricate coastlines and estuaries. Furthermore, CoastTideX integrates the **CNES-CLS22 Mean Dynamic Topography (MDT)** and the **NGA EGM2008 2.5-arcminute global geoid raster**, enabling seamless and precise vertical datum transformation from **Mean Sea Level (MSL)** to the absolute **EGM2008 geoid datum**.
 
+**v1.4 introduces the Spatial Raster Tide Engine**: evaluates 2D spatially varying sea surface heights at specific timestamps for any CRS-referenced GeoTIFF, and features an **Adaptive Tide Control Grid** to stream potential astronomical tidal inundation frequencies (0% ~ 100%) for high-resolution 10m/30m coastal DEMs across full years or arbitrary periods.
+
 ---
 
 ### ✨ Key Features
 
 * 🌊 **FES2022b Native Non-Structured Mesh**: Directly loads the 3.77 GB native triangular mesh, providing ultimate fidelity in coastal zones with 34 diurnal, semi-diurnal, shallow-water non-linear, and long-period constituents.
-* 📅 **Full-Year & Long Time-Series High-Density Prediction (v1.3)**:
+* 🛰️ **Spatial Raster Tide Engine (v1.4)**:
+  * **Instantaneous Sea Surface Snapshot**: Evaluates true spatially varying water levels across GeoTIFF rasters with strict pixel-center unprojecting (`offset='center'`), streaming in 512×512 windows with atomic replacement;
+  * **Adaptive Tide Control Grid for Coastal DEMs**: Places adaptive nodes (default 4km) across water/tidal flat domains, solves annual time series, applies inverse distance weighting (IDW) interpolation, and computes complementary empirical cumulative distribution functions (CCDF) to map potential astronomical tidal inundation frequency (0% ~ 100%);
+  * **Barrier & Inland Physical Protection**: Prevents unphysical tidal extrapolation into disconnected inland depressions or diked ponds; preserves NoData across inland areas;
+  * **TIFF-Level Rigorous Provenance**: Inundation and snapshot GeoTIFFs embed full geodetic metadata, model version, and parameter tags.
+* 📅 **Full-Year & Long Time-Series High-Density Prediction (v1.3/v1.4)**:
   * **Custom Period & Year Mode Toggle**: Seamlessly switch between arbitrary date intervals and convenient annual presets (e.g. Year 2024);
   * **Strict Half-Open Interval & Sample Count Fidelity**: Employs $[start, end)$ half-open interval, rigorously generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years) with zero boundary overlap or drops;
-  * **Real-time Sample Budget**: Instantly updates expected sample count label to prevent accidental memory blowup.
-* ⏳ **Adaptive Time-Chunking Stream Engine (v1.3)**:
+  * **Real-time Sample Budget & Auto-Switch**: Instantly updates expected sample count label; automatically recommends 30min cadence when switching to annual mode while remembering user preferences.
+* ⏳ **Adaptive Time-Chunking Stream Engine**:
   * The evaluation engine introduces an automated 5,000-point time-chunking pipeline for continuous multi-year or high-frequency (5min/6min/10min) simulations, reporting progress per slice and completely eliminating GUI freezes and unhandled crash risks;
   * Validated through continuous 2-year simulation stress testing (35,089 timestamps) without interruption.
 * ⚡ **Adaptive Spatial Chunking & Local BBox Caching**:
   * **Single Station Mode**: Automatically bounds the region of interest around input coordinates, indexing only local topology in memory for sub-second query speeds and minimal RAM footprint (~1.2 GB);
   * **Global Discrete Batch Mode**: Employs $5^\circ \times 5^\circ$ adaptive spatial mesh chunking, preventing memory blowup when processing scattered worldwide points.
-* 📐 **Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3)**:
+* 📐 **Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3/v1.4)**:
+  * **Two-Tier Authoritative Detection**: Priority matching against CNES official `hybrid_mdt_source_mask.tif`, with pure-NumPy closed polygon fallback;
   * **Open Oceans Geoid**: GOCO06s reference datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$);
   * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, supported via local `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`);
-  * **Unified Primary Variable & Semantic Truth**: Primary variable `h_mdt_ref_m` denotes height relative to MDT reference geoid; `h_goco06s_m` is strictly `NaN` in Mediterranean/Black Sea (no faking); deep inland points strictly propagate `NaN`;
-  * **Precise Closed Polygon Masks**: Replaces loose bounding boxes with zero-dependency pure NumPy ray-casting closed polygon tests, eliminating misclassification around the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea.
-* 🌊 **Potential Astronomical Tidal Inundation Frequency Analysis & 10m DEM Raster Tool (v1.3)**:
-  * Vectorized complementary empirical cumulative distribution function (CCDF / 1 - ECDF) with `np.searchsorted` for instant coastal terrain elevation inundation probability and duration analysis;
-  * Provides dedicated tool `scripts/calculate_inundation_raster.py` for block-streaming 10m/30m coastal DEMs into 0~100% annual potential astronomical inundation GeoTIFF rasters.
-* 🎯 **True Bilinear Spatial Interpolation & Target-Aware Loading (v1.3)**:
+  * **Unified Primary Variable & Semantic Truth**: Primary variable `h_mdt_ref_m` denotes height relative to MDT reference geoid; `h_goco06s_m` is strictly `NaN` in Mediterranean/Black Sea (no faking); deep inland points strictly propagate `NaN`.
+* 🎯 **True Bilinear Spatial Interpolation & Target-Aware Loading (v1.3/v1.4)**:
   * Applies true bilinear interpolation (`map_coordinates(order=1)`) to EGM2008 and $\Delta N$ GeoTIFFs;
-  * Decouples target datums: pure MSL or EGM2008 workflows do not require loading unneeded WGS84 rasters; missing rasters raise explicit `DatumDataError` in `strict=True` or output `qc_warning`.
-* 🖥️ **Modern Desktop GUI (PyQt6) & Big Data Safety (v1.3)**:
-  * **Safe Preview Truncation**: Capped to first 2,000 rows in GUI table preview to eliminate freezing while exporting 100% full dataset to CSV/Excel;
+  * Decouples target datums: MSL or EGM2008 workflows do not require loading unneeded WGS84 rasters.
+* 🖥️ **Modern Desktop GUI (PyQt6) & Big Data Safety (v1.3/v1.4)**:
+  * **Dedicated Raster Tide Tab (Tab 3)**: Interactive GeoTIFF metadata inspector card, Snapshot vs. Inundation mode panels, adaptive grid spacing controls, progress bar, and cancellation support;
+  * **Decoupled Compute & Display Datums**: Allows computing in one datum while displaying another;
+  * **Safe Preview Truncation**: Capped to first 2,000 rows in GUI table preview while exporting 100% full dataset to CSV/Excel;
   * **Smart Chart Downsampling & Adaptive Peaks**: Automatic decimation and adaptive peak/trough annotation filtering for responsive exploration of 10,000+ points;
-  * **Adaptive Scrolling Panel**: Control panel wrapped in `QScrollArea`, completely removing vertical resizing limits for 768p/1080p displays;
-  * **Dynamic Timezone & DST Resilience**: Instant re-indexing of chart axes and tables upon changing timezone without recalculation; safe transitions across daylight saving time.
-* 📑 **Batch File Processing & Vectorized Export**: High-throughput vectorized resolution for large tabular CSV files with export to CSV or Excel.
+  * **Adaptive Scrolling Panel**: Control panel wrapped in `QScrollArea`, completely removing vertical resizing limits for 768p/1080p displays.
+* 📑 **Comprehensive CLI Tooling**: Subcommands for `single`, `batch`, `raster snapshot`, and `raster inundation`.
 * 📦 **Standalone Executable (.exe) Readiness**: Launch via `run_gui.bat` or compile into a standalone Windows `.exe` application via `build_exe.bat`.
 
 ---
@@ -67,6 +72,7 @@ CoastTideX is engineered with adaptive spatial indexing to maintain high perform
 | **Single Location Time-Series**<br>*(Single Point Mode)* | **4 GB** | **8 GB** | Dual-core CPU or better<br>Free Disk Space ≥ 10 GB | Local BBox caching loads only topology around the target location; resident memory is only ~1.2 GB. |
 | **Local Regional Batch**<br>*(≤ 8° Geographic Span)* | **4 GB** | **8 GB** | Quad-core CPU or better<br>Free Disk Space ≥ 10 GB | Small regional point clusters are solved in a single bounding box with minimal overhead. |
 | **Global Discrete Batch**<br>*(Worldwide Scattered Points)* | **8 GB** | **16 GB** | Quad- to Octa-core CPU<br>High-speed NVMe SSD | $5^\circ \times 5^\circ$ adaptive spatial chunking processes points in clusters, bounding peak memory. |
+| **Spatial Raster Engine**<br>*(Snapshot & Inundation, v1.4)* | **8 GB** | **16 GB** | Quad- to Octa-core CPU<br>High-speed NVMe SSD | 512×512 window streaming and adaptive control grid decouple memory from total raster dimensions. |
 | **Full Unconstrained Global Grid**<br>*(All-Mesh Global Loading)* | **16 GB** | **32 GB** | Octa-core CPU or better<br>High-speed NVMe SSD | Loading all 5.69 million nodes and 34 constituents simultaneously requires ~6–8 GB of contiguous RAM. |
 
 * **Supported Operating Systems**: Windows 10/11 64-bit, Ubuntu 20.04+, macOS (x86_64 / Apple Silicon via Rosetta 2).
@@ -77,28 +83,28 @@ CoastTideX is engineered with adaptive spatial indexing to maintain high perform
 ## 🏛️ System Architecture
 
 ```text
-                                ┌────────────────────────┐
-                                │   CoastTideX (GUI/CLI) │
-                                └───────────┬────────────┘
-                                            │
-             ┌─────────────────────────────┴─────────────────────────────┐
-             ▼                                                           ▼
-  ┌───────────────────────┐                                   ┌───────────────────────┐
-  │   Tide Engine Core    │                                   │   Datum Engine Core   │
-  └──────────┬────────────┘                                   └──────────┬────────────┘
-             │                                                           │
-   ┌─────────┴─────────┐                                ┌────────┬───────┴────────┬────────┐
-   ▼                   ▼                                ▼        ▼                ▼        ▼
-FES2022b Native Mesh   Spatial BBox Index            CNES-CLS22 MDT    ΔN GeoTIFF     EGM2008 GeoTIFF
-(5.69M nodes / 34)     (Sub-sec / Spatial Chunking)   (GOCO06s Geoid)  (GOCO - EGM)    (Undulation N)
-             │                                                           │
-             └─────────────────────────────┬─────────────────────────────┘
-                                           ▼
-                       ┌───────────────────────────────────────┐
-                       │  Unified Four-Tier Vertical Datums    │
-                       │  (MSL / GOCO06s / EGM2008 / WGS84)    │
-                       │    Interactive Charts / CSV / XLSX    │
-                       └───────────────────────────────────────┘
+                                ┌─────────────────────────────────────────┐
+                                │          CoastTideX (GUI / CLI)         │
+                                └────────────────────┬────────────────────┘
+                                                     │
+              ┌──────────────────────────────────────┼──────────────────────────────────────┐
+              ▼                                      ▼                                      ▼
+   ┌───────────────────────┐              ┌───────────────────────┐              ┌───────────────────────┐
+   │   Tide Engine Core    │              │   Datum Engine Core   │              │   Raster Engine Core  │
+   └──────────┬────────────┘              └──────────┬────────────┘              └──────────┬────────────┘
+              │                                      │                                      │
+    ┌─────────┴─────────┐                   ┌────────┴────────┬────────┐             ┌──────┴──────┐
+    ▼                   ▼                   ▼                 ▼        ▼             ▼             ▼
+ FES2022b Native Mesh   Spatial BBox Index CNES-CLS22 MDT  ΔN GeoTIFF EGM2008     Snapshot      Adaptive Grid
+ (5.69M nodes / 34)     (Sub-sec Chunking) (Mask / Poly)   (GOCO/EIG) (Undulation)(512x512 Stream)(10m DEM CCDF)
+              │                                      │                                      │
+              └──────────────────────────────────────┼──────────────────────────────────────┘
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │              Unified Four-Tier Vertical Datums          │
+                        │             (MSL / MDT_REF / EGM2008 / WGS84)           │
+                        │    Interactive Charts / CSV / XLSX / Spatial GeoTIFFs   │
+                        └─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -163,6 +169,21 @@ $$P_{\text{inundation}}(z) = P(\eta_{\text{tide}} > z) = 1 - F(z) = \frac{1}{N}\
 
 Leveraging `np.searchsorted`, this $O(M \log N)$ algorithm calculates inundation frequency over annual time-series for single point elevations or massive Digital Elevation Model (DEM) arrays in sub-second time.
 
+### 6. Spatial Raster Tide Engine & Adaptive Control Grid (v1.4)
+For coastal remote sensing interpretation and tidal wetland dynamics, CoastTideX v1.4 integrates an industrial-grade spatial raster engine (`core.raster_engine.RasterTideEngine`):
+
+1. **Instantaneous Sea Surface Snapshot**:
+   * Rigorously converts GeoTIFF pixel grid coordinates to geographic coordinates $(\lambda, \phi)$ using true pixel centers (`offset='center'`);
+   * Streams raster blocks in 512×512 windows, computing 2D tidal elevation and target vertical datums with atomic file replacement (`os.replace`) to avoid incomplete corrupted outputs;
+   * Preserves exact input CRS, affine transform, dimensions, and NoData masks while injecting comprehensive geodetic provenance tags.
+
+2. **Adaptive Tide Control Grid for High-Resolution Coastal DEMs**:
+   * **Computational Barrier**: Evaluating $10000 \times 10000$ (100M) 10m DEM pixels across 17,568 timestamps demands $1.75 \times 10^{12}$ tidal queries, which is computationally intractable and physically unwarranted given long-wave hydrodynamic continuity;
+   * **Adaptive Control Nodes**: Dynamically places control points at user-defined spatial spacing (default 4,000 meters) across water and tidal flat regions;
+   * **Batch Annual Hydrograph Evaluation**: Generates complete time series (e.g. 17,568 points) across the sparse control grid;
+   * **Inverse Distance Weighting (IDW) & Pixel CCDF**: Interpolates hydrographs across DEM windows and evaluates pixel-wise inundation frequencies (0% ~ 100%) via vectorized CCDF;
+   * **Hydrodynamic Connectivity & Barrier Protection**: Prevents unphysical tidal extrapolation into disconnected inland depressions or diked ponds; preserves NoData across deep inland areas.
+
 ---
 
 ## 🚀 Quick Start
@@ -187,7 +208,7 @@ Double-click `run_gui.bat` or run:
 ```
 
 ### 3. Command-Line Interface (CLI)
-Automate predictions using `cli.py`, with full support for timezones, annual presets, and all 4 datums:
+Automate predictions using `cli.py`, with full support for timezones, annual presets, datums, and spatial rasters:
 * **Single Location Time-Series (Custom Period)**:
   ```bash
   python cli.py single --lon 122.0 --lat 31.0 --start "2026-09-10 00:00:00" --end "2026-09-11 00:00:00" --step 1h --tz UTC --output output.csv
@@ -200,10 +221,15 @@ Automate predictions using `cli.py`, with full support for timezones, annual pre
   ```bash
   python cli.py batch --input points.csv --lon-col longitude --lat-col latitude --time-col datetime --tz UTC --output batch_out.csv
   ```
-* **Tidal Flat 10m DEM Inundation Frequency Raster Calculation**:
+* **Spatial Sea Surface Snapshot Raster (v1.4 Snapshot)**:
   ```bash
-  python scripts/calculate_inundation_raster.py --dem tidal_flat_10m_dem.tif --out inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008
+  python cli.py raster snapshot --input dem_or_scene.tif --output snapshot_water_level.tif --time "2024-06-18 10:30:00" --datum egm2008
   ```
+* **Coastal DEM Potential Inundation Frequency Raster (v1.4 Inundation)**:
+  ```bash
+  python cli.py raster inundation --dem coastal_flat_dem.tif --output inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008 --spacing-m 4000
+  ```
+  *(Note: `scripts/calculate_inundation_raster.py` remains supported as a backwards-compatible CLI wrapper)*
 
 ### 4. Python API Usage
 
@@ -238,7 +264,7 @@ df_year['h_goco06s_m'] = datum_res['h_goco06s_m']
 df_year['h_egm2008_m'] = datum_res['h_egm2008_m']
 df_year['h_wgs84_m'] = datum_res['h_wgs84_m']
 
-# (2) Inundation frequency evaluation across coastal elevations (+1.5m, +2.0m, +2.5m)
+# Inundation frequency evaluation across coastal elevations (+1.5m, +2.0m, +2.5m)
 elevations = [1.5, 2.0, 2.5]
 freq_pct = compute_inundation_frequency(
     water_levels_m=df_year['tide_msl_m'].values,
@@ -247,6 +273,33 @@ freq_pct = compute_inundation_frequency(
 )
 for elev, pct in zip(elevations, freq_pct):
     print(f"Inundation probability at elevation {elev:+.1f} m: {pct:.2f}%")
+```
+
+#### (2) Spatial Raster Snapshot & DEM Inundation Frequency (v1.4)
+```python
+from core.raster_engine import RasterTideEngine
+
+raster_engine = RasterTideEngine()
+
+# 1. Compute instantaneous spatial sea surface elevation snapshot
+summary_snap = raster_engine.calculate_snapshot_raster(
+    input_raster_path="coastal_flat_dem.tif",
+    output_raster_path="water_level_snapshot_egm2008.tif",
+    timestamp="2024-06-18 10:30:00",
+    datum="egm2008"
+)
+print(f"Snapshot done: {summary_snap.valid_pixels} valid pixels in {summary_snap.elapsed_seconds:.2f}s")
+
+# 2. Compute annual potential astronomical tidal inundation frequency (0~100%)
+summary_inund = raster_engine.calculate_inundation_raster(
+    dem_path="coastal_flat_dem.tif",
+    output_path="inundation_frequency_2024.tif",
+    year=2024,
+    freq="30min",
+    datum="egm2008",
+    control_spacing_m=4000
+)
+print(f"Inundation analysis done: mean inundation = {summary_inund.mean_val:.2f}%")
 ```
 
 ---
@@ -273,21 +326,23 @@ CoastTideX/
 ├── data/
 │   └── geoid/
 │       ├── README_GEOID.md         # Geodetic provenance & ICGEM specifications
+│       ├── hybrid_mdt_source_mask.tif # CNES-CLS22 MDT official reference geoid mask (v1.4 priority)
 │       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5' global geoid raster (~76.9MB)
 │       ├── delta_n_goco06s_minus_egm2008.tif # GOCO06s - EGM2008 correction raster (~22.7MB)
 │       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 - EGM2008 correction raster (Med & Black Sea, local generation)
 ├── core/                           # Core computation modules
 │   ├── tide_engine.py              # FES2022b evaluator, time-chunking, spatial chunking & annual prediction
-│   ├── datum_engine.py             # Dual-geoid Hybrid MDT transformation & polygon masks
+│   ├── datum_engine.py             # Dual-geoid Hybrid MDT transformation, official mask & polygon checks
+│   ├── raster_engine.py            # (v1.4) Spatial raster tide engine, pixel-center alignment, snapshot & adaptive DEM inundation
 │   └── utils.py                    # Presets, coordinates, timezones (DST), inundation & safe metadata
 ├── gui/                            # PyQt6 desktop application
-│   ├── main_window.py              # Main window (single point, period, annual mode & safe table preview)
+│   ├── main_window.py              # Main window (single point, period, annual mode, table preview & Tab 3 Raster Panel)
 │   ├── chart_widget.py             # Matplotlib waveform component (smart decimation & adaptive peaks)
-│   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog (v1.3)
-│   ├── settings_dialog.py          # Data source path configuration dialog
+│   ├── manual_dialog.py            # Built-in User Manual & Documentation dialog (v1.4)
+│   ├── settings_dialog.py          # Data source path configuration dialog & deep file validation
 │   └── styles.py                   # High-contrast dark QSS stylesheet
 └── tests/                          # Automated unit and integration test suite
-    └── test_engines.py             # Comprehensive 22-test suite (full FES chain, leap year, closures)
+    └── test_engines.py             # Comprehensive 29-test suite (full FES chain, leap year, raster engine, closures)
 ```
 
 ---
@@ -299,6 +354,16 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 2. Find the standalone application in `dist/CoastTideX/CoastTideX.exe`.
 
 ## 📝 Changelog
+
+### v1.4 (2026-09)
+* **[Major Upgrade] Spatial Raster Tide Engine (RasterTideEngine)**: Integrated `core/raster_engine.py` for any CRS-enabled GeoTIFF, evaluating 2D spatially varying sea surface heights with strict pixel-center alignment (`offset='center'`) and 512×512 atomic window streaming;
+* **[Algorithmic Breakthrough] Adaptive Tide Control Grid**: Solved the intractable computational barrier of multi-billion pixel evaluations on 10m/30m coastal DEMs by placing sparse adaptive control nodes (default 4km), evaluating batch time series, and applying IDW spatial interpolation with vectorized CCDF to stream potential astronomical inundation frequencies (0% ~ 100%);
+* **[Geodetic Rigor & Mask Priority]**: Priority matching against CNES official `hybrid_mdt_source_mask.tif` with polygon fallback; strict array dimension broadcast enforcement; decoupled EGM2008 and WGS84 raster dependencies;
+* **[GUI Dedicated Raster Tide Panel (Tab 3)]**: Added dedicated Raster Tide & Inundation tab featuring interactive GeoTIFF metadata cards, Snapshot vs. Inundation mode panels, adaptive grid spacing controls, progress bar, and cancellation support;
+* **[Decoupled Compute vs. Display Datums]**: GUI supports computing in one vertical datum and displaying another; auto-recommends 30-min interval upon toggling Year Mode with user memory;
+* **[Deep Settings Validation]**: Settings dialog incorporates deep format validation for NetCDF and GeoTIFFs, with unified reset keys;
+* **[Expanded CLI Suite]**: Added `raster snapshot` and `raster inundation` subcommands; refactored `scripts/calculate_inundation_raster.py` into a thin CLI wrapper;
+* **[Comprehensive Test Suite Expansion to 29 Tests]**: Added synthetic GeoTIFF metadata extraction, pixel center alignment, snapshot mock, CCDF oracle benchmarking, barrier non-interpolation, and end-to-end integration tests (29/29 passing).
 
 ### v1.3 (2026-09)
 * **[Annual Mode & Long Time-Series]** Added Year Mode toggle with strict $[start, end)$ half-open interval, generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years), with dynamic sample budget estimation and coordinate validation;

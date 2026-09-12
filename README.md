@@ -1,7 +1,7 @@
 # CoastTideX: 全球海岸带高精度潮位模拟与高程基准转换系统
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.3-blue.svg" alt="Release v1.3">
+  <img src="https://img.shields.io/badge/Release-v1.4-blue.svg" alt="Release v1.4">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -22,39 +22,44 @@
 
 系统基于国际权威的法国 CNES/AVISO **FES2022b 全球海洋潮汐模型**（包含全部 34 个主分潮的非结构有限元三角形网格 LGP2 二阶多项式解），攻克了传统规则方格网在曲折复杂海岸线、河口湾区由于“阶梯锯齿误差”导致的潮位失真问题。同时，系统内嵌 **CNES-CLS22 全球平均动态地形 (MDT)** 模型与 **NGA EGM2008 2.5分超高精度大地水准面栅格**，实现了从**局部平均海平面 (MSL)** 到 **EGM2008 大地水准面绝对海拔高**的一键高精度无缝转换。
 
+**v1.4 引入工业级空间栅格潮位引擎 (Spatial Raster Tide Engine)**：支持输入任意具备标准 CRS 的 GeoTIFF 影像，在指定时刻进行真空间变化的水面高程快照计算；针对千万像元级沿海 10m/30m 高分辨率 DEM，创新引入**自适应潮位控制网格 (Adaptive Tide Control Grid)**，高效流式解算整年潜在天文潮淹没频率（0% ~ 100%）空间栅格。
+
 ---
 
 ### ✨ 核心特性 (Key Features)
 
 * 🌊 **FES2022b 原生非结构网格支持**：直读 3.77 GB 原生三角网格，在复杂海岸带具备最高空间保真度，支持全部 34 个全日潮、半日潮、浅海非线性潮与长周期平衡潮。
-* 📅 **整年与长时序高密度潮位序列预测 (v1.3)**：
+* 🛰️ **空间栅格潮位引擎 (v1.4 Spatial Raster Engine)**：
+  * **单时刻空间水面高程快照 (Snapshot)**：输入任意 GeoTIFF 影像，按像元中心严格重投影并评估真实空间二维水面高程，严格继承原始投影与分辨率，512×512 窗口流式原子写入；
+  * **自适应控制网格沿海 DEM 潜在天文潮淹没频率 (Inundation)**：针对千万级 10m/30m DEM 像元，在水域/潮滩提取自适应控制网格（默认 4km）长时序，结合反距离权重 (IDW) 空间插值与严密互补累积分布 (CCDF)，高效解算整年/时段淹没频率空间栅格；
+  * **阻隔水体与内陆物理保护**：杜绝向被水工建筑物隔断的水塘或内陆闭流洼地进行盲目潮位外插；内陆无效像元维持 NoData 严密传播；
+  * **TIFF 级严密元数据可溯源性**：输出 GeoTIFF 包含模型版本、基准面、计算时间范围、控制网格间距等完整元数据标签。
+* 📅 **整年与长时序高密度潮位序列预测 (v1.3/v1.4)**：
   * **自定义时段与整年快捷模式**：支持任意起止时间与快捷整年（如 2024 年）一键生成；
   * **严格半开区间与点数保真**：采用 $[start, end)$ 半开区间，严密保证 2024 闰年 30min 步长精确生成 **17,568** 个连续采样点（平年 17,520 个点），杜绝跨年边界重复与漏点；
-  * **实时动态点数预算**：时间或频率改变时即时显示「预期样本: XX 点」，有效预防内存误操作。
-* ⏳ **自适应时间分块（Time-Chunking）流式解算 (v1.3)**：
+  * **实时动态点数预算与切换推荐**：时间或频率改变时即时显示「预期样本: XX 点」，切换整年时自动推荐 30min 采样率并具备用户偏好记忆。
+* ⏳ **自适应时间分块（Time-Chunking）流式解算**：
   * 底层解算核心自动引入 5,000 点动态分块流式迭代，超长序列（单年、多年或 5min/6min/10min 高密度步长）均逐块解算并实时汇报进度，彻底消除界面卡顿或未捕获异常退出风险；
   * 经 2023–2024 连续两年（35,089 个连续点）高压测试，解算全程平稳无卡顿。
 * ⚡ **自适应空间分块与局部 BBox 加速**：
   * **单点时序预测**：自动推求最小包围框，仅在内存中建立局部空间拓扑索引，实现秒级加载与极低内存占用；
   * **全球批量离散点**：采用 $5^\circ \times 5^\circ$ 自适应空间网格分块聚类 (Spatial Chunking)，彻底杜绝全球散点退化为全地球加载的内存爆炸陷阱。
-* 📐 **双重水准面 Hybrid MDT 严密科学转换体系 (v1.3)**：
+* 📐 **双重水准面 Hybrid MDT 严密科学转换体系 (v1.3/v1.4)**：
+  * **双层权威判定**：优先匹配 CNES 官方 `hybrid_mdt_source_mask.tif` 掩膜，辅以精细闭合多边形保底判别，零误判；
   * **全球大洋基准**：GOCO06s 基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$)；
   * **地中海/黑海高阶基准**：EIGEN-6C4 ($d/o=2190$) 严密基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$，支持本地配置 `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`)；
-  * **统一标称主变量与严格语义真值**：引入 `h_mdt_ref_m` 代表相对 MDT 原始基准面海面高；在欧陆混合区严禁伪造 `h_goco06s_m`（地中海/黑海严格输出 `NaN`）；深陆点全要素严格置为 `NaN`；
-  * **精细多边形掩码**：基于纯 NumPy 闭合多边形射线法判别，零额外库依赖，彻底解决加的斯湾、直布罗陀西侧、比斯开湾、红海等被矩形 BBox 误判的隐患。
-* 🌊 **潜在天文潮淹没概率分析与潮滩 10m DEM 栅格解算 (v1.3)**：
-  * 内置向量化经验互补累积分布算法 (`compute_inundation_frequency`)，秒级支持海岸带地形高程点在长期天文潮作用下的淹没频率/概率计算；
-  * 提供专用脚本 `scripts/calculate_inundation_raster.py`，支持大范围 10m/30m DEM 分块流式解算，直接输出整年潜在天文潮淹没频率 (0~100%) GeoTIFF 空间栅格。
-* 🎯 **高精度栅格双线性空间插值与目标敏感基准解耦 (v1.3)**：
+  * **统一标称主变量与严格语义真值**：引入 `h_mdt_ref_m` 代表相对 MDT 原始基准面海面高；在欧陆混合区严禁伪造 `h_goco06s_m`（地中海/黑海严格输出 `NaN`）；深陆点全要素严格置为 `NaN`。
+* 🎯 **高精度栅格双线性空间插值与目标敏感基准解耦 (v1.3/v1.4)**：
   * 对 EGM2008 与 $\Delta N$ 栅格执行真双线性插值 (`map_coordinates(order=1)`)；
   * **目标敏感加载**：仅计算 MSL 或 EGM2008 时，不强制要求 WGS84 栅格；缺失关键栅格时给出严谨的 `qc_warning` 或在 `strict=True` 下抛出 `DatumDataError`。
-* 🖥️ **现代化 PyQt6 交互界面与海量数据防护 (v1.3)**：
-  * **数据预览安全截断**：长序列计算后仅在 GUI 表格中渲染前 2,000 行并附带友好提示，导出 CSV/Excel 仍保持 100% 完整全量输出，彻底杜绝界面卡死；
+* 🖥️ **现代化 PyQt6 交互界面与海量数据防护 (v1.3/v1.4)**：
+  * **栅格潮位与淹没分析专用选项卡 (Tab 3)**：支持 GeoTIFF 元数据检视、快照/淹没双模式配置、自适应网格参数调整、进度条与中途安全取消；
+  * **计算基准与展示基准解耦**：GUI 单点计算区分计算基准与展示基准；
+  * **数据预览安全截断**：长序列计算后仅在 GUI 表格中渲染前 2,000 行并附带友好提示，导出 CSV/Excel 仍保持 100% 完整全量输出；
   * **图表交互智能优化**：波形图支持万级点自适应降采样与峰谷标注智能过滤，缩放平移丝滑无卡顿；
-  * **自适应滚动面板**：控制面板封装于 `QScrollArea`，彻底解除窗口纵向锁定，各类屏幕均可自由拉伸；
-  * **动态时区与 DST 稳健过渡**：计算后切换时区即时自动重构时间轴，消除夏令时跳变时刻的静默 NaT 风险。
-* 📑 **批量多点离散解算与导出**：支持加载包含成千上万个经纬度及时间点的 CSV 表格，自动批量向量化解算并一键导出为标准 CSV / Excel。
-* 📦 **开箱即用与独立打包**：支持通过 `run_gui.bat` 一键启动，并提供完整的 `build_exe.bat` 脚本，可快速打包为无需 Python 环境的独立 Windows `.exe` 程序。
+  * **自适应滚动面板与 DST 稳健过渡**：各类屏幕自由拉伸，切换时区即时自动重构时间轴。
+* 📑 **全能命令行工具 (CLI)**：支持 `single`、`batch`、`raster snapshot` 与 `raster inundation` 完整命令行操作，无缝对接自动化流水线。
+* 📦 **开箱即用与独立打包**：支持通过 `run_gui.bat` 一键启动，并提供完整的 `build_exe.bat` 脚本，可快速打包为独立 Windows `.exe` 程序。
 
 ---
 
@@ -67,6 +72,7 @@ CoastTideX 针对不同应用场景设计了精细的内存管理与空间拓扑
 | **单点连续时序预测**<br>*(Single Point Mode)* | **4 GB** | **8 GB** | 双核 CPU 及以上<br>SSD 剩余空间 ≥ 10 GB | 依靠局部 BBox 裁剪，仅载入目标点周边小区域网格拓扑，运行时常驻内存仅需 ~1.2 GB。 |
 | **局部区域批量解算**<br>*(Local Batch Mode, ≤8°跨度)* | **4 GB** | **8 GB** | 四核 CPU 及以上<br>SSD 剩余空间 ≥ 10 GB | 空间跨度在 8° 以内时，一次性构建局部包围框，内存开销轻量。 |
 | **全球离散散点批量解算**<br>*(Global Discrete Batch Mode)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD 优先 | 系统激活 $5^\circ \times 5^\circ$ 自适应空间网格分块聚类，逐块加载与释放，峰值内存受控于单块大小。 |
+| **空间栅格潮位与淹没解算**<br>*(Spatial Raster Engine, v1.4)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD | 采用 512×512 窗口流式写入与自适应控制网格，内存消耗与整景影像尺寸解耦，支持超大范围 10m DEM。 |
 | **全地球无约束大范围网格展开**<br>*(Full Unconstrained Grid)* | **16 GB** | **32 GB** | 八核 CPU 及以上<br>高速 NVMe SSD | 若强行一次性请求全球无约束范围，FES2022b 569 万节点及 34 分潮全展开需要约 6~8 GB 连续物理内存。 |
 
 * **支持操作系统**：Windows 10/11 64-bit、Ubuntu 20.04+、macOS (x86_64 / Apple Silicon via Rosetta 2)。
@@ -77,28 +83,28 @@ CoastTideX 针对不同应用场景设计了精细的内存管理与空间拓扑
 ## 🏛️ 系统架构 (Architecture)
 
 ```text
-                                ┌────────────────────────┐
-                                │   CoastTideX (GUI/CLI) │
-                                └───────────┬────────────┘
-                                            │
-             ┌─────────────────────────────┴─────────────────────────────┐
-             ▼                                                           ▼
-  ┌───────────────────────┐                                   ┌───────────────────────┐
-  │  潮位解算核心 (Tide)  │                                   │  基准转换核心 (Datum) │
-  └──────────┬────────────┘                                   └──────────┬────────────┘
-             │                                                           │
-   ┌─────────┴─────────┐                                ┌────────┬───────┴────────┬────────┐
-   ▼                   ▼                                ▼        ▼                ▼        ▼
-FES2022b 原生网格   局部 BBox 索引                   CNES-CLS22 MDT   ΔN 改正栅格   EGM2008 GeoTIFF
-(569万节点/34分潮)  (秒级加载/分块聚类)              (GOCO06s基准)  (GOCO减EGM)  (水准面起伏 N)
-             │                                                           │
-             └─────────────────────────────┬─────────────────────────────┘
-                                           ▼
-                       ┌───────────────────────────────────────┐
-                       │  四大垂直基准统一输出体系             │
-                       │  (MSL / GOCO06s / EGM2008 / WGS84)    │
-                       │  交互式波形图 / 报表导出 (CSV/XLSX)   │
-                       └───────────────────────────────────────┘
+                                ┌─────────────────────────────────────────┐
+                                │          CoastTideX (GUI / CLI)         │
+                                └────────────────────┬────────────────────┘
+                                                     │
+              ┌──────────────────────────────────────┼──────────────────────────────────────┐
+              ▼                                      ▼                                      ▼
+   ┌───────────────────────┐              ┌───────────────────────┐              ┌───────────────────────┐
+   │  潮位解算核心 (Tide)  │              │  基准转换核心 (Datum) │              │  栅格解算核心 (Raster)│
+   └──────────┬────────────┘              └──────────┬────────────┘              └──────────┬────────────┘
+              │                                      │                                      │
+    ┌─────────┴─────────┐                   ┌────────┴────────┬────────┐             ┌──────┴──────┐
+    ▼                   ▼                   ▼                 ▼        ▼             ▼             ▼
+ FES2022b 原生网格   局部 BBox 索引       CNES-CLS22 MDT  ΔN 改正栅格 EGM2008     单时刻快照    自适应控制网格
+ (569万节点/34分潮)  (秒级加载/空间分块) (官方掩膜/多边形) (GOCO/EIGEN) (起伏 N)   (512×512流式)  (10m DEM CCDF)
+              │                                      │                                      │
+              └──────────────────────────────────────┼──────────────────────────────────────┘
+                                                     ▼
+                        ┌─────────────────────────────────────────────────────────┐
+                        │                四大垂直基准统一输出体系                 │
+                        │           (MSL / MDT_REF / EGM2008 / WGS84)             │
+                        │   交互式波形图 / 报表导出 (CSV/XLSX) / 空间 GeoTIFF 栅格 │
+                        └─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -163,6 +169,22 @@ $$P_{\text{inundation}}(z) = P(\eta_{\text{tide}} > z) = 1 - F(z) = \frac{1}{N}\
 
 系统采用 `np.searchsorted` 实现 $O(M \log N)$ 极限速度计算，支持单点高程或大面积数字高程模型 (DEM) 的瞬时概率反演。
 
+### 6. 空间栅格潮位引擎与自适应控制网格 (Spatial Raster Tide Engine, v1.4)
+针对海岸带高保真遥感解译与潮滩生态演变，CoastTideX v1.4 正式集成工业级空间栅格引擎 (`core.raster_engine.RasterTideEngine`)：
+
+1. **指定时刻瞬时空间水面高程快照 (Snapshot)**：
+   * 对输入 GeoTIFF 影像进行严格像元中心反投影 (`offset='center'`)，将图像像元坐标精确转换为经纬度 $(\lambda, \phi)$；
+   * 采用 512×512 窗口流式写入机制，分块加载与计算潮位及指定基准面高程，严格保证即使处理超大景沿海遥感影像也不会引发物理内存溢出；
+   * 采用临时文件与原子替换写入 (`os.replace`)，杜绝因中断产生损坏的半成品文件；
+   * GeoTIFF 输出格式严格继承输入影像的 CRS、仿射变换参数与分辨率，并内嵌完整的生成模型与基准元数据。
+
+2. **超大规模 10m/30m 沿海 DEM 潜在天文潮淹没频率分析 (Adaptive Inundation)**：
+   * **算力与物理约束**：以一副标准的 $10000 \times 10000$ 像元 10m DEM 为例，像元总数达 1 亿。若在 17,568 个时间步上对全部 1 亿像元逐一解算 FES2022b 潮位，需计算约 $1.75 \times 10^{12}$ 次潮位，工程上不可行且在物理上违背了海洋水面长波平滑演变的规律；
+   * **自适应潮位控制网格 (Adaptive Tide Control Grid)**：在 DEM 水域/潮滩有效范围以指定空间间隔（默认 4,000 米）布设控制节点；
+   * **控制网格批量时序解算**：批量计算各控制节点在全年的连续时间序列（如 17,568 个时间点）；
+   * **反距离权重空间插值 (IDW)**：逐块遍历 DEM 像元时，利用邻近控制节点的水位时序插值出每个像元的完整时序，结合高程反求互补经验累积分布 (CCDF) 潜在天文潮淹没频率 (0% ~ 100%)；
+   * **水系连通与阻隔物理保护**：针对被防波堤、海堤隔断的闭流水塘或内陆洼地，系统支持阻隔阈值保护，严禁无物理通路的外插，内陆及无潮汐解区域严格以 NoData 输出。
+
 ---
 
 ## 🚀 快速上手 (Quick Start)
@@ -187,7 +209,7 @@ pip install -r requirements.txt
 ```
 
 ### 3. 命令行调用 (CLI 批处理)
-系统提供了易用的 `cli.py` 脚本，全面支持时区参数、整年模式与四大基准自动输出：
+系统提供了易用的 `cli.py` 脚本，全面支持时区参数、整年模式、四大基准及栅格计算：
 
 * **单点时序预测 (自定义时段)**：
   ```bash
@@ -201,10 +223,15 @@ pip install -r requirements.txt
   ```bash
   python cli.py batch --input points.csv --lon-col longitude --lat-col latitude --time-col datetime --tz UTC --output batch_out.csv
   ```
-* **潮滩 10m DEM 潜在天文潮淹没频率栅格计算**：
+* **空间栅格水面高程快照 (v1.4 Snapshot)**：
   ```bash
-  python scripts/calculate_inundation_raster.py --dem tidal_flat_10m_dem.tif --out inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008
+  python cli.py raster snapshot --input dem_or_scene.tif --output snapshot_water_level.tif --time "2024-06-18 10:30:00" --datum egm2008
   ```
+* **潮滩 10m/30m DEM 潜在天文潮淹没频率栅格 (v1.4 Inundation)**：
+  ```bash
+  python cli.py raster inundation --dem coastal_flat_dem.tif --output inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008 --spacing-m 4000
+  ```
+  *(注：`scripts/calculate_inundation_raster.py` 亦作为轻量封装完全兼容所有历史调用方式)*
 
 ### 4. Python API 代码集成
 
@@ -239,7 +266,7 @@ df_year['h_goco06s_m'] = datum_res['h_goco06s_m']
 df_year['h_egm2008_m'] = datum_res['h_egm2008_m']
 df_year['h_wgs84_m'] = datum_res['h_wgs84_m']
 
-# (2) 计算海岸带特定地形高程点 (如 +1.5m, +2.0m, +2.5m) 的潜在天文潮淹没概率
+# 计算海岸带特定地形高程点 (如 +1.5m, +2.0m, +2.5m) 的潜在天文潮淹没概率
 elevations = [1.5, 2.0, 2.5]
 freq_pct = compute_inundation_frequency(
     water_levels_m=df_year['tide_msl_m'].values,
@@ -248,6 +275,33 @@ freq_pct = compute_inundation_frequency(
 )
 for elev, pct in zip(elevations, freq_pct):
     print(f"高程 {elev:+.1f} m 处的天文潮被淹没频率: {pct:.2f}%")
+```
+
+#### (2) 空间栅格潮位快照与 DEM 潜在天文潮淹没频率 (v1.4)
+```python
+from core.raster_engine import RasterTideEngine
+
+raster_engine = RasterTideEngine()
+
+# 1. 计算单时刻全景空间水面高程快照
+summary_snap = raster_engine.calculate_snapshot_raster(
+    input_raster_path="coastal_flat_dem.tif",
+    output_raster_path="water_level_snapshot_egm2008.tif",
+    timestamp="2024-06-18 10:30:00",
+    datum="egm2008"
+)
+print(f"快照完成: 有效像元 {summary_snap.valid_pixels}, 耗时 {summary_snap.elapsed_seconds:.2f}s")
+
+# 2. 计算 2024 整年潜在天文潮淹没频率空间栅格 (0~100%)
+summary_inund = raster_engine.calculate_inundation_raster(
+    dem_path="coastal_flat_dem.tif",
+    output_path="inundation_frequency_2024.tif",
+    year=2024,
+    freq="30min",
+    datum="egm2008",
+    control_spacing_m=4000
+)
+print(f"淹没频率计算完成: 淹没像元均值 {summary_inund.mean_val:.2f}%")
 ```
 
 ---
@@ -283,24 +337,36 @@ CoastTideX/
 ├── data/
 │   └── geoid/
 │       ├── README_GEOID.md         # 大地水准面基准与 ICGEM 来源严密说明
+│       ├── hybrid_mdt_source_mask.tif # CNES-CLS22 MDT 官方参考重力场源掩膜 (v1.4 优先)
 │       ├── us_nga_egm08_25.tif     # NGA EGM2008 2.5分全球大地水准面栅格 (~76.9MB)
 │       ├── delta_n_goco06s_minus_egm2008.tif # GOCO06s 与 EGM2008 差值改正栅格 (~22.7MB)
 │       └── delta_n_eigen6c4_minus_egm2008.tif # EIGEN-6C4 与 EGM2008 差值改正栅格 (地中海/黑海本地生成，不入 Git 库)
 ├── core/                           # 核心计算包
 │   ├── tide_engine.py              # FES2022b 局部加速、时间分块 (Time-Chunking) 与整年 17,568 点预测
-│   ├── datum_engine.py             # 双重水准面 Hybrid MDT 转换体系与精细多边形掩码
+│   ├── datum_engine.py             # 双重水准面 Hybrid MDT 转换体系、官方掩膜与精细多边形掩码
+│   ├── raster_engine.py            # (v1.4) 空间栅格潮位引擎、像元中心对齐、快照计算与自适应控制网格 DEM 淹没分析
 │   └── utils.py                    # 预设港口、坐标校验、严格时区 (含DST)、淹没概率分析与元数据安全提取
 ├── gui/                            # PyQt6 桌面应用包
-│   ├── main_window.py              # 桌面主窗口 (单点/时段/整年模式、表格安全截断、QC指示徽章)
+│   ├── main_window.py              # 桌面主窗口 (单点/时段/整年模式、表格安全截断、Tab 3 栅格专用面板)
 │   ├── chart_widget.py             # Matplotlib 交互式波形组件 (智能降采样与自适应极值检测)
-│   ├── manual_dialog.py            # 内置功能说明文档与操作手册对话框 (v1.3 最新版)
-│   ├── settings_dialog.py          # 数据源可视化配置与连通性校验弹窗
+│   ├── manual_dialog.py            # 内置功能说明文档与操作手册对话框 (v1.4 最新版)
+│   ├── settings_dialog.py          # 数据源可视化配置、深度文件有效性校验弹窗
 │   └── styles.py                   # 扁平科技感深色 QSS 样式表
 └── tests/                          # 自动化单元与集成测试套件
-    └── test_engines.py             # 核心引擎全流程检验测试 (覆盖22项严密测试/闰年保真/闭合性)
+    └── test_engines.py             # 核心引擎全流程检验测试 (覆盖29项严密测试/闰年保真/栅格引擎/闭合性)
 ```
 
 ## 📝 版本更新日志 (Changelog)
+
+### v1.4 (2026-09)
+* **[重大升级] 空间栅格潮位引擎 (RasterTideEngine)**：全面集成 `core/raster_engine.py`，支持任意具有标准 CRS 的 GeoTIFF 影像，严格按像元中心对齐 (`offset='center'`) 进行真实二维水面高程快照计算，512×512 窗口流式原子写入；
+* **[算法突破] 自适应潮位控制网格 (Adaptive Tide Control Grid)**：攻克 10m/30m 沿海 DEM 全像元逐时刻解算引发的物理算力爆炸难题，在水域/潮滩提取自适应控制网格（默认 4km）长时序，结合反距离权重 (IDW) 空间插值与高效互补累积分布 (CCDF)，高效解算整年潜在天文潮淹没频率（0% ~ 100%）空间栅格；
+* **[科学基准解耦与权威掩膜]**：优先读取权威官方 `hybrid_mdt_source_mask.tif` 掩膜并辅以高精度闭合多边形保底；严格修复非标量输入严格维度校验；解耦基准面转换计算（计算 `both` / `egm2008` 时不再强制加载 WGS84 栅格）；
+* **[GUI 栅格潮位专用面板 (Tab 3)]**：主界面新增「空间栅格潮位与淹没分析」选项卡，内置 GeoTIFF 元数据检视卡片、快照/淹没双模式面板、自适应网格参数配置、进度条与中途安全取消；
+* **[GUI 独立计算与展示基准]**：单点计算支持独立配置计算基准与展示基准；切换整年模式时自动推荐 30min 步长并具备用户偏好记忆；
+* **[设置对话框深度校验]**：数据源设置增加 NetCDF 与 GeoTIFF 文件深层有效性检验，规范重置默认键名统一；
+* **[CLI 命令全量扩充]**：`cli.py` 新增 `raster snapshot` 与 `raster inundation` 完整子命令；`scripts/calculate_inundation_raster.py` 重构为规范薄封装；
+* **[自动化测试全面扩展至 29 项]**：新增合成 GeoTIFF 元数据解析、像元中心对齐、快照 Mock、CCDF 预言机对比、阻隔水体不外插与全链路集成测试，全部通过 (29/29 OK)。
 
 ### v1.3 (2026-09)
 * **[长序列与整年模式]** 单点预测新增「整年快捷模式」与「自定义时段」无缝切换，采用严格半开区间 $[start, end)$，2024 闰年 30min 步长精确生成 **17,568** 个连续采样点（平年 17,520 点），附带实时动态样本预算与坐标强校验；

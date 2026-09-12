@@ -1,4 +1,4 @@
-# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.3)
+# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.4)
 
 本目录包含 CoastTideX 系统用于高精度潮位垂直基准转换的核心空间栅格数据与大地测量学定义。
 
@@ -11,6 +11,7 @@
 | `us_nga_egm08_25.tif` | 全球 EGM2008 大地水准面起伏 $N_{\text{EGM2008}}$ | 2.5' 全球网格 (4321×8640) | **76.86 MB** | EPSG:4979 (WGS84 3D) | 美国国家地理空间情报局 (NGA) EGM2008 (d/o 2190) |
 | `delta_n_goco06s_minus_egm2008.tif` | 全球大洋 GOCO06s 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.66 MB** | EPSG:4326 (WGS84 2D) | ICGEM (GFZ Potsdam), GOCO06s (d/o 300) - EGM2008 (d/o 2190) |
 | `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (可由脚本本地生成，为保持轻量不入 Git 库) |
+| `hybrid_mdt_source_mask.tif` | [v1.4新增] 官方 Hybrid MDT 来源分类权威掩膜 (0=GOCO06s, 1=EIGEN-6C4, 255=NoData) | 0.05°~0.25° 网格 | 视配置而定 | EPSG:4326 (WGS84 2D) | 由官方 CNES-CLS22 MDT 空间定义或分类栅格派生，提供权威基准来源判定 |
 
 ---
 
@@ -36,15 +37,19 @@ $$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{E
 3. **严密换算至 WGS84 几何空间椭球高**：
    $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
 
+> [!NOTE]
+> 在 v1.4 中，当计算目标仅为 MSL 或 EGM2008（`datum_target='both'` 或 `'egm2008'`）时，系统仅需加载 MDT 与 $\Delta N$ 栅格，**不再强制加载庞大的 EGM2008 绝对水准面起伏栅格 ($N$)**，实现计算内存与文件依赖的严密解耦。
+
 ### 2.3 复合型混合 MDT (Hybrid MDT) 区域基准特性：地中海与黑海
 CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全球海洋与区域模型的融合成果：
 - **全球开阔大洋 (Global Ocean)**：参考大地水准面为 **GOCO06s**；
 - **地中海 (Mediterranean Sea)**：融合 CMEMS2020-MED，其参考大地水准面为 **EIGEN-6C4** ($d/o=2190$)；
 - **黑海 (Black Sea)**：融合 CMEMS2020-BLK，其参考大地水准面为 **EIGEN-6C4** ($d/o=2190$)。
 
-**科学处理与精度保障 (CoastTideX v1.3 创新机制)**：
-1. **精细闭合多边形识别**：系统采用 `matplotlib.path.Path` 矢量闭合多边形，精确识别直布罗陀海峡以东的地中海海域与黑海，彻底消除矩形包围框对大西洋加的斯湾、直布罗陀西侧、比斯开湾及红海的误判；
-2. **严格真值输出与拒绝伪造**：
+**科学处理与双层判定机制 (CoastTideX v1.4 严谨架构)**：
+1. **第一优先级：权威来源掩膜 (`AUTHORITATIVE_MASK`)**：若配置了 `hybrid_mdt_source_mask.tif`，系统优先依据该权威栅格判定每个像元或离散点的基准源，质量评定为高保真度；
+2. **第二优先级：精细闭合多边形备用 (`QC_DATUM_SOURCE_APPROX`)**：若权威掩膜未配置或像元落入掩膜 NoData 区域，系统自动回退至几何闭合多边形射线法判别，并显式标记质量警告 `QC_DATUM_SOURCE_APPROX`，杜绝未知假设；
+3. **严格真值输出与拒绝伪造**：
    - 在地中海与黑海，标称主变量 `h_mdt_ref_m` 代表相对 EIGEN-6C4 的海面高；
    - `h_goco06s_m` 严格赋值为 `NaN`（坚决不冒充 GOCO06s）；
    - 正高转换通过专属 `delta_n_eigen6c4_minus_egm2008.tif` 进行差值改正：

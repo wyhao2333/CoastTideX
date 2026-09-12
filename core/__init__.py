@@ -4,6 +4,7 @@ CoastTideX 核心计算包
 """
 
 from .datum_engine import DatumTransformer
+from .raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary
 from .utils import normalize_longitude, COASTAL_PRESETS
 
 try:
@@ -12,13 +13,16 @@ except ImportError:
     FESTidePredictor = None
     HAS_PYFES = False
 
-__version__ = "1.2.0"
+__version__ = "1.4.0"
 
 __all__ = [
     '__version__',
     'FESTidePredictor',
     'HAS_PYFES',
     'DatumTransformer',
+    'RasterTideEngine',
+    'RasterInfo',
+    'RasterResultSummary',
     'normalize_longitude',
     'COASTAL_PRESETS'
 ]

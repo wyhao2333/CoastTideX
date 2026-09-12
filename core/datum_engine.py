@@ -1,5 +1,5 @@
 """
-CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.3)
+CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.4)
 实现从平均海平面 (MSL) 到 MDT 原始参考面 (GOCO06s / EIGEN-6C4)、EGM2008 大地水准面及 WGS84 空间几何椭球面的严密科学转换。
 
 科学转换原理:
@@ -123,38 +123,132 @@ def _points_in_polygon(lons: np.ndarray, lats: np.ndarray, poly_verts: list[tupl
     return inside
 
 
-def get_mdt_reference_geoid(lon: float | np.ndarray, lat: float | np.ndarray) -> str | np.ndarray:
+def _broadcast_pointwise_inputs(
+    tide_msl_m: float | np.ndarray,
+    lons: float | np.ndarray,
+    lats: float | np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    严密点位输入广播辅助函数。
+    仅允许语义明确的形状组合：
+      - 1 / 1 / 1 (全部为标量或单点)
+      - N / N / N (全部为长度匹配的对应点)
+      - N / 1 / 1 (单点坐标，N 个时间步的潮位时序)
+      - 1 / N / N (单时刻潮位，N 个空间位置)
+    其它无法明确广播或存在数据截断风险的组合 (如 3 / 2 / 3) 必须严格抛出 ValueError。
+    """
+    t_arr = np.atleast_1d(np.asarray(tide_msl_m, dtype=float))
+    lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
+    lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+
+    len_t = len(t_arr)
+    len_lon = len(lons_arr)
+    len_lat = len(lats_arr)
+
+    if len_lon != len_lat:
+        if len_lon == 1 and len_lat > 1:
+            lons_arr = np.full(len_lat, lons_arr[0], dtype=float)
+            len_lon = len_lat
+        elif len_lat == 1 and len_lon > 1:
+            lats_arr = np.full(len_lon, lats_arr[0], dtype=float)
+            len_lat = len_lon
+        else:
+            raise ValueError(f"经纬度坐标长度不匹配且无法广播: len(lon)={len_lon}, len(lat)={len_lat}")
+
+    n_space = len_lon
+    if len_t == n_space:
+        return t_arr, lons_arr, lats_arr
+    elif len_t == 1 and n_space > 1:
+        t_arr = np.full(n_space, t_arr[0], dtype=float)
+        return t_arr, lons_arr, lats_arr
+    elif n_space == 1 and len_t > 1:
+        lons_arr = np.full(len_t, lons_arr[0], dtype=float)
+        lats_arr = np.full(len_t, lats_arr[0], dtype=float)
+        return t_arr, lons_arr, lats_arr
+    else:
+        raise ValueError(
+            f"无法安全广播输入的点位形状: tide={len_t}, lon={len_lon}, lat={len_lat}。"
+            "仅允许 1/1/1, N/N/N, N/1/1, 1/N/N 语义对齐输入，严禁静默截断或单元素填充。"
+        )
+
+
+def get_mdt_reference_geoid(
+    lon: float | np.ndarray,
+    lat: float | np.ndarray,
+    source_mask_data: np.ndarray = None,
+    source_mask_inv_transform = None,
+    return_qc: bool = False
+) -> str | np.ndarray | tuple[str | np.ndarray, str | np.ndarray]:
     """
     严密判定指定空间坐标处 CNES-CLS22 Hybrid MDT 的参考重力场大地水准面基准。
-    基于高精度空间几何多边形判定，彻底杜绝大西洋（如加的斯湾、比斯开湾）、欧洲内陆与红海被误判。
+    架构优先级:
+      1. 若配置了权威来源掩膜 (Authoritative Source Mask):
+         0: INVALID / UNKNOWN
+         1: CNES-CLS22 / GOCO06s
+         2: CMEMS-MED / EIGEN-6C4
+         3: CMEMS-BLK / EIGEN-6C4
+         QC 状态输出: 'AUTHORITATIVE_MASK'
+      2. 若未配置权威掩膜文件，回退为几何多边形判定 (Fallback Polygon):
+         QC 状态输出: 'QC_DATUM_SOURCE_APPROX'
 
     参数:
         lon: 经度 (单值或数组)
         lat: 纬度 (单值或数组)
+        source_mask_data: 掩膜栅格数组 (可选)
+        source_mask_inv_transform: 掩膜仿射逆变换 (可选)
+        return_qc: 若为 True，额外返回来源质量标记 ('AUTHORITATIVE_MASK' 或 'QC_DATUM_SOURCE_APPROX')
 
     返回:
-        'GOCO06s' / 'EIGEN-6C4' / 'INVALID' (标量或 numpy 字符串数组)
+        'GOCO06s' / 'EIGEN-6C4' / 'INVALID' (标量或 numpy 字符串数组)，或 (geoid, qc)
     """
     is_scalar = np.isscalar(lon) and np.isscalar(lat)
     lons_arr = np.atleast_1d(normalize_longitude(lon, to_360=False))
     lats_arr = np.atleast_1d(np.asarray(lat, dtype=float))
 
-    n_pts = max(len(lons_arr), len(lats_arr))
-    if len(lons_arr) != n_pts:
-        lons_arr = np.full(n_pts, lons_arr[0])
-    if len(lats_arr) != n_pts:
-        lats_arr = np.full(n_pts, lats_arr[0])
+    if len(lons_arr) != len(lats_arr):
+        if len(lons_arr) == 1 and len(lats_arr) > 1:
+            lons_arr = np.full(len(lats_arr), lons_arr[0])
+        elif len(lats_arr) == 1 and len(lons_arr) > 1:
+            lats_arr = np.full(len(lons_arr), lats_arr[0])
+        else:
+            raise ValueError(f"经纬度坐标长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
+
+    n_pts = len(lons_arr)
 
     # 1. 检查非法与越界坐标
     invalid_mask = ~np.isfinite(lons_arr) | ~np.isfinite(lats_arr) | (lats_arr < -90.0) | (lats_arr > 90.0)
 
-    # 2. 严密多边形空间几何判定 (纯 NumPy 射线法，无任何外部库依赖)
-    in_med = _points_in_polygon(lons_arr, lats_arr, _MED_POLYGON_VERTICES)
-    in_blk = _points_in_polygon(lons_arr, lats_arr, _BLK_POLYGON_VERTICES)
-    is_eigen = (in_med | in_blk) & (~invalid_mask)
+    # 2. 优先查询权威掩膜 (Authoritative Source Mask)
+    if source_mask_data is not None and source_mask_inv_transform is not None:
+        cols, rows = _apply_affine_transform(source_mask_inv_transform, lons_arr, lats_arr)
+        cols_int = np.round(cols - 0.5).astype(int)
+        rows_int = np.round(rows - 0.5).astype(int)
+        h, w = source_mask_data.shape
+        valid_pixel = (rows_int >= 0) & (rows_int < h) & (cols_int >= 0) & (cols_int < w) & (~invalid_mask)
+        cat_vals = np.zeros(n_pts, dtype=int)
+        cat_vals[valid_pixel] = np.nan_to_num(source_mask_data[rows_int[valid_pixel], cols_int[valid_pixel]], nan=0).astype(int)
 
-    res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'EIGEN-6C4', 'GOCO06s'))
-    return str(res[0]) if is_scalar else res
+        geoid_res = np.where(
+            ~valid_pixel | (cat_vals == 0) | invalid_mask,
+            'INVALID',
+            np.where((cat_vals == 2) | (cat_vals == 3), 'EIGEN-6C4', 'GOCO06s')
+        )
+        qc_res = np.where(geoid_res == 'INVALID', 'INVALID', 'AUTHORITATIVE_MASK')
+    else:
+        # 3. 回退为几何多边形判定 (纯 NumPy 射线法，标记为 QC_DATUM_SOURCE_APPROX)
+        in_med = _points_in_polygon(lons_arr, lats_arr, _MED_POLYGON_VERTICES)
+        in_blk = _points_in_polygon(lons_arr, lats_arr, _BLK_POLYGON_VERTICES)
+        is_eigen = (in_med | in_blk) & (~invalid_mask)
+
+        geoid_res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'EIGEN-6C4', 'GOCO06s'))
+        qc_res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'QC_DATUM_SOURCE_APPROX', 'NORMAL'))
+
+    out_geoid = str(geoid_res[0]) if is_scalar else geoid_res
+    out_qc = str(qc_res[0]) if is_scalar else qc_res
+
+    if return_qc:
+        return out_geoid, out_qc
+    return out_geoid
 
 
 def is_mediterranean_or_black_sea(lons: float | np.ndarray, lats: float | np.ndarray) -> np.ndarray:
@@ -181,7 +275,7 @@ def _apply_affine_transform(transform, xs, ys):
 
 class DatumTransformer:
     """
-    严密的海洋与大地测量垂直基准转换器 (v1.3)。
+    严密的海洋与大地测量垂直基准转换器 (v1.4)。
     全面支持目标感知的基准加载 (Target-aware)、GOCO06s 与 EIGEN-6C4 双水准面差值改正及严格错误防御。
     """
 
@@ -191,7 +285,8 @@ class DatumTransformer:
         egm2008_path: str = None,
         delta_n_goco_path: str = None,
         delta_n_eigen_path: str = None,
-        delta_n_path: str = None
+        delta_n_path: str = None,
+        source_mask_path: str = None
     ):
         config = load_app_config()
         paths_cfg = config.get('paths', {})
@@ -213,10 +308,15 @@ class DatumTransformer:
         if delta_n_eigen_path is None:
             delta_n_eigen_path = paths_cfg.get('delta_n_eigen6c4_egm2008_tif', 'data/geoid/delta_n_eigen6c4_minus_egm2008.tif')
 
+        # Hybrid MDT 权威来源掩膜路径 (可选)
+        if source_mask_path is None:
+            source_mask_path = paths_cfg.get('hybrid_mdt_source_mask')
+
         self.mdt_path = resolve_project_path(mdt_path)
         self.egm2008_path = resolve_project_path(egm2008_path, prefer_resource=True)
         self.delta_n_goco_path = resolve_project_path(delta_n_goco_path, prefer_resource=True)
         self.delta_n_eigen_path = resolve_project_path(delta_n_eigen_path, prefer_resource=True)
+        self.source_mask_path = resolve_project_path(source_mask_path, prefer_resource=True) if source_mask_path else None
         # 兼容旧属性名称
         self.delta_n_path = self.delta_n_goco_path
 
@@ -228,9 +328,41 @@ class DatumTransformer:
         self._delta_n_goco_inv_transform = None
         self._delta_n_eigen_data = None
         self._delta_n_eigen_inv_transform = None
+        self._source_mask_data = None
+        self._source_mask_inv_transform = None
 
         # 测试用数值夹具覆写机制 (Synthetic Fixtures for Regression Testing)
         self._synthetic_fixtures = None
+
+    def _init_source_mask(self, strict: bool = False):
+        """加载 CNES-CLS22 Hybrid MDT 权威来源掩膜 GeoTIFF (若存在)"""
+        if self._source_mask_data is None and self.source_mask_path:
+            if not os.path.exists(self.source_mask_path):
+                msg = f"未找到权威 Hybrid MDT 来源掩膜文件: {self.source_mask_path}。将自动回退为空间多边形近似判定。"
+                if strict:
+                    raise DatumDataError(msg)
+                return
+            try:
+                with rasterio.open(self.source_mask_path) as src:
+                    self._source_mask_data = src.read(1).astype(np.uint8)
+                    self._source_mask_inv_transform = ~src.transform
+            except Exception as e:
+                msg = f"打开 Hybrid MDT 来源掩膜失败 ({self.source_mask_path}): {e}"
+                if strict:
+                    raise DatumDataError(msg) from e
+                warnings.warn(msg + "，将回退为空间几何多边形判定。")
+
+    def _get_ref_geoid_and_qc(self, lons_arr: np.ndarray, lats_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """内部调用，优先查询权威来源掩膜，无掩膜时回退为几何多边形并标记 QC_DATUM_SOURCE_APPROX"""
+        self._init_source_mask(strict=False)
+        geoids, qcs = get_mdt_reference_geoid(
+            lons_arr,
+            lats_arr,
+            source_mask_data=self._source_mask_data,
+            source_mask_inv_transform=self._source_mask_inv_transform,
+            return_qc=True
+        )
+        return np.atleast_1d(geoids), np.atleast_1d(qcs)
 
     def set_synthetic_fixture(
         self,
@@ -406,13 +538,16 @@ class DatumTransformer:
         lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
 
-        n_pts = max(len(lons_arr), len(lats_arr))
-        if len(lons_arr) != n_pts:
-            lons_arr = np.full(n_pts, lons_arr[0])
-        if len(lats_arr) != n_pts:
-            lats_arr = np.full(n_pts, lats_arr[0])
+        if len(lons_arr) != len(lats_arr):
+            if len(lons_arr) == 1 and len(lats_arr) > 1:
+                lons_arr = np.full(len(lats_arr), lons_arr[0])
+            elif len(lats_arr) == 1 and len(lons_arr) > 1:
+                lats_arr = np.full(len(lons_arr), lats_arr[0])
+            else:
+                raise ValueError(f"经纬度坐标长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
 
-        ref_geoids = np.atleast_1d(get_mdt_reference_geoid(lons_arr, lats_arr))
+        n_pts = len(lons_arr)
+        ref_geoids, _ = self._get_ref_geoid_and_qc(lons_arr, lats_arr)
         res = np.full(n_pts, np.nan, dtype=float)
 
         # 检查是否为测试夹具模式
@@ -457,12 +592,17 @@ class DatumTransformer:
 
     def convert_tide_datums(
         self,
-        tide_msl_m: float | np.ndarray,
-        lons: float | np.ndarray,
-        lats: float | np.ndarray,
+        tide_msl_m: float | np.ndarray = None,
+        lons: float | np.ndarray = None,
+        lats: float | np.ndarray = None,
         datum_target: str = "both",
-        strict: bool = False
+        strict: bool = False,
+        **kwargs
     ) -> dict:
+        if tide_msl_m is None and 'tide_msl' in kwargs:
+            tide_msl_m = kwargs['tide_msl']
+        if tide_msl_m is None:
+            raise ValueError("convert_tide_datums 必须提供 tide_msl_m 或 tide_msl 参数。")
         """
         目标感知 (Target-aware) 的四大垂直基准严密转换体系。
 
@@ -470,7 +610,7 @@ class DatumTransformer:
             tide_msl_m: 相对平均海平面的瞬时潮汐起伏高度 (m)
             lons: 经度 (单值或数组)
             lats: 纬度 (单值或数组)
-            datum_target: 'msl', 'egm2008' (或 'egm'), 'both', 'wgs84' (或 'wgs'), 'all'
+            datum_target: 'msl', 'mdt_ref' (或 'goco'), 'egm2008' (或 'egm'), 'both', 'wgs84' (或 'wgs'), 'all'
             strict: 若为 True，当请求非 MSL 基准却缺少对应关键数据时立即抛出 DatumDataError；
                     若为 False，发出 warning 并优雅填充 NaN (用于探索性预览)。
 
@@ -484,44 +624,21 @@ class DatumTransformer:
             'h_egm2008_m': 相对 EGM2008 大地水准面的瞬时海面正高 (m) = H_MDT_REF + Delta_N
             'h_wgs84_m': WGS84 几何空间三维椭球高 (m) = H_EGM2008 + N_EGM2008
             'datum_ref_geoid': 当地 MDT 参考大地水准面 ('GOCO06s' 或 'EIGEN-6C4')
-            'qc_warning': 质量状态提示 ('NORMAL' 或 'QC_MED_BLACK_SEA_EIGEN6C4')
+            'qc_warning': 质量状态提示 ('NORMAL' 或 'QC_DATUM_SOURCE_APPROX')
         """
         is_scalar = np.isscalar(tide_msl_m) and np.isscalar(lons) and np.isscalar(lats)
-        t_arr = np.atleast_1d(np.asarray(tide_msl_m, dtype=float))
-        lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
-        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        t_arr, lons_arr, lats_arr = _broadcast_pointwise_inputs(tide_msl_m, lons, lats)
+        n_pts = len(t_arr)
 
         target = str(datum_target).lower()
 
-        # 广播对齐
-        n_pts = max(len(t_arr), len(lons_arr), len(lats_arr))
-        if len(t_arr) != n_pts:
-            t_arr = np.full(n_pts, t_arr[0])
-        if len(lons_arr) != n_pts:
-            lons_arr = np.full(n_pts, lons_arr[0])
-        if len(lats_arr) != n_pts:
-            lats_arr = np.full(n_pts, lats_arr[0])
-
-        ref_geoids = np.atleast_1d(get_mdt_reference_geoid(lons_arr, lats_arr))
-        qc_warning = np.where(ref_geoids == 'EIGEN-6C4', 'QC_MED_BLACK_SEA_EIGEN6C4', 'NORMAL')
+        ref_geoids, qc_source = self._get_ref_geoid_and_qc(lons_arr, lats_arr)
+        qc_warning = np.where(ref_geoids == 'EIGEN-6C4', qc_source, 'NORMAL')
 
         # 1. 仅 MSL 模式：绝对零依赖任何外部 MDT/Geoid 栅格文件
         if target == 'msl':
             nan_arr = np.full(n_pts, np.nan, dtype=float)
-            if is_scalar:
-                return {
-                    'tide_msl_m': float(t_arr[0]),
-                    'mdt_m': np.nan,
-                    'delta_n_m': np.nan,
-                    'n_egm2008_m': np.nan,
-                    'h_mdt_ref_m': np.nan,
-                    'h_goco06s_m': np.nan,
-                    'h_egm2008_m': np.nan,
-                    'h_wgs84_m': np.nan,
-                    'datum_ref_geoid': 'MSL',
-                    'qc_warning': 'NORMAL'
-                }
-            return {
+            res_dict = {
                 'tide_msl_m': t_arr,
                 'mdt_m': nan_arr,
                 'delta_n_m': nan_arr,
@@ -533,46 +650,62 @@ class DatumTransformer:
                 'datum_ref_geoid': np.full(n_pts, 'MSL'),
                 'qc_warning': np.full(n_pts, 'NORMAL')
             }
+            if is_scalar:
+                return {
+                    k: (float(v[0]) if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number) else (str(v[0]) if isinstance(v, np.ndarray) else v))
+                    for k, v in res_dict.items()
+                }
+            return res_dict
 
-        # 2. 需要 MDT 与 Delta N 改正
+        # 2. mdt_ref 或 goco 模式：需要 MDT，不需要 DeltaN，不需要 EGM undulation
+        if target in ['mdt_ref', 'goco', 'goco06s']:
+            mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
+            h_mdt_ref = t_arr + mdt_vals
+            h_goco06s = np.where(ref_geoids == 'GOCO06s', h_mdt_ref, np.nan)
+            nan_arr = np.full(n_pts, np.nan, dtype=float)
+            res_dict = {
+                'tide_msl_m': t_arr,
+                'mdt_m': mdt_vals,
+                'delta_n_m': nan_arr,
+                'n_egm2008_m': nan_arr,
+                'h_mdt_ref_m': h_mdt_ref,
+                'h_goco06s_m': h_goco06s,
+                'h_egm2008_m': nan_arr,
+                'h_wgs84_m': nan_arr,
+                'datum_ref_geoid': ref_geoids,
+                'qc_warning': qc_warning
+            }
+            if is_scalar:
+                return {
+                    k: (float(v[0]) if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number) else (str(v[0]) if isinstance(v, np.ndarray) else v))
+                    for k, v in res_dict.items()
+                }
+            return res_dict
+
+        # 3. egm / egm2008 / both 模式：需要 MDT + 对应 DeltaN，不需要 EGM undulation
         mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
         delta_n_vals = np.atleast_1d(self.get_delta_n(lons_arr, lats_arr, strict=strict))
-
         h_mdt_ref = t_arr + mdt_vals
         h_egm2008 = h_mdt_ref + delta_n_vals
-
-        # 语义严格性：h_goco06s 仅在真正参考 GOCO06s 的海域赋予数值，EIGEN-6C4 区域严格赋予 NaN
         h_goco06s = np.where(ref_geoids == 'GOCO06s', h_mdt_ref, np.nan)
 
-        # 3. WGS84 几何椭球高 (在用户请求 wgs/all/both 时计算 N_EGM2008 与 h_wgs84)
-        need_wgs = target in ['wgs', 'wgs84', 'all', 'both']
-        if need_wgs:
-            n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr, strict=strict))
-            h_wgs84 = h_egm2008 + n_egm_vals
-        else:
-            # 若不需要 WGS84，尝试非强制读取 (若已加载或顺带存在)
+        if target in ['egm', 'egm2008', 'both']:
+            # both = MSL + EGM2008，严密解耦：不强制加载 EGM undulation
             if self._egm_data is not None or (self._synthetic_fixtures and self._synthetic_fixtures.get('n_egm') is not None):
                 n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr, strict=False))
                 h_wgs84 = h_egm2008 + n_egm_vals
             else:
                 n_egm_vals = np.full(n_pts, np.nan, dtype=float)
                 h_wgs84 = np.full(n_pts, np.nan, dtype=float)
+        elif target in ['wgs', 'wgs84', 'all']:
+            n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr, strict=strict))
+            h_wgs84 = h_egm2008 + n_egm_vals
+        else:
+            raise ValueError(
+                f"未知的基准目标 datum_target: '{datum_target}'。允许选项: 'msl', 'mdt_ref', 'goco', 'egm2008', 'both', 'wgs84', 'all'。"
+            )
 
-        if is_scalar:
-            return {
-                'tide_msl_m': float(t_arr[0]),
-                'mdt_m': float(mdt_vals[0]) if np.isfinite(mdt_vals[0]) else np.nan,
-                'delta_n_m': float(delta_n_vals[0]) if np.isfinite(delta_n_vals[0]) else np.nan,
-                'n_egm2008_m': float(n_egm_vals[0]) if np.isfinite(n_egm_vals[0]) else np.nan,
-                'h_mdt_ref_m': float(h_mdt_ref[0]) if np.isfinite(h_mdt_ref[0]) else np.nan,
-                'h_goco06s_m': float(h_goco06s[0]) if np.isfinite(h_goco06s[0]) else np.nan,
-                'h_egm2008_m': float(h_egm2008[0]) if np.isfinite(h_egm2008[0]) else np.nan,
-                'h_wgs84_m': float(h_wgs84[0]) if np.isfinite(h_wgs84[0]) else np.nan,
-                'datum_ref_geoid': str(ref_geoids[0]),
-                'qc_warning': str(qc_warning[0]),
-            }
-
-        return {
+        res_dict = {
             'tide_msl_m': t_arr,
             'mdt_m': mdt_vals,
             'delta_n_m': delta_n_vals,
@@ -584,4 +717,121 @@ class DatumTransformer:
             'datum_ref_geoid': ref_geoids,
             'qc_warning': qc_warning,
         }
+
+        if is_scalar:
+            return {
+                k: (float(v[0]) if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number) else (str(v[0]) if isinstance(v, np.ndarray) else v))
+                for k, v in res_dict.items()
+            }
+        return res_dict
+
+    def get_static_datum_offsets(
+        self,
+        lons: float | np.ndarray,
+        lats: float | np.ndarray,
+        target: str = "egm2008",
+        strict: bool = True
+    ) -> dict:
+        """
+        计算空间坐标处的静态垂直基准偏移量 C(x)。
+        使得任意时刻 t 的目标基准高程可直接通过加法得到:
+          H_target(x, t) = Tide_MSL(x, t) + C(x)
+
+        参数:
+            lons: 经度 (标量或一维数组)
+            lats: 纬度 (标量或一维数组)
+            target: 目标基准 ('msl', 'mdt_ref', 'goco', 'egm2008', 'both', 'wgs84', 'all')
+            strict: 是否执行严格模式 (缺文件时抛出 DatumDataError)
+
+        返回:
+            dict 包含:
+                'offset_m': 静态高程偏置量 C(x) (np.ndarray)
+                'mdt_m': MDT 高程 (np.ndarray)
+                'delta_n_m': Delta N 改正值 (np.ndarray)
+                'n_egm2008_m': EGM2008 水准面起伏 (np.ndarray)
+                'ref_geoids': 参考重力场模型名称 (np.ndarray)
+                'qc_warning': 质量控制提示 (np.ndarray)
+        """
+        is_scalar = np.isscalar(lons) and np.isscalar(lats)
+        lons_arr = np.atleast_1d(normalize_longitude(lons, to_360=False))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+
+        if len(lons_arr) != len(lats_arr):
+            if len(lons_arr) == 1 and len(lats_arr) > 1:
+                lons_arr = np.full(len(lats_arr), lons_arr[0])
+            elif len(lats_arr) == 1 and len(lons_arr) > 1:
+                lats_arr = np.full(len(lons_arr), lats_arr[0])
+            else:
+                raise ValueError(f"经纬度数组长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
+
+        n_pts = len(lons_arr)
+        tgt = str(target).lower()
+
+        ref_geoids, qc_source = self._get_ref_geoid_and_qc(lons_arr, lats_arr)
+        qc_warning = np.where(ref_geoids == 'EIGEN-6C4', qc_source, 'NORMAL')
+
+        if tgt == 'msl':
+            res = {
+                'offset_m': np.zeros(n_pts, dtype=float),
+                'mdt_m': np.full(n_pts, np.nan, dtype=float),
+                'delta_n_m': np.full(n_pts, np.nan, dtype=float),
+                'n_egm2008_m': np.full(n_pts, np.nan, dtype=float),
+                'ref_geoids': np.full(n_pts, 'MSL'),
+                'qc_warning': np.full(n_pts, 'NORMAL')
+            }
+        elif tgt in ['mdt_ref', 'goco', 'goco06s']:
+            mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
+            res = {
+                'offset_m': mdt_vals,
+                'mdt_m': mdt_vals,
+                'delta_n_m': np.full(n_pts, np.nan, dtype=float),
+                'n_egm2008_m': np.full(n_pts, np.nan, dtype=float),
+                'ref_geoids': ref_geoids,
+                'qc_warning': qc_warning
+            }
+        elif tgt in ['egm', 'egm2008', 'both']:
+            mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
+            delta_n_vals = np.atleast_1d(self.get_delta_n(lons_arr, lats_arr, strict=strict))
+            res = {
+                'offset_m': mdt_vals + delta_n_vals,
+                'mdt_m': mdt_vals,
+                'delta_n_m': delta_n_vals,
+                'n_egm2008_m': np.full(n_pts, np.nan, dtype=float),
+                'ref_geoids': ref_geoids,
+                'qc_warning': qc_warning
+            }
+        elif tgt in ['wgs', 'wgs84']:
+            mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
+            delta_n_vals = np.atleast_1d(self.get_delta_n(lons_arr, lats_arr, strict=strict))
+            n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr, strict=strict))
+            res = {
+                'offset_m': mdt_vals + delta_n_vals + n_egm_vals,
+                'mdt_m': mdt_vals,
+                'delta_n_m': delta_n_vals,
+                'n_egm2008_m': n_egm_vals,
+                'ref_geoids': ref_geoids,
+                'qc_warning': qc_warning
+            }
+        elif tgt == 'all':
+            mdt_vals = np.atleast_1d(self.get_mdt(lons_arr, lats_arr, strict=strict))
+            delta_n_vals = np.atleast_1d(self.get_delta_n(lons_arr, lats_arr, strict=strict))
+            n_egm_vals = np.atleast_1d(self.get_egm2008_undulation(lons_arr, lats_arr, strict=strict))
+            res = {
+                'offset_m': mdt_vals + delta_n_vals,
+                'mdt_m': mdt_vals,
+                'delta_n_m': delta_n_vals,
+                'n_egm2008_m': n_egm_vals,
+                'ref_geoids': ref_geoids,
+                'qc_warning': qc_warning
+            }
+        else:
+            raise ValueError(f"未知的基准目标 target: '{target}'")
+
+        if is_scalar:
+            return {
+                k: (float(v[0]) if isinstance(v, np.ndarray) and np.issubdtype(v.dtype, np.number) else (str(v[0]) if isinstance(v, np.ndarray) else v))
+                for k, v in res.items()
+            }
+        return res
+
 

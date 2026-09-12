@@ -1,5 +1,5 @@
 """
-CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.3)
+CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.4)
 基于 CNES/AVISO 官方 pyfes 库，利用原生非结构有限元网格 (LGP2) 进行高保真海岸带潮位解算。
 
 特性:
@@ -451,3 +451,126 @@ class FESTidePredictor:
             progress_callback(100, "批量潮位解算完成")
 
         return df_out
+
+    def predict_points_period(
+        self,
+        lons: float | np.ndarray,
+        lats: float | np.ndarray,
+        start_time: str | pd.Timestamp,
+        end_time: str | pd.Timestamp,
+        freq: str = "30min",
+        inclusive: str = "both",
+        constituents: str | list = None,
+        source_tz: str = "UTC",
+        max_fes_evaluate_points: int = 500000,
+        progress_callback = None
+    ) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+        """
+        多空间控制点 (M) × 多时间步 (T) 联合高效潮位预测。
+        针对空间网格与大范围控制点解算，在内存中复用局部网格模型，
+        并采用 (M_chunk × T_chunk) 批量展平分块解算，防止一次性内存溢出。
+
+        参数:
+            lons: 经度数组 (长度 M)
+            lats: 纬度数组 (长度 M)
+            start_time: 起始时间
+            end_time: 结束时间
+            freq: 采样间隔 (如 '30min')
+            inclusive: 'both', 'left', 'right', 'neither'
+            constituents: 分潮集合 ('all', 'major8' 或列表)
+            source_tz: 时区
+            max_fes_evaluate_points: 单次调用 pyfes.evaluate_tide 的最大点数 (默认 500,000)
+            progress_callback: 进度回调 (0~100)
+
+        返回:
+            (tide_matrix_m, utc_time_index, quality_flags_matrix)
+            tide_matrix_m: shape 为 (M, T) 的浮点数矩阵，单位为米
+            utc_time_index: 长度为 T 的 UTC 时间索引
+            quality_flags_matrix: shape 为 (M, T) 的质量标志矩阵
+        """
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+
+        if len(lons_arr) != len(lats_arr):
+            raise ValueError(f"经纬度数组长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
+
+        for x, y in zip(lons_arr, lats_arr):
+            validate_coordinates(x, y)
+
+        if constituents is None:
+            constituents = self.default_constituents
+        const_list = validate_constituents(constituents)
+
+        validate_time_params(start_time, end_time, freq)
+        _, utc_idx, dates_np = build_time_index(
+            start_time=start_time,
+            end_time=end_time,
+            freq=freq,
+            source_tz=source_tz,
+            inclusive=inclusive
+        )
+
+        n_pts = len(lons_arr)
+        n_times = len(dates_np)
+
+        lons_norm = np.array([normalize_longitude(x, to_360=True) for x in lons_arr], dtype=float)
+
+        tide_matrix = np.full((n_pts, n_times), np.nan, dtype=np.float32)
+        flag_matrix = np.zeros((n_pts, n_times), dtype=np.int8)
+
+        # 检查空间跨度是否集中在局部
+        lon_span = np.ptp(lons_norm) if n_pts > 1 else 0.0
+        lat_span = np.ptp(lats_arr) if n_pts > 1 else 0.0
+
+        if lon_span <= 8.0 and lat_span <= 8.0:
+            chunks = [np.arange(n_pts)]
+        else:
+            chunk_size = 5.0
+            grid_keys = np.floor(lons_norm / chunk_size).astype(int) * 1000 + np.floor((lats_arr + 90.0) / chunk_size).astype(int)
+            unique_chunks = np.unique(grid_keys)
+            chunks = [np.where(grid_keys == cid)[0] for cid in unique_chunks]
+
+        total_chunks = len(chunks)
+        for c_idx, point_indices in enumerate(chunks):
+            sub_lons = lons_norm[point_indices]
+            sub_lats = lats_arr[point_indices]
+            m_sub = len(point_indices)
+
+            chunk_bbox = (
+                float(np.min(sub_lons)) - 0.5,
+                max(-90.0, float(np.min(sub_lats)) - 0.5),
+                float(np.max(sub_lons)) + 0.5,
+                min(90.0, float(np.max(sub_lats)) + 0.5)
+            )
+            model = self._get_model(chunk_bbox, const_list)
+
+            # 时间分块：使得 m_sub * t_chunk_len <= max_fes_evaluate_points
+            max_eval = max(10000, int(max_fes_evaluate_points))
+            t_chunk_len = max(1, max_eval // m_sub)
+            n_t_chunks = int(np.ceil(n_times / t_chunk_len))
+
+            for tc in range(n_t_chunks):
+                t_s = tc * t_chunk_len
+                t_e = min(t_s + t_chunk_len, n_times)
+                sub_dates = dates_np[t_s:t_e]
+                cur_t_len = len(sub_dates)
+
+                rep_lons = np.repeat(sub_lons, cur_t_len)
+                rep_lats = np.repeat(sub_lats, cur_t_len)
+                rep_dates = np.tile(sub_dates, m_sub)
+
+                sp, lp, flags = pyfes.evaluate_tide(model, rep_dates, rep_lons, rep_lats)
+                tot_m = (sp + lp) / 100.0
+
+                tot_reshaped = tot_m.reshape(m_sub, cur_t_len)
+                flags_reshaped = flags.reshape(m_sub, cur_t_len)
+
+                tide_matrix[point_indices, t_s:t_e] = tot_reshaped
+                flag_matrix[point_indices, t_s:t_e] = flags_reshaped
+
+            if progress_callback:
+                pct = int(10 + 85 * (c_idx + 1) / total_chunks)
+                progress_callback(pct, f"完成空间控制块 {c_idx+1}/{total_chunks} 时空潮汐解算...")
+
+        return tide_matrix, utc_idx, flag_matrix
+
