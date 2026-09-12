@@ -48,6 +48,19 @@ class RasterCalculationCancelled(RuntimeError):
     pass
 
 
+class RasterMemoryLimitError(RuntimeError):
+    """自适应控制网格节点数超出常驻内存预算限制异常"""
+    pass
+
+
+def estimate_control_node_memory(node_count: int, time_samples: int, dtype_bytes: int = 4) -> float:
+    """
+    估算控制节点常驻内存大小 (MB)。
+    根据常驻排序时序数组 (float32, 4字节/像元) 计算所需物理内存。
+    """
+    return (float(node_count) * float(time_samples) * float(dtype_bytes)) / (1024.0 * 1024.0)
+
+
 # 质量控制位掩码定义 (UInt16 Bitmask)
 QC_BIT_VALID = 0                      # 0: 无异常 / 完全有效高保真解算
 QC_BIT_FES_EXTRAPOLATED = 1 << 0      # bit 0 (1): 近岸动力学外推 (quality_flag < 0)
@@ -267,7 +280,7 @@ class RasterTideEngine:
         self.topology_valid_fraction_threshold = float(topology_valid_fraction_threshold if topology_valid_fraction_threshold is not None else raster_cfg.get('topology_valid_fraction_threshold', 0.5))
         self.control_node_batch_size = int(control_node_batch_size if control_node_batch_size is not None else raster_cfg.get('control_node_batch_size', 128))
         self.absolute_max_refinement_depth = int(absolute_max_refinement_depth if absolute_max_refinement_depth is not None else raster_cfg.get('absolute_max_refinement_depth', 12))
-        self.max_in_memory_control_nodes = int(max_in_memory_control_nodes if max_in_memory_control_nodes is not None else raster_cfg.get('max_in_memory_control_nodes', 10000))
+        self.max_in_memory_control_nodes = int(max_in_memory_control_nodes if max_in_memory_control_nodes is not None else raster_cfg.get('max_in_memory_control_nodes', 50000))
 
     def _get_predictor(self) -> FESTidePredictor:
         if self.predictor is None:
@@ -653,6 +666,8 @@ class RasterTideEngine:
             t_end_str = str(end_time)
             inclusive_mode = 'both'
 
+        n_time_samples = len(pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode))
+
         if progress_callback:
             progress_callback(3, "正在审查 DEM 物理分辨率与构建拓扑连通域掩膜...")
 
@@ -792,6 +807,24 @@ class RasterTideEngine:
             uncalculated = [n for n in nodes_to_eval if not n.valid and len(n.water_levels_sorted) == 0 and not getattr(n, '_evaluated', False)]
             if not uncalculated:
                 return
+
+            resident_count = sum(1 for n in node_cache.values() if len(n.water_levels_sorted) > 0)
+            pending_count = len(uncalculated)
+            total_attempted = resident_count + pending_count
+            if total_attempted > self.max_in_memory_control_nodes:
+                mem_required_mb = estimate_control_node_memory(total_attempted, n_time_samples, dtype_bytes=4)
+                mem_budget_mb = estimate_control_node_memory(self.max_in_memory_control_nodes, n_time_samples, dtype_bytes=4)
+                raise RasterMemoryLimitError(
+                    f"自适应控制网格节点超出常驻内存预算上限 (Raster engine exceeded max_in_memory_control_nodes budget)! "
+                    f"当前常驻节点 (Resident): {resident_count}, 待解算新节点 (Pending batch): {pending_count}, "
+                    f"总尝试节点数 (Total attempted): {total_attempted}, 内存上限 (Limit): {self.max_in_memory_control_nodes}. "
+                    f"每个节点时间采样点数 (Time samples per node): {n_time_samples}. "
+                    f"预估所需时序数组内存: {mem_required_mb:.2f} MB (当前预算上限: {mem_budget_mb:.2f} MB). "
+                    f"建议解决方案: (1) 在 config.yaml 中调大 raster.max_in_memory_control_nodes; "
+                    f"(2) 适当增大最小控制网格间距 min_control_spacing_m; "
+                    f"(3) 适当提高淹没误差容限 inundation_error_tolerance_pct; "
+                    f"(4) 裁剪 DEM 空间范围以降低复杂海岸线节点密度。"
+                )
 
             for n in uncalculated:
                 n._evaluated = True
@@ -1339,6 +1372,10 @@ class RasterTideEngine:
                     'SOLVED_PIXELS': str(solved_pixel_count),
                     'UNSOLVED_PIXELS': str(input_valid_count - solved_pixel_count),
                     'TOTAL_PIXELS': str(info.total_pixel_count),
+                    'MAX_IN_MEMORY_CONTROL_NODES': str(self.max_in_memory_control_nodes),
+                    'RESIDENT_CONTROL_NODES': str(final_nodes_count),
+                    'TIME_SAMPLES_PER_NODE': str(n_time_samples),
+                    'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=4):.2f}",
                     'QC_ENCODING': 'UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached'
                 }
                 dst_inund.update_tags(**metadata)

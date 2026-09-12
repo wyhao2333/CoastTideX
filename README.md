@@ -22,17 +22,17 @@
 
 系统基于国际权威的法国 CNES/AVISO **FES2022b 全球海洋潮汐模型**（包含全部 34 个主分潮的非结构有限元三角形网格 LGP2 二阶多项式解），攻克了传统规则方格网在曲折复杂海岸线、河口湾区由于“阶梯锯齿误差”导致的潮位失真问题。同时，系统内嵌 **CNES-CLS22 全球平均动态地形 (MDT)** 模型与 **NGA EGM2008 2.5分超高精度大地水准面栅格**，实现了从**局部平均海平面 (MSL)** 到 **EGM2008 大地水准面绝对海拔高**的一键高精度无缝转换。
 
-**v1.4 引入工业级空间栅格潮位引擎 (Spatial Raster Tide Engine)**：支持输入任意具备标准 CRS 的 GeoTIFF 影像，在指定时刻进行真空间变化的水面高程快照计算；针对千万像元级沿海 10m/30m 高分辨率 DEM，创新引入**自适应潮位控制网格 (Adaptive Tide Control Grid)**，高效流式解算整年潜在天文潮淹没频率（0% ~ 100%）空间栅格。
+**v1.4 引入空间栅格潮位引擎 (Release Candidate 候选版本)**：支持输入任意具备标准 CRS 的 GeoTIFF 影像，在指定时刻进行真空间变化的水面高程快照计算；针对沿海 10m/30m 高分辨率 DEM，创新引入**自适应潮位控制网格 (Adaptive Tide Control Grid)**，高效流式解算整年潜在天文潮淹没频率（0% ~ 100%）空间栅格。当前版本为代码完备的实测验证候选版本（Code-complete release candidate for real-world validation）。
 
 ---
 
 ### ✨ 核心特性 (Key Features)
 
 * 🌊 **FES2022b 原生非结构网格支持**：直读 3.77 GB 原生三角网格，在复杂海岸带具备最高空间保真度，支持全部 34 个全日潮、半日潮、浅海非线性潮与长周期平衡潮。
-* 🛰️ **空间栅格潮位引擎 (v1.4 Spatial Raster Engine)**：
+* 🛰️ **空间栅格潮位引擎 (v1.4 Spatial Raster Engine, RC)**：
   * **单时刻空间水面高程快照 (Snapshot)**：输入任意 GeoTIFF 影像，按像元中心严格重投影并评估真实空间二维水面高程，严格继承原始投影与分辨率，512×512 窗口流式原子写入；
-  * **自适应控制网格沿海 DEM 潜在天文潮淹没频率 (Inundation)**：针对千万级 10m/30m DEM 像元，在水域/潮滩提取自适应控制网格（默认 4km）长时序，结合反距离权重 (IDW) 空间插值与严密互补累积分布 (CCDF)，高效解算整年/时段淹没频率空间栅格；
-  * **阻隔水体与内陆物理保护**：杜绝向被水工建筑物隔断的水塘或内陆闭流洼地进行盲目潮位外插；内陆无效像元维持 NoData 严密传播；
+  * **自适应控制网格沿海 DEM 潜在天文潮淹没频率 (Inundation)**：针对千万级 10m/30m DEM 像元，在水域/潮滩提取自适应控制网格（默认 4km）长时序，结合四角控制节点已排序水位时序的二分检索 (`np.searchsorted`) 与叶单元内部双线性空间插值，高效解算整年/时段潜在天文潮淹没频率空间栅格；
+  * **有效像元拓扑连通防护 (Valid-mask Topology-aware Interpolation Guard)**：基于输入 DEM 的有效像元/NoData 掩膜识别连通水体域，防止跨越 NoData 屏障（如陆地、闭流盲端）发生潮位泄漏。注意：此机制依赖 DEM 掩膜拓扑结构，并非严格二维流体水动力学传播模型；若堤坝、水闸在 DEM 中具有有效高程值，无法自动作为 NoData 屏障隔离；
   * **TIFF 级严密元数据可溯源性**：输出 GeoTIFF 包含模型版本、基准面、计算时间范围、控制网格间距等完整元数据标签。
 * 📅 **整年与长时序高密度潮位序列预测 (v1.3/v1.4)**：
   * **自定义时段与整年快捷模式**：支持任意起止时间与快捷整年（如 2024 年）一键生成；
@@ -45,9 +45,9 @@
   * **单点时序预测**：自动推求最小包围框，仅在内存中建立局部空间拓扑索引，实现秒级加载与极低内存占用；
   * **全球批量离散点**：采用 $5^\circ \times 5^\circ$ 自适应空间网格分块聚类 (Spatial Chunking)，彻底杜绝全球散点退化为全地球加载的内存爆炸陷阱。
 * 📐 **双重水准面 Hybrid MDT 严密科学转换体系 (v1.3/v1.4)**：
-  * **双层权威判定**：优先匹配 CNES 官方 `hybrid_mdt_source_mask.tif` 掩膜，辅以精细闭合多边形保底判别，零误判；
+  * **双层判定与可选外部数据**：优先匹配 CNES 官方 `hybrid_mdt_source_mask.tif` 掩膜（可选外部数据，非内置捆绑），辅以精细闭合多边形保底近似判别（标记 `QC_DATUM_SOURCE_APPROX`）；
   * **全球大洋基准**：GOCO06s 基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$)；
-  * **地中海/黑海高阶基准**：EIGEN-6C4 ($d/o=2190$) 严密基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$，支持本地配置 `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`)；
+  * **地中海/黑海高阶基准**：EIGEN-6C4 ($d/o=2190$) 严密基准 ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$，支持本地配置可选外部 `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` 栅格，未配置时 strict 模式拦截报错，非 strict 模式回退为多边形近似并标注质量位)；
   * **统一标称主变量与严格语义真值**：引入 `h_mdt_ref_m` 代表相对 MDT 原始基准面海面高；在欧陆混合区严禁伪造 `h_goco06s_m`（地中海/黑海严格输出 `NaN`）；深陆点全要素严格置为 `NaN`。
 * 🎯 **高精度栅格双线性空间插值与目标敏感基准解耦 (v1.3/v1.4)**：
   * 对 EGM2008 与 $\Delta N$ 栅格执行真双线性插值 (`map_coordinates(order=1)`)；
@@ -170,7 +170,7 @@ $$P_{\text{inundation}}(z) = P(\eta_{\text{tide}} > z) = 1 - F(z) = \frac{1}{N}\
 系统采用 `np.searchsorted` 实现 $O(M \log N)$ 极限速度计算，支持单点高程或大面积数字高程模型 (DEM) 的瞬时概率反演。
 
 ### 6. 空间栅格潮位引擎与自适应控制网格 (Spatial Raster Tide Engine, v1.4)
-针对海岸带高保真遥感解译与潮滩生态演变，CoastTideX v1.4 正式集成工业级空间栅格引擎 (`core.raster_engine.RasterTideEngine`)：
+针对海岸带高保真遥感解译与潮滩生态演变，CoastTideX v1.4 正式推出空间栅格引擎验证候选版本 (`core.raster_engine.RasterTideEngine`，Release Candidate)：
 
 1. **指定时刻瞬时空间水面高程快照 (Snapshot)**：
    * 对输入 GeoTIFF 影像进行严格像元中心反投影 (`offset='center'`)，将图像像元坐标精确转换为经纬度 $(\lambda, \phi)$；
@@ -182,7 +182,7 @@ $$P_{\text{inundation}}(z) = P(\eta_{\text{tide}} > z) = 1 - F(z) = \frac{1}{N}\
    * **算力与物理约束**：以一副标准的 $10000 \times 10000$ 像元 10m DEM 为例，像元总数达 1 亿。若在 17,568 个时间步上对全部 1 亿像元逐一解算 FES2022b 潮位，需计算约 $1.75 \times 10^{12}$ 次潮位，工程上不可行且在物理上违背了海洋水面长波平滑演变的规律；
    * **自适应四叉树控制网格 (Adaptive Quadtree Control Grid)**：在 DEM 水域/潮滩有效范围按误差阈值与空间自适应梯度动态细分，逐层批量解算控制节点全年 30min 连续时序；
    * **控制节点预排序与极速 CCDF 双线性插值**：各有效控制节点就地预排序 17,568 个潮位值 ($O(T \log T)$)，逐像元高程在角点以 $O(\log T)$ 二分检索即时求取淹没概率，在叶节点单元内部执行双线性空间平滑插值；
-   * **有效掩膜拓扑连通防护 (Valid-mask Topology-aware Interpolation Guard)**：结合物理尺度 (topology_max_resolution_m) 与连通域阈值分析，阻止跨越海堤、陆地或 NoData 屏障盲目平滑插值，各盆地水体完全隔离，内陆及无有效海洋控制节点区域严格以 NoData 输出并附带 UInt16 质量掩膜。
+   * **有效掩膜拓扑连通防护 (Valid-mask Topology-aware Interpolation Guard)**：结合物理尺度 (topology_max_resolution_m) 与粗粒度有效掩膜连通域分析，阻止跨越陆地 NoData 屏障发生潮位泄漏。注：本防护机制严格基于 DEM 有效像元/NoData 拓扑连通性，并非严格二维水动力学浅水方程数值模型；若人工水工建筑（如海堤、拦水坝）在输入 DEM 中拥有有效地形高程值，无法自动识别为阻水屏障。无有效海洋控制节点区域严格以 NoData 输出并附带 UInt16 位掩码质量标记。
 
 ---
 
@@ -378,7 +378,13 @@ CoastTideX/
 * **[GUI 独立计算与展示基准]**：单点计算支持独立配置计算基准与展示基准；切换整年模式时自动推荐 30min 步长并具备用户偏好记忆；
 * **[设置对话框深度校验]**：数据源设置增加 NetCDF 与 GeoTIFF 文件深层有效性检验，规范重置默认键名统一；
 * **[CLI 命令全量扩充]**：`cli.py` 新增 `raster snapshot` 与 `raster inundation` 完整子命令；`scripts/calculate_inundation_raster.py` 重构为规范薄封装；
-* **[自动化测试全面扩展至 47 项]**：新增四叉树动态细分节点增长、最小步长终止与质量位 32、阻隔水体拓扑连通隔离、官方掩膜五类规范值、投影坐标系重投影、经度圆周跨界 (0°/180°)、投影米/英尺单位自适应转换与端到端离线预言机验证，新增本初子午线双紧致 BBox 拆分、两盆地阻隔带 100%/0% 预言机隔离、FES 有效性突变四叉树细分与边缘探针、物理尺度拓扑连通域降采样屏障保护、四叉树逐层批量解算开销优化与 max_fes_evaluate_points 参数传递验证，全部通过 (47/47 OK)。
+* **[自动化测试全面扩展至 47 项]**：新增四叉树动态细分节点增长、最小步长终止与质量位 32、阻隔水体拓扑连通隔离、官方掩膜五类规范值、投影坐标系重投影、经度圆周跨界 (0°/180°)、投影米/英尺单位自适应转换与端到端离线预言机验证，新增本初子午线双紧致 BBox 拆分、两盆地阻隔带 100%/0% 预言机隔离、FES 有效性突变四叉树细分与边缘探针、物理尺度拓扑连通域降采样屏障保护、四叉树逐层批量解算开销优化与 max_fes_evaluate_points 参数传递验证，全部通过 (47/47 OK)。（注：GitHub Actions CI 在无大文件模型环境下执行合成预言机与单元测试；本地完整数据环境下运行全量测试）。
+* **[v1.4 RC 最终收口整改]**：
+  * **常驻内存预算硬防护**：明确 `max_in_memory_control_nodes` 硬限制，超出时抛出结构化诊断信息的 `RasterMemoryLimitError`，杜绝未实现虚假 memmap 描述；
+  * **CLI 整年模式与 MSL 基准解耦**：彻底消除单点整年模式下的基准重复转换，MSL 模式零依赖外部垂直基准；
+  * **真实像元真值预言机强化**：`scripts/validate_real_fes_raster.py` 引入真实抽样像元中心直接 FES 解算预言机 (`Direct Sampled-Pixel FES Oracle`)，密集网格比对更名为规范的 `Dense Regular Control-Grid Reference`；
+  * **CI 图形依赖严格断言**：在 CI 环境下 GUI 导入失败严格断言为测试失败，杜绝无意静默跳过；
+  * **科学术语与局限性校准**：文档全面移除 IDW / 2D 水动力学夸大表述，校准为已排序 CCDF 二分检索 + 双线性空间插值与有效像元拓扑防护，明晰可选外部数据集属性与 Release Candidate 状态。
 
 ### v1.3 (2026-09)
 * **[长序列与整年模式]** 单点预测新增「整年快捷模式」与「自定义时段」无缝切换，采用严格半开区间 $[start, end)$，2024 闰年 30min 步长精确生成 **17,568** 个连续采样点（平年 17,520 点），附带实时动态样本预算与坐标强校验；

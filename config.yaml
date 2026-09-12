@@ -69,8 +69,8 @@ raster:
   # 拓扑连通判定有效像元比例阈值 (保守保护陆地 NoData barrier)
   topology_valid_fraction_threshold: 0.5
 
-  # 内存中允许驻留的最大控制节点数 (超过后启用临时 memmap 磁盘映射存储排序时序)
-  max_in_memory_control_nodes: 10000
+  # 内存中允许驻留的最大控制节点数 (超过后抛出 RasterMemoryLimitError；v1.4 暂不引入复杂 disk-backed memmap 架构)
+  max_in_memory_control_nodes: 50000
 
 # 界面与展示默认配置
 gui:

@@ -79,9 +79,9 @@ PyFES 天文潮汐引潮力计算严格基于 <b>UTC (协调世界时)</b>。
     <li><b>夏令时 (DST) 物理连续性</b>：采用严格递增时间戳构建器，穿越夏令时切换日时保持物理流逝时间无间断递增与点数正确性。</li>
 </ul>
 
-<h2>三、 空间栅格潮位与潜在天文潮淹没频率分析 (v1.4 Spatial Raster Engine)</h2>
+<h2>三、 空间栅格潮位与潜在天文潮淹没频率分析 (v1.4 Spatial Raster Engine, RC)</h2>
 <p>
-CoastTideX v1.4 正式引入工业级空间栅格潮位引擎 (<code>RasterTideEngine</code>)，支持对任意带有标准地理参考 (CRS) 的 GeoTIFF 影像进行二维高保真解算：
+CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTideEngine</code>，Release Candidate)，支持对任意带有标准地理参考 (CRS) 的 GeoTIFF 影像进行二维高保真解算：
 </p>
 <ul>
     <li><b>指定时刻瞬时栅格潮位快照 (Snapshot)</b>：
@@ -91,12 +91,12 @@ CoastTideX v1.4 正式引入工业级空间栅格潮位引擎 (<code>RasterTideE
         针对千万像元级的 10m/30m 高分辨率沿海 DEM，系统创新采用<b>自适应潮位控制网格 (Adaptive Tide Control Grid)</b>：
         <ol>
             <li>在 DEM 覆盖范围内以指定间距（默认 4,000 米）自适应提取水域/潮滩控制节点；</li>
-            <li>在控制网格上批量计算完整的年际时间序列；</li>
-            <li>像元计算时采用反距离权重 (IDW) 空间插值，随后通过严密互补累积分布 (CCDF) 计算潜在天文潮淹没频率（0% ~ 100%）；</li>
-            <li>输出严格标明为「潜在天文潮淹没频率 (Potential Astronomical Tidal Inundation Frequency)」，并在 TIFF 标签中完整记录计算溯源。</li>
+            <li>在控制网格上批量流式计算完整的年际时间序列；</li>
+            <li>控制节点就地预排序水位时序，像元高程通过二分检索 (<code>np.searchsorted</code>) 快速获取控制节点淹没概率，在四叉树叶单元内部采用双线性空间平滑插值解算潜在天文潮淹没频率（0% ~ 100%）；</li>
+            <li>输出严格标明为「潜在天文潮淹没频率 (Potential Astronomical Tidal Inundation Frequency)」，并在 TIFF 标签中完整记录计算溯源与常驻内存指标。</li>
         </ol>
     </li>
-    <li><b>阻隔与内陆物理保护</b>：严禁盲目向闭流洼地、被水工建筑物隔断的水塘进行潮汐外插；陆地无效像元保持 NoData 传播。</li>
+    <li><b>有效像元拓扑连通防护 (Valid-mask Topology-aware Guard)</b>：基于输入 DEM 的有效像元/NoData 连通域阻断跨越 NoData 屏障的潮位泄漏（注：依赖 DEM NoData 拓扑结构，非二维浅水方程水动力学模拟；堤坝若有 DEM 赋值则不自动视为隔离屏障）；陆地无效像元保持 NoData 传播并生成 UInt16 质量位掩膜。</li>
 </ul>
 
 <h2>四、 💻 电脑硬件配置与内存需求 (System Requirements)</h2>

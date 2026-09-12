@@ -4,7 +4,10 @@ CoastTideX 核心计算包
 """
 
 from .datum_engine import DatumTransformer
-from .raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary
+from .raster_engine import (
+    RasterTideEngine, RasterInfo, RasterResultSummary,
+    RasterMemoryLimitError, estimate_control_node_memory
+)
 from .utils import normalize_longitude, COASTAL_PRESETS
 
 try:
@@ -23,6 +26,8 @@ __all__ = [
     'RasterTideEngine',
     'RasterInfo',
     'RasterResultSummary',
+    'RasterMemoryLimitError',
+    'estimate_control_node_memory',
     'normalize_longitude',
     'COASTAL_PRESETS'
 ]

@@ -22,7 +22,9 @@ CoastTideX 命令行工具 (Command-Line Interface v1.4)
 import os
 import sys
 import argparse
+import numpy as np
 import pandas as pd
+from typing import Optional, List
 
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -41,7 +43,7 @@ from core.raster_engine import RasterTideEngine
 from core.utils import export_dataframe
 
 
-def main():
+def main(args_list: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.4")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
@@ -106,7 +108,7 @@ def main():
     p_inund.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
     p_inund.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
 
     if not args.mode:
         parser.print_help()
@@ -126,7 +128,8 @@ def main():
                 year=args.year,
                 freq=args.step,
                 constituents=args.constituents,
-                source_tz=args.tz
+                source_tz=args.tz,
+                datum_mode=None
             )
         else:
             if not args.start or not args.end:
@@ -145,33 +148,44 @@ def main():
             )
 
         datum_target = args.datum.lower()
-        strict_mode = (not args.non_strict) if datum_target != "msl" else False
+        if datum_target == "msl":
+            # 纯 MSL 模式: 零依赖外部基准栅格，绝不调用 DatumTransformer
+            df['tide_msl_m'] = df['tide_total_m']
+            df['mdt_m'] = np.nan
+            df['delta_n_m'] = np.nan
+            df['n_egm2008_m'] = np.nan
+            df['h_mdt_ref_m'] = np.nan
+            df['h_goco06s_m'] = np.nan
+            df['h_egm2008_m'] = np.nan
+            df['h_wgs84_m'] = np.nan
+            df['datum_ref_geoid'] = 'MSL'
+            df['qc_warning'] = 'NORMAL'
+        else:
+            strict_mode = not args.non_strict
+            datum_desc_map = {
+                "egm2008": "MSL + EGM2008",
+                "both": "MSL + EGM2008",
+                "mdt_ref": "MSL + MDT_REF",
+                "wgs84": "MSL + EGM2008 + WGS84",
+                "all": "MSL + MDT_REF + EGM2008 + WGS84"
+            }
+            datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
+            print(f"[*] 严密计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
+            datum_res = transformer.convert_tide_datums(
+                df['tide_total_m'].values, args.lon, args.lat,
+                datum_target=datum_target, strict=strict_mode
+            )
 
-        datum_desc_map = {
-            "msl": "MSL (相对平均海平面)",
-            "egm2008": "MSL + EGM2008",
-            "both": "MSL + EGM2008",
-            "mdt_ref": "MSL + MDT_REF",
-            "wgs84": "MSL + EGM2008 + WGS84",
-            "all": "MSL + MDT_REF + EGM2008 + WGS84"
-        }
-        datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
-        print(f"[*] 严密计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
-        datum_res = transformer.convert_tide_datums(
-            df['tide_total_m'].values, args.lon, args.lat,
-            datum_target=datum_target, strict=strict_mode
-        )
-
-        df['tide_msl_m'] = datum_res['tide_msl_m']
-        df['mdt_m'] = datum_res['mdt_m']
-        df['delta_n_m'] = datum_res['delta_n_m']
-        df['n_egm2008_m'] = datum_res['n_egm2008_m']
-        df['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
-        df['h_goco06s_m'] = datum_res['h_goco06s_m']
-        df['h_egm2008_m'] = datum_res['h_egm2008_m']
-        df['h_wgs84_m'] = datum_res['h_wgs84_m']
-        df['datum_ref_geoid'] = datum_res['datum_ref_geoid']
-        df['qc_warning'] = datum_res['qc_warning']
+            df['tide_msl_m'] = datum_res['tide_msl_m']
+            df['mdt_m'] = datum_res['mdt_m']
+            df['delta_n_m'] = datum_res['delta_n_m']
+            df['n_egm2008_m'] = datum_res['n_egm2008_m']
+            df['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
+            df['h_goco06s_m'] = datum_res['h_goco06s_m']
+            df['h_egm2008_m'] = datum_res['h_egm2008_m']
+            df['h_wgs84_m'] = datum_res['h_wgs84_m']
+            df['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+            df['qc_warning'] = datum_res['qc_warning']
 
         if 'quality_flag' in df.columns:
             flags = df['quality_flag'].values
@@ -198,36 +212,46 @@ def main():
         )
 
         datum_target = args.datum.lower()
-        strict_mode = (not args.non_strict) if datum_target != "msl" else False
+        if datum_target == "msl":
+            df_out['tide_msl_m'] = df_out['tide_total_m']
+            df_out['mdt_m'] = np.nan
+            df_out['delta_n_m'] = np.nan
+            df_out['n_egm2008_m'] = np.nan
+            df_out['h_mdt_ref_m'] = np.nan
+            df_out['h_goco06s_m'] = np.nan
+            df_out['h_egm2008_m'] = np.nan
+            df_out['h_wgs84_m'] = np.nan
+            df_out['datum_ref_geoid'] = 'MSL'
+            df_out['qc_warning'] = 'NORMAL'
+        else:
+            strict_mode = not args.non_strict
+            datum_desc_map = {
+                "egm2008": "MSL + EGM2008",
+                "both": "MSL + EGM2008",
+                "mdt_ref": "MSL + MDT_REF",
+                "wgs84": "MSL + EGM2008 + WGS84",
+                "all": "MSL + MDT_REF + EGM2008 + WGS84"
+            }
+            datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
+            print(f"[*] 向量化批量计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
+            lons = df_out[args.lon_col].astype(float).values
+            lats = df_out[args.lat_col].astype(float).values
+            tide_msl = df_out['tide_total_m'].values
 
-        datum_desc_map = {
-            "msl": "MSL (相对平均海平面)",
-            "egm2008": "MSL + EGM2008",
-            "both": "MSL + EGM2008",
-            "mdt_ref": "MSL + MDT_REF",
-            "wgs84": "MSL + EGM2008 + WGS84",
-            "all": "MSL + MDT_REF + EGM2008 + WGS84"
-        }
-        datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
-        print(f"[*] 向量化批量计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
-        lons = df_out[args.lon_col].astype(float).values
-        lats = df_out[args.lat_col].astype(float).values
-        tide_msl = df_out['tide_total_m'].values
-
-        datum_res = transformer.convert_tide_datums(
-            tide_msl, lons, lats,
-            datum_target=datum_target, strict=strict_mode
-        )
-        df_out['tide_msl_m'] = datum_res['tide_msl_m']
-        df_out['mdt_m'] = datum_res['mdt_m']
-        df_out['delta_n_m'] = datum_res['delta_n_m']
-        df_out['n_egm2008_m'] = datum_res['n_egm2008_m']
-        df_out['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
-        df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
-        df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
-        df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
-        df_out['datum_ref_geoid'] = datum_res['datum_ref_geoid']
-        df_out['qc_warning'] = datum_res['qc_warning']
+            datum_res = transformer.convert_tide_datums(
+                tide_msl, lons, lats,
+                datum_target=datum_target, strict=strict_mode
+            )
+            df_out['tide_msl_m'] = datum_res['tide_msl_m']
+            df_out['mdt_m'] = datum_res['mdt_m']
+            df_out['delta_n_m'] = datum_res['delta_n_m']
+            df_out['n_egm2008_m'] = datum_res['n_egm2008_m']
+            df_out['h_mdt_ref_m'] = datum_res['h_mdt_ref_m']
+            df_out['h_goco06s_m'] = datum_res['h_goco06s_m']
+            df_out['h_egm2008_m'] = datum_res['h_egm2008_m']
+            df_out['h_wgs84_m'] = datum_res['h_wgs84_m']
+            df_out['datum_ref_geoid'] = datum_res['datum_ref_geoid']
+            df_out['qc_warning'] = datum_res['qc_warning']
 
         if 'quality_flag' in df_out.columns:
             flags = df_out['quality_flag'].values

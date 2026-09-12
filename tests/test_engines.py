@@ -47,6 +47,7 @@ from core.datum_engine import (
 from core.tide_engine import FESTidePredictor, SyntheticTidePredictor, TwoBasinSyntheticPredictor
 from core.raster_engine import (
     RasterTideEngine, RasterInfo, ControlNode,
+    RasterMemoryLimitError, estimate_control_node_memory,
     QC_VALID, QC_FES_EXTRAPOLATED, QC_SPATIAL_FALLBACK, QC_INSUFFICIENT_NODES,
     QC_BIT_VALID, QC_BIT_MIN_SPACING_REACHED, QC_BIT_DATUM_SOURCE_APPROX,
     QC_BIT_FES_EXTRAPOLATED, QC_BIT_SPATIAL_FALLBACK, QC_BIT_DATUM_INVALID,
@@ -616,11 +617,14 @@ class TestCoastTideX(unittest.TestCase):
 
     # 29. 验证 GUI 与 CLI 模块导入健全性
     def test_gui_and_cli_importable(self):
+        is_ci = (os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true")
         try:
             from gui.main_window import MainWindow, RasterTideWorker, SingleTideWorker, BatchTideWorker
             self.assertTrue(issubclass(RasterTideWorker, unittest.TestCase.__base__))
-        except ImportError:
-            pass  # 在极简无 GUI 运行环境下平滑跳过
+        except ImportError as e:
+            if is_ci:
+                self.fail(f"CI 环境已配置 PyQt6 与系统图形依赖，GUI 导入失败应报错拦截: {e}")
+            pass  # 在极简本地无 GUI 运行环境下平滑跳过
         import cli
         self.assertTrue(hasattr(cli, 'main'))
 
@@ -950,10 +954,14 @@ class TestCoastTideX(unittest.TestCase):
 
     # 40. Test K: 验证无头/CI环境直接导入 GUI 模块与取消信号线程安全性
     def test_gui_direct_imports_headless(self):
+        is_ci = (os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true")
         try:
             from gui.main_window import MainWindow, RasterTideWorker, SingleTideWorker, BatchTideWorker
         except ImportError as e:
-            self.skipTest(f"无头环境缺少系统图形依赖 (如 libEGL/X11)，安全跳过 GUI 直接导入测试: {e}")
+            if is_ci:
+                self.fail(f"CI 环境已配置 PyQt6 与系统图形依赖 (libEGL/X11)，GUI 导入失败应报错拦截: {e}")
+            else:
+                self.skipTest(f"本地无头环境缺少系统图形依赖 (如 libEGL/X11)，安全跳过 GUI 直接导入测试: {e}")
             return
         worker = RasterTideWorker('snapshot', {'input_path': 'test.tif'})
         self.assertFalse(worker._is_cancelled)
@@ -1231,6 +1239,183 @@ class TestCoastTideX(unittest.TestCase):
             self.assertTrue(pred_spy.predict_points_period.called)
             kwargs_passed = [call.kwargs for call in pred_spy.predict_points_period.call_args_list]
             self.assertEqual(kwargs_passed[0].get('max_fes_evaluate_points'), 77777)
+
+    # 48. Test S: 验证控制节点常驻内存估算与超出预算硬限制 (RasterMemoryLimitError)
+    def test_memory_limit_error_and_estimate(self):
+        # 1. 验证内存估算辅助函数计算精度
+        mem_mb = estimate_control_node_memory(1000, 17568, dtype_bytes=4)
+        expected_mb = (1000.0 * 17568.0 * 4.0) / (1024.0 * 1024.0)
+        self.assertAlmostEqual(mem_mb, expected_mb, places=4)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_mem.tif")
+            out_path = os.path.join(temp_dir, "out_mem.tif")
+            tmp_out_path = f"{out_path}.tmp.tif"
+            tmp_qc_path = f"{os.path.splitext(out_path)[0]}_qc.tif.tmp.tif"
+
+            width, height = 20, 20
+            transform = from_origin(120.0, 30.0, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            pred = SyntheticTidePredictor()
+            # 将最大允许常驻节点数限制为极小值 (例如 2)，必然触发硬限制
+            engine = RasterTideEngine(
+                tide_predictor=pred,
+                max_in_memory_control_nodes=2,
+                initial_control_spacing_m=4000.0
+            )
+
+            with self.assertRaises(RasterMemoryLimitError) as ctx:
+                engine.calculate_inundation_raster(
+                    dem_path=dem_path, output_path=out_path,
+                    start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                    freq="1h", dem_datum='msl', inclusive='both'
+                )
+
+            err_msg = str(ctx.exception)
+            self.assertIn("Resident", err_msg)
+            self.assertIn("Pending", err_msg)
+            self.assertIn("Total attempted", err_msg)
+            self.assertIn("Limit", err_msg)
+            self.assertIn("Time samples per node", err_msg)
+            self.assertIn("建议解决方案", err_msg)
+
+            # 验证异常发生时原子临时文件被安全清理
+            self.assertFalse(os.path.exists(tmp_out_path))
+            self.assertFalse(os.path.exists(tmp_qc_path))
+            self.assertFalse(os.path.exists(out_path))
+
+    # 49. Test T: 验证 CLI 整年模式潮位解算与垂直基准解耦 (单次解算/MSL跳过)
+    def test_cli_year_mode_datum_decoupling(self):
+        import cli
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_msl = os.path.join(temp_dir, "out_msl.csv")
+            out_egm = os.path.join(temp_dir, "out_egm.csv")
+
+            mock_pred = MagicMock()
+            mock_trans = MagicMock()
+
+            # 模拟 predict_year 返回 DataFrame
+            df_mock = pd.DataFrame({
+                'datetime': pd.date_range('2024-01-01', periods=5, freq='1h'),
+                'tide_total_m': [0.5, 0.6, 0.7, 0.6, 0.5],
+                'quality_flag': [1, 1, 1, 1, 1]
+            })
+            mock_pred.predict_year.return_value = df_mock.copy()
+
+            mock_trans.convert_tide_datums.return_value = {
+                'tide_msl_m': np.array([0.5, 0.6, 0.7, 0.6, 0.5]),
+                'mdt_m': np.array([0.1]*5),
+                'delta_n_m': np.array([-0.05]*5),
+                'n_egm2008_m': np.array([10.0]*5),
+                'h_mdt_ref_m': np.array([0.6]*5),
+                'h_goco06s_m': np.array([0.6]*5),
+                'h_egm2008_m': np.array([0.55]*5),
+                'h_wgs84_m': np.array([10.55]*5),
+                'datum_ref_geoid': np.array(['GOCO06s']*5),
+                'qc_warning': np.array(['NORMAL']*5)
+            }
+
+            with patch('cli.FESTidePredictor', return_value=mock_pred), \
+                 patch('cli.DatumTransformer', return_value=mock_trans):
+
+                # 1. 运行 single --datum msl
+                cli.main(['single', '--lon', '122.0', '--lat', '31.0', '--year', '2024', '--step', '1h', '--datum', 'msl', '--output', out_msl])
+                # 验证 predict_year datum_mode 严格为 None
+                self.assertEqual(mock_pred.predict_year.call_args.kwargs.get('datum_mode'), None)
+                # 验证 MSL 模式下绝对不调用 DatumTransformer.convert_tide_datums
+                self.assertEqual(mock_trans.convert_tide_datums.call_count, 0)
+                self.assertTrue(os.path.exists(out_msl))
+
+                # 2. 运行 single --datum egm2008
+                mock_trans.convert_tide_datums.reset_mock()
+                mock_pred.predict_year.reset_mock()
+                mock_pred.predict_year.return_value = df_mock.copy()
+
+                cli.main(['single', '--lon', '122.0', '--lat', '31.0', '--year', '2024', '--step', '1h', '--datum', 'egm2008', '--output', out_egm])
+                self.assertEqual(mock_pred.predict_year.call_args.kwargs.get('datum_mode'), None)
+                # 验证 EGM 模式下 convert_tide_datums 恰好被调用一次
+                self.assertEqual(mock_trans.convert_tide_datums.call_count, 1)
+                self.assertTrue(os.path.exists(out_egm))
+
+    # 50. Test U: 验证直接抽样像元真值预言机 (Direct Sampled-Pixel FES Oracle)
+    def test_direct_sampled_pixel_fes_oracle(self):
+        from scripts.validate_real_fes_raster import evaluate_direct_fes_samples
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_oracle.tif")
+            adapt_path = os.path.join(temp_dir, "adapt_oracle.tif")
+
+            width, height = 20, 20
+            transform = from_origin(120.0, 30.0, 0.005, 0.005)
+            # DEM 高程设定为 -0.2m
+            dem_data = np.full((height, width), -0.2, dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            pred = SyntheticTidePredictor(base_amplitude_m=1.0)
+            engine = RasterTideEngine(tide_predictor=pred)
+
+            # 生成自适应结果作为对比
+            engine.calculate_inundation_raster(
+                dem_path=dem_path,
+                output_path=adapt_path,
+                start_time="2024-01-01 00:00:00",
+                end_time="2024-01-01 12:00:00",
+                freq="1h",
+                dem_datum='msl',
+                inclusive='both'
+            )
+
+            # 执行 Direct FES 抽样预言机
+            oracle_res = evaluate_direct_fes_samples(
+                dem_path=dem_path,
+                adapt_tif_path=adapt_path,
+                predictor=pred,
+                transformer=engine.transformer,
+                start_time="2024-01-01 00:00:00",
+                end_time="2024-01-01 12:00:00",
+                inclusive='both',
+                step="1h",
+                dem_datum='msl',
+                n_samples=25,
+                seed=42
+            )
+
+            self.assertEqual(oracle_res['total_samples'], 25)
+            self.assertEqual(oracle_res['direct_valid_count'], 25)
+            self.assertEqual(oracle_res['common_valid_count'], 25)
+            self.assertEqual(oracle_res['direct_invalid_count'], 0)
+            # 由于合成预测器空间平滑，自适应网格与像元真值误差极小
+            self.assertLess(oracle_res['mae'], 2.0)
+            self.assertLess(oracle_res['max_error'], 5.0)
+
+            # 验证随机种子可复现性
+            oracle_res_repeat = evaluate_direct_fes_samples(
+                dem_path=dem_path,
+                adapt_tif_path=adapt_path,
+                predictor=pred,
+                transformer=engine.transformer,
+                start_time="2024-01-01 00:00:00",
+                end_time="2024-01-01 12:00:00",
+                inclusive='both',
+                step="1h",
+                dem_datum='msl',
+                n_samples=25,
+                seed=42
+            )
+            np.testing.assert_array_equal(oracle_res['sampled_rows'], oracle_res_repeat['sampled_rows'])
+            np.testing.assert_array_equal(oracle_res['sampled_cols'], oracle_res_repeat['sampled_cols'])
+            np.testing.assert_allclose(oracle_res['f_direct'], oracle_res_repeat['f_direct'])
 
 
 if __name__ == '__main__':

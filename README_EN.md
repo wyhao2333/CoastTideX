@@ -22,17 +22,17 @@
 
 The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global ocean tide model** (featuring native non-structured triangular finite-element meshes with LGP2 polynomial interpolation across all 34 primary tidal constituents). This resolves the jagged boundary and staircase errors traditional regular grid models suffer along intricate coastlines and estuaries. Furthermore, CoastTideX integrates the **CNES-CLS22 Mean Dynamic Topography (MDT)** and the **NGA EGM2008 2.5-arcminute global geoid raster**, enabling seamless and precise vertical datum transformation from **Mean Sea Level (MSL)** to the absolute **EGM2008 geoid datum**.
 
-**v1.4 introduces the Spatial Raster Tide Engine**: evaluates 2D spatially varying sea surface heights at specific timestamps for any CRS-referenced GeoTIFF, and features an **Adaptive Tide Control Grid** to stream potential astronomical tidal inundation frequencies (0% ~ 100%) for high-resolution 10m/30m coastal DEMs across full years or arbitrary periods.
+**v1.4 introduces the Spatial Raster Tide Engine (Release Candidate)**: evaluates 2D spatially varying sea surface heights at specific timestamps for any CRS-referenced GeoTIFF, and features an **Adaptive Tide Control Grid** to stream potential astronomical tidal inundation frequencies (0% ~ 100%) for high-resolution 10m/30m coastal DEMs across full years or arbitrary periods. Current status: code-complete release candidate for real-world validation.
 
 ---
 
 ### ✨ Key Features
 
 * 🌊 **FES2022b Native Non-Structured Mesh**: Directly loads the 3.77 GB native triangular mesh, providing ultimate fidelity in coastal zones with 34 diurnal, semi-diurnal, shallow-water non-linear, and long-period constituents.
-* 🛰️ **Spatial Raster Tide Engine (v1.4)**:
+* 🛰️ **Spatial Raster Tide Engine (v1.4, RC)**:
   * **Instantaneous Sea Surface Snapshot**: Evaluates true spatially varying water levels across GeoTIFF rasters with strict pixel-center unprojecting (`offset='center'`), streaming in 512×512 windows with atomic replacement;
-  * **Adaptive Tide Control Grid for Coastal DEMs**: Places adaptive nodes (default 4km) across water/tidal flat domains, solves annual time series, applies inverse distance weighting (IDW) interpolation, and computes complementary empirical cumulative distribution functions (CCDF) to map potential astronomical tidal inundation frequency (0% ~ 100%);
-  * **Barrier & Inland Physical Protection**: Prevents unphysical tidal extrapolation into disconnected inland depressions or diked ponds; preserves NoData across inland areas;
+  * **Adaptive Tide Control Grid for Coastal DEMs**: Places adaptive nodes (default 4km) across water/tidal flat domains, pre-sorts annual water levels on control nodes, evaluates pixel exceedance quantiles via binary search (`np.searchsorted`), and applies bilinear spatial interpolation within quadtree leaf cells to efficiently map potential astronomical tidal inundation frequency (0% ~ 100%);
+  * **Valid-mask Topology-aware Interpolation Guard**: Identifies contiguous water/tidal domains based on the DEM valid-pixel/NoData mask, preventing cross-barrier tidal leakage across NoData barriers. (Note: operates strictly on DEM valid mask topology, not a 2D hydrodynamic simulation; structures like seawalls and dikes with valid DEM elevations are not automatically treated as barriers); preserves NoData across deep inland areas;
   * **TIFF-Level Rigorous Provenance**: Inundation and snapshot GeoTIFFs embed full geodetic metadata, model version, and parameter tags.
 * 📅 **Full-Year & Long Time-Series High-Density Prediction (v1.3/v1.4)**:
   * **Custom Period & Year Mode Toggle**: Seamlessly switch between arbitrary date intervals and convenient annual presets (e.g. Year 2024);
@@ -45,9 +45,9 @@ The platform is powered by the CNES/AVISO state-of-the-art **FES2022b global oce
   * **Single Station Mode**: Automatically bounds the region of interest around input coordinates, indexing only local topology in memory for sub-second query speeds and minimal RAM footprint (~1.2 GB);
   * **Global Discrete Batch Mode**: Employs $5^\circ \times 5^\circ$ adaptive spatial mesh chunking, preventing memory blowup when processing scattered worldwide points.
 * 📐 **Dual-Geoid Hybrid MDT Vertical Datum Pipeline (v1.3/v1.4)**:
-  * **Two-Tier Authoritative Detection**: Priority matching against CNES official `hybrid_mdt_source_mask.tif`, with pure-NumPy closed polygon fallback;
+  * **Two-Tier Detection & Optional External Datasets**: Priority matching against CNES official `hybrid_mdt_source_mask.tif` (optional external dataset, not bundled), with pure-NumPy closed polygon fallback (marked as `QC_DATUM_SOURCE_APPROX`);
   * **Open Oceans Geoid**: GOCO06s reference datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{GOCO06s}\rightarrow\text{EGM2008}}$);
-  * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, supported via local `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`);
+  * **Mediterranean & Black Sea Geoid**: EIGEN-6C4 ($d/o=2190$) regional datum ($H_{\text{EGM2008}} = \text{Tide} + \text{MDT} + \Delta N_{\text{EIGEN-6C4}\rightarrow\text{EGM2008}}$, supported via local optional external `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`; if missing, strict mode raises error while non-strict mode falls back to polygon approximation);
   * **Unified Primary Variable & Semantic Truth**: Primary variable `h_mdt_ref_m` denotes height relative to MDT reference geoid; `h_goco06s_m` is strictly `NaN` in Mediterranean/Black Sea (no faking); deep inland points strictly propagate `NaN`.
 * 🎯 **True Bilinear Spatial Interpolation & Target-Aware Loading (v1.3/v1.4)**:
   * Applies true bilinear interpolation (`map_coordinates(order=1)`) to EGM2008 and $\Delta N$ GeoTIFFs;
@@ -181,8 +181,8 @@ For coastal remote sensing interpretation and tidal wetland dynamics, CoastTideX
    * **Computational Barrier**: Evaluating $10000 \times 10000$ (100M) 10m DEM pixels across 17,568 timestamps demands $1.75 \times 10^{12}$ tidal queries, which is computationally intractable and physically unwarranted given long-wave hydrodynamic continuity;
    * **Adaptive Control Nodes**: Dynamically places control points at user-defined spatial spacing (default 4,000 meters) across water and tidal flat regions;
    * **Batch Annual Hydrograph Evaluation**: Generates complete time series (e.g. 17,568 points) across the sparse control grid;
-   * **Inverse Distance Weighting (IDW) & Pixel CCDF**: Interpolates hydrographs across DEM windows and evaluates pixel-wise inundation frequencies (0% ~ 100%) via vectorized CCDF;
-   * **Hydrodynamic Connectivity & Barrier Protection**: Prevents unphysical tidal extrapolation into disconnected inland depressions or diked ponds; preserves NoData across deep inland areas.
+   * **Pre-sorted CCDF & Bilinear Spatial Interpolation**: Pre-sorts water levels at control nodes ($O(T \log T)$), rapidly queries exceedance probabilities per pixel via binary search ($O(\log T)$ via `np.searchsorted`), and bilinearly interpolates CCDF values within quadtree leaf cells;
+   * **Valid-mask Topology-aware Guard**: Prevents tidal interpolation across NoData land barriers based on physical-scale connected components. (Note: relies on DEM valid/NoData mask topology, not a 2D hydrodynamic numerical model; seawalls with valid elevations are not automatically identified as barriers). Deep inland or isolated regions without valid ocean control nodes propagate NoData and receive UInt16 QC flags.
 
 ---
 
@@ -365,8 +365,13 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 * **[GUI Dedicated Raster Tide Panel (Tab 3)]**: Added dedicated Raster Tide & Inundation tab featuring interactive GeoTIFF metadata cards, Snapshot vs. Inundation mode panels, adaptive grid spacing controls, progress bar, and cancellation support;
 * **[Decoupled Compute vs. Display Datums]**: GUI supports computing in one vertical datum and displaying another; auto-recommends 30-min interval upon toggling Year Mode with user memory;
 * **[Deep Settings Validation]**: Settings dialog incorporates deep format validation for NetCDF and GeoTIFFs, with unified reset keys;
-* **[Expanded CLI Suite]**: Added `raster snapshot` and `raster inundation` subcommands; refactored `scripts/calculate_inundation_raster.py` into a thin CLI wrapper;
-* **[Comprehensive Test Suite Expansion to 47 Tests]**: Added adaptive quadtree dynamic subdivision growth, minimum spacing termination & QC bit 32, topological connectivity barrier isolation, canonical mask 5-category handling, projected CRS source mask reprojection, circular longitude wrapping across 0°/180°, unit factor scaling (meters/feet), and end-to-end synthetic oracle validation, circular split BBoxes, two-basin cross-barrier isolation oracle, validity-boundary refinement & edge probing, physical-scale topology downsampling barrier preservation, level-wise batching efficiency, and max_fes_evaluate_points passing (47/47 passing).
+* **[Comprehensive Test Suite Expansion to 47 Tests]**: Added adaptive quadtree dynamic subdivision growth, minimum spacing termination & QC bit 32, topological connectivity barrier isolation, canonical mask 5-category handling, projected CRS source mask reprojection, circular longitude wrapping across 0°/180°, unit factor scaling (meters/feet), and end-to-end synthetic oracle validation, circular split BBoxes, two-basin cross-barrier isolation oracle, validity-boundary refinement & edge probing, physical-scale topology downsampling barrier preservation, level-wise batching efficiency, and max_fes_evaluate_points passing (47/47 passing). (Note: GitHub Actions CI executes synthetic and logic tests without requiring large FES model files; local development environment runs the full suite including skipped tests);
+* **[v1.4 RC Final Hardening]**:
+  * **Resident Memory Budget Guard**: Implemented explicit `max_in_memory_control_nodes` hard limit raising structured `RasterMemoryLimitError` upon budget breach, replacing unfulfilled memmap promises;
+  * **CLI Year Mode Datum Decoupling**: Fixed duplicate datum conversion in `cli.py` single year mode; MSL mode strictly bypasses `DatumTransformer`;
+  * **Direct Sampled-Pixel FES Oracle**: Enhanced `scripts/validate_real_fes_raster.py` with direct pixel-center FES prediction oracle (`Direct Sampled-Pixel FES Oracle`), and renamed dense grid comparison to `Dense Regular Control-Grid Reference`;
+  * **CI Headless GUI Assertion**: In CI environments with PyQt6, GUI import failures are asserted as strict test failures rather than silently skipped;
+  * **Scientific Nomenclature & Boundary Alignment**: Purged legacy IDW and 2D hydrodynamic claims from documentation; strictly framed topology protection as valid-mask based and clarified optional external datasets.
 
 ### v1.3 (2026-09)
 * **[Annual Mode & Long Time-Series]** Added Year Mode toggle with strict $[start, end)$ half-open interval, generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years), with dynamic sample budget estimation and coordinate validation;
