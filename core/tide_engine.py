@@ -26,7 +26,7 @@ except ImportError:
     HAS_PYFES = False
 
 from .utils import (
-    normalize_longitude, convert_time_to_utc, load_app_config, resolve_project_path,
+    normalize_longitude, circular_longitude_span, convert_time_to_utc, load_app_config, resolve_project_path,
     validate_coordinates, validate_time_params, build_time_index
 )
 from .datum_engine import DatumTransformer, DatumDataError, get_mdt_reference_geoid
@@ -573,4 +573,224 @@ class FESTidePredictor:
                 progress_callback(pct, f"完成空间控制块 {c_idx+1}/{total_chunks} 时空潮汐解算...")
 
         return tide_matrix, utc_idx, flag_matrix
+
+    def predict_spatial_snapshot(
+        self,
+        lons: float | np.ndarray | list,
+        lats: float | np.ndarray | list,
+        timestamp: str | pd.Timestamp,
+        constituents: str | list = None,
+        source_tz: str = 'UTC',
+        buffer_deg: float = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        对指定单时刻在多个空间经纬度位置执行高精度瞬时潮位解算。
+
+        参数:
+            lons: 经度数组 (长度 N)
+            lats: 纬度数组 (长度 N)
+            timestamp: 快照时刻 (支持字符串或 Timestamp)
+            constituents: 分潮方案 ('all', 'major8' 或列表)
+            source_tz: 输入时间源时区 (如 'UTC' 或 'local')
+            buffer_deg: 局部空间缓冲半径 (度)
+
+        返回:
+            (tide_total_m, quality_flags)
+            tide_total_m: 长度为 N 的潮位高度 (米)
+            quality_flags: 长度为 N 的质量标志数组
+        """
+        if not HAS_PYFES:
+            raise RuntimeError("当前环境未安装或无法加载 pyfes 运行库，无法执行空间快照解算。")
+
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        n_pts = len(lons_arr)
+        if len(lats_arr) != n_pts:
+            raise ValueError(f"经纬度数组长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
+
+        if n_pts == 0:
+            return np.array([], dtype=np.float32), np.array([], dtype=np.int8)
+
+        for x, y in zip(lons_arr, lats_arr):
+            validate_coordinates(x, y)
+
+        if constituents is None:
+            constituents = self.default_constituents
+        const_list = validate_constituents(constituents)
+
+        buf = buffer_deg if buffer_deg is not None else self.default_buffer
+
+        # 解析与对齐 UTC 时间
+        _, dates_np = convert_time_to_utc(timestamp, source_tz=source_tz)
+        ts_utc_us = dates_np[0]
+
+        lons_norm = np.array([normalize_longitude(x, to_360=True) for x in lons_arr], dtype=float)
+
+        # 环形感知 BBox
+        span, arc_start, arc_end = circular_longitude_span(lons_norm)
+        if span <= 180.0 and arc_end >= arc_start:
+            bbox_lon_min = arc_start - buf
+            bbox_lon_max = arc_end + buf
+        else:
+            bbox_lon_min = float(np.min(lons_norm)) - buf
+            bbox_lon_max = float(np.max(lons_norm)) + buf
+
+        chunk_bbox = (
+            bbox_lon_min,
+            max(-90.0, float(np.min(lats_arr)) - buf),
+            bbox_lon_max,
+            min(90.0, float(np.max(lats_arr)) + buf)
+        )
+
+        model = self._get_model(chunk_bbox, const_list)
+        times_arr = np.full(n_pts, ts_utc_us)
+
+        sp, lp, flags = pyfes.evaluate_tide(model, times_arr, lons_norm, lats_arr)
+        tide_total_m = ((sp + lp) / 100.0).astype(np.float32)
+        return tide_total_m, flags
+
+
+class SyntheticTidePredictor:
+    """
+    合成潮汐预测器 (Synthetic Tide Predictor)，用于无须真实 FES2022b 大型数据文件下的
+    严密算法验证、单元测试、空间梯度自适应细分检验及基准对比 (Oracle Testing)。
+    """
+    def __init__(
+        self,
+        base_amplitude_m: float = 2.0,
+        period_hours: float = 12.42,
+        alpha_x: float = 0.05,
+        beta_y: float = 0.03,
+        gamma_nonlinear: float = 0.01,
+        ref_lon: float = 122.0,
+        ref_lat: float = 31.0,
+        default_freq: str = '30min',
+        base_amp: float = None,
+        base_mean: float = 0.0,
+        gradient_x: float = None,
+        gradient_y: float = None,
+        **kwargs
+    ):
+        if base_amp is not None:
+            base_amplitude_m = base_amp
+        if gradient_x is not None:
+            alpha_x = gradient_x
+        if gradient_y is not None:
+            beta_y = gradient_y
+        self.base_amplitude = float(base_amplitude_m)
+        self.base_mean = float(base_mean)
+        self.period_hours = float(period_hours)
+        self.alpha_x = float(alpha_x)
+        self.beta_y = float(beta_y)
+        self.gamma_nonlinear = float(gamma_nonlinear)
+        self.ref_lon = float(ref_lon)
+        self.ref_lat = float(ref_lat)
+        self.default_freq = str(default_freq)
+        self.default_constituents = ['M2', 'S2']
+
+    def _eval_h(self, lons, lats, t_hours):
+        dx = np.asarray(lons, dtype=float) - self.ref_lon
+        dy = np.asarray(lats, dtype=float) - self.ref_lat
+        spatial_offset = self.alpha_x * dx + self.beta_y * dy + self.gamma_nonlinear * (dx**2 + dy**2)
+        omega = 2.0 * np.pi / self.period_hours
+        return self.base_mean + self.base_amplitude * np.cos(omega * t_hours) + spatial_offset
+
+    def predict_spatial_snapshot(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        _, dates_np = convert_time_to_utc(timestamp, source_tz=source_tz)
+        t_sec = dates_np[0].astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        n_pts = len(lons_arr)
+        tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
+        flags = np.ones(n_pts, dtype=np.int8)
+        return tide_m, flags
+
+    def predict_points_period(
+        self,
+        lons,
+        lats,
+        start_time,
+        end_time,
+        freq='30min',
+        inclusive='both',
+        constituents=None,
+        source_tz='UTC',
+        max_fes_evaluate_points=500000,
+        progress_callback=None
+    ) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+        _, utc_idx, dates_np = build_time_index(start_time, end_time, freq, source_tz=source_tz, inclusive=inclusive)
+        t_sec = dates_np.astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        m = len(lons_arr)
+        t = len(dates_np)
+
+        dx = lons_arr - self.ref_lon
+        dy = lats_arr - self.ref_lat
+        spatial_offsets = self.alpha_x * dx + self.beta_y * dy + self.gamma_nonlinear * (dx**2 + dy**2)
+        omega = 2.0 * np.pi / self.period_hours
+
+        cos_t = np.cos(omega * t_hours) * self.base_amplitude
+        tide_mat = (self.base_mean + spatial_offsets[:, np.newaxis]) + cos_t[np.newaxis, :]
+        flag_mat = np.ones((m, t), dtype=np.int8)
+        return tide_mat.astype(np.float32), utc_idx, flag_mat
+
+    def predict_series(
+        self,
+        lon,
+        lat,
+        start_time,
+        end_time,
+        freq='30min',
+        inclusive='both',
+        constituents=None,
+        buffer_deg=None,
+        source_tz='UTC',
+        progress_callback=None
+    ) -> pd.DataFrame:
+        input_idx, utc_idx, dates_np = build_time_index(start_time, end_time, freq, source_tz=source_tz, inclusive=inclusive)
+        t_sec = dates_np.astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+        tot_m = self._eval_h(lon, lat, t_hours)
+        df = pd.DataFrame({
+            'datetime_utc': utc_idx,
+            'datetime_input': input_idx,
+            'longitude': lon,
+            'latitude': lat,
+            'tide_short_period_cm': tot_m * 100.0,
+            'tide_long_period_cm': np.zeros_like(tot_m),
+            'tide_total_cm': tot_m * 100.0,
+            'tide_total_m': tot_m,
+            'quality_flag': np.ones(len(tot_m), dtype=int)
+        })
+        return df
+
+    def predict_point_period(self, *args, **kwargs):
+        lon = kwargs.get('lon', args[0] if len(args) > 0 else 0.0)
+        lat = kwargs.get('lat', args[1] if len(args) > 1 else 0.0)
+        start = kwargs.get('start_time', args[2] if len(args) > 2 else '2024-01-01')
+        end = kwargs.get('end_time', args[3] if len(args) > 3 else '2024-01-02')
+        freq = kwargs.get('freq', '30min')
+        inclusive = kwargs.get('inclusive', 'both')
+        source_tz = kwargs.get('source_tz', 'UTC')
+        return self.predict_series(lon, lat, start, end, freq=freq, inclusive=inclusive, source_tz=source_tz)
+
+    def predict_year(self, lon, lat, year=2024, freq='30min', inclusive='left', constituents=None, buffer_deg=None, source_tz='UTC', datum_mode='both', strict=False, datum_transformer=None, progress_callback=None):
+        start = f"{int(year):04d}-01-01 00:00:00"
+        end = f"{int(year)+1:04d}-01-01 00:00:00"
+        return self.predict_series(lon, lat, start, end, freq=freq, inclusive=inclusive, source_tz=source_tz)
+
+
 

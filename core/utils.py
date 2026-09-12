@@ -227,6 +227,46 @@ def normalize_longitude(lon: float | np.ndarray, to_360: bool = True) -> float |
             return ((val + 180.0) % 360.0) - 180.0
 
 
+def circular_longitude_span(lons: float | np.ndarray | list) -> tuple[float, float, float]:
+    """
+    计算球面经度集合在环形圆周 (0°~360° 或 -180°~180°) 上的最小实际角跨度 (Circular Longitude Span)。
+    彻底解决格林尼治子午线 (0°附近, 如 -0.5° 与 +0.5°) 和国际日期变更线 (180°附近, 如 179.5° 与 -179.5°)
+    传统 np.ptp() 计算导致角跨度膨胀为 ~359° 的经典科学 Bug。
+
+    参数:
+        lons: 经度标量、列表或数组
+
+    返回:
+        (span_deg, arc_start_360, arc_end_360):
+        - span_deg: 实际最小圆弧角跨度 (度, 0.0 ~ 360.0)
+        - arc_start_360: 该紧凑圆弧在 [0, 360) 体系下的起始经度
+        - arc_end_360: 该紧凑圆弧在 [0, 360) 体系下的终止经度
+    """
+    lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+    valid_lons = lons_arr[np.isfinite(lons_arr)]
+    if len(valid_lons) <= 1:
+        v = float(valid_lons[0] % 360.0) if len(valid_lons) == 1 else 0.0
+        return 0.0, v, v
+
+    lons_360 = np.sort(np.unique(valid_lons % 360.0))
+    n = len(lons_360)
+    if n == 1:
+        return 0.0, float(lons_360[0]), float(lons_360[0])
+
+    gaps = np.empty(n, dtype=float)
+    gaps[:-1] = lons_360[1:] - lons_360[:-1]
+    gaps[-1] = (lons_360[0] + 360.0) - lons_360[-1]
+
+    max_gap_idx = int(np.argmax(gaps))
+    max_gap = float(gaps[max_gap_idx])
+
+    span = max(0.0, 360.0 - max_gap)
+    start_pt = float(lons_360[(max_gap_idx + 1) % n])
+    end_pt = float(lons_360[max_gap_idx])
+
+    return span, start_pt, end_pt
+
+
 def convert_time_to_utc(
     time_series: pd.DatetimeIndex | pd.Series | list,
     source_tz: str = 'UTC'

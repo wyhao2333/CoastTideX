@@ -342,7 +342,7 @@ CoastTideX/
 │   ├── settings_dialog.py          # Data source path configuration dialog & deep file validation
 │   └── styles.py                   # High-contrast dark QSS stylesheet
 └── tests/                          # Automated unit and integration test suite
-    └── test_engines.py             # Comprehensive 29-test suite (full FES chain, leap year, raster engine, closures)
+    └── test_engines.py             # Comprehensive 41-test suite (full FES chain, adaptive quadtree, leap year, raster engine, closures)
 ```
 
 ---
@@ -353,17 +353,20 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 1. Run `build_exe.bat`;
 2. Find the standalone application in `dist/CoastTideX/CoastTideX.exe`.
 
+> [!NOTE]
+> `build_exe.bat` serves as a release reference script for Windows environments containing essential hidden import definitions. Validation on a target clean release environment is recommended before formal distribution.
+
 ## 📝 Changelog
 
 ### v1.4 (2026-09)
 * **[Major Upgrade] Spatial Raster Tide Engine (RasterTideEngine)**: Integrated `core/raster_engine.py` for any CRS-enabled GeoTIFF, evaluating 2D spatially varying sea surface heights with strict pixel-center alignment (`offset='center'`) and 512×512 atomic window streaming;
-* **[Algorithmic Breakthrough] Adaptive Tide Control Grid**: Solved the intractable computational barrier of multi-billion pixel evaluations on 10m/30m coastal DEMs by placing sparse adaptive control nodes (default 4km), evaluating batch time series, and applying IDW spatial interpolation with vectorized CCDF to stream potential astronomical inundation frequencies (0% ~ 100%);
-* **[Geodetic Rigor & Mask Priority]**: Priority matching against CNES official `hybrid_mdt_source_mask.tif` with polygon fallback; strict array dimension broadcast enforcement; decoupled EGM2008 and WGS84 raster dependencies;
+* **[Algorithmic Breakthrough] Adaptive Tide Control Grid**: Solved the intractable computational barrier of multi-billion pixel evaluations on 10m/30m coastal DEMs by placing sparse adaptive quadtree control nodes (default 4km) with topological connectivity guards, evaluating batch time series, and applying IDW spatial interpolation with vectorized CCDF to stream potential astronomical inundation frequencies (0% ~ 100%);
+* **[Geodetic Rigor & Mask Priority]**: Priority matching against CNES official `hybrid_mdt_source_mask.tif` (canonical 0/1/2/3/255 categories) with projected CRS reprojection and polygon fallback; strict array dimension broadcast enforcement; decoupled EGM2008 and WGS84 raster dependencies;
 * **[GUI Dedicated Raster Tide Panel (Tab 3)]**: Added dedicated Raster Tide & Inundation tab featuring interactive GeoTIFF metadata cards, Snapshot vs. Inundation mode panels, adaptive grid spacing controls, progress bar, and cancellation support;
 * **[Decoupled Compute vs. Display Datums]**: GUI supports computing in one vertical datum and displaying another; auto-recommends 30-min interval upon toggling Year Mode with user memory;
 * **[Deep Settings Validation]**: Settings dialog incorporates deep format validation for NetCDF and GeoTIFFs, with unified reset keys;
 * **[Expanded CLI Suite]**: Added `raster snapshot` and `raster inundation` subcommands; refactored `scripts/calculate_inundation_raster.py` into a thin CLI wrapper;
-* **[Comprehensive Test Suite Expansion to 29 Tests]**: Added synthetic GeoTIFF metadata extraction, pixel center alignment, snapshot mock, CCDF oracle benchmarking, barrier non-interpolation, and end-to-end integration tests (29/29 passing).
+* **[Comprehensive Test Suite Expansion to 41 Tests]**: Added adaptive quadtree dynamic subdivision growth, minimum spacing termination & QC bit 32, topological connectivity barrier isolation, canonical mask 5-category handling, projected CRS source mask reprojection, circular longitude wrapping across 0°/180°, unit factor scaling (meters/feet), and end-to-end synthetic oracle validation (41/41 passing).
 
 ### v1.3 (2026-09)
 * **[Annual Mode & Long Time-Series]** Added Year Mode toggle with strict $[start, end)$ half-open interval, generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years), with dynamic sample budget estimation and coordinate validation;

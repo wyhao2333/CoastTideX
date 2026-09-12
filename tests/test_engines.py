@@ -44,9 +44,13 @@ from core.datum_engine import (
     get_mdt_reference_geoid, is_mediterranean_or_black_sea,
     _broadcast_pointwise_inputs
 )
+from core.tide_engine import FESTidePredictor, SyntheticTidePredictor
 from core.raster_engine import (
     RasterTideEngine, RasterInfo, ControlNode,
-    QC_VALID, QC_FES_EXTRAPOLATED, QC_SPATIAL_FALLBACK, QC_INSUFFICIENT_NODES
+    QC_VALID, QC_FES_EXTRAPOLATED, QC_SPATIAL_FALLBACK, QC_INSUFFICIENT_NODES,
+    QC_BIT_VALID, QC_BIT_MIN_SPACING_REACHED, QC_BIT_DATUM_SOURCE_APPROX,
+    QC_BIT_FES_EXTRAPOLATED, QC_BIT_SPATIAL_FALLBACK, QC_BIT_DATUM_INVALID,
+    QC_BIT_CONNECTIVITY_FALLBACK, QC_BIT_INSUFFICIENT_NODES
 )
 from core.utils import (
     normalize_longitude, COASTAL_PRESETS,
@@ -54,7 +58,7 @@ from core.utils import (
     PROJECT_ROOT, get_resource_root, get_app_root,
     validate_coordinates, validate_time_params,
     build_time_index, compute_inundation_frequency,
-    extract_scalar_metadata, convert_time_to_utc
+    extract_scalar_metadata, convert_time_to_utc, circular_longitude_span
 )
 
 try:
@@ -617,6 +621,374 @@ class TestCoastTideX(unittest.TestCase):
             pass  # 在极简无 GUI 运行环境下平滑跳过
         import cli
         self.assertTrue(hasattr(cli, 'main'))
+
+    # 30. Test A: 验证自适应控制网格真实动态细分与节点数随容差单调增长 (无假元数据)
+    def test_adaptive_grid_dynamic_subdivision_node_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_gradient.tif")
+            out_coarse = os.path.join(temp_dir, "out_coarse.tif")
+            out_fine = os.path.join(temp_dir, "out_fine.tif")
+
+            width, height = 80, 80
+            res = 50.0
+            transform = from_origin(500000.0, 3500000.0, res, res)
+            dem_data = np.linspace(-2.0, 2.0, width * height, dtype=np.float32).reshape((height, width))
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:32651', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(
+                base_mean=0.0, base_amp=2.0,
+                ref_lon=123.05, ref_lat=31.59,
+                gamma_nonlinear=5000.0
+            )
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            # 1. 粗网格运行：极高容差 (90%) 且最小间距等于初始间距 (4000m)
+            summary_coarse = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_coarse,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-02 00:00:00",
+                freq="1h", dem_datum='msl',
+                initial_control_spacing_m=4000.0, min_control_spacing_m=4000.0,
+                inundation_error_tolerance_pct=90.0, block_size=128
+            )
+
+            # 2. 细网格运行：极严公差 (0.0001%) 且允许进一步细分至 1000m
+            summary_fine = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_fine,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-02 00:00:00",
+                freq="1h", dem_datum='msl',
+                initial_control_spacing_m=4000.0, min_control_spacing_m=1000.0,
+                inundation_error_tolerance_pct=0.0001, block_size=128
+            )
+
+            self.assertGreater(summary_fine.control_nodes_count, summary_coarse.control_nodes_count)
+            self.assertEqual(summary_coarse.control_nodes_count, 5)
+            self.assertGreaterEqual(summary_fine.control_nodes_count, 20)
+            self.assertTrue(os.path.exists(out_coarse))
+            self.assertTrue(os.path.exists(out_fine))
+
+    # 31. Test B: 验证四叉树达到最小间距约束时停止递归并正确设置 QC_BIT_MIN_SPACING_REACHED
+    def test_min_spacing_termination_and_qc_bit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_min_spacing.tif")
+            out_inund = os.path.join(temp_dir, "out_min_spacing.tif")
+            qc_out = os.path.join(temp_dir, "out_min_spacing_qc.tif")
+
+            width, height = 80, 80
+            res = 50.0
+            transform = from_origin(500000.0, 3500000.0, res, res)
+            dem_data = np.linspace(-2.0, 2.0, width * height, dtype=np.float32).reshape((height, width))
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:32651', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(
+                base_mean=0.0, base_amp=2.0,
+                ref_lon=123.05, ref_lat=31.59,
+                gamma_nonlinear=5000.0
+            )
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund, qc_output_path=qc_out,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-02 00:00:00",
+                freq="1h", dem_datum='msl',
+                initial_control_spacing_m=4000.0, min_control_spacing_m=1000.0,
+                inundation_error_tolerance_pct=0.0001, block_size=128
+            )
+
+            self.assertTrue(os.path.exists(qc_out))
+            with rasterio.open(qc_out) as src:
+                qc_data = src.read(1)
+                has_min_spacing_bit = ((qc_data & QC_BIT_MIN_SPACING_REACHED) > 0).any()
+                self.assertTrue(has_min_spacing_bit, "细分触及最小间距时叶节点单元应设置 QC_BIT_MIN_SPACING_REACHED")
+
+    # 32. Test C: 高保真预言机对比检验潜在天文潮淹没频率 (CCDF) 的数值解析准确性
+    def test_oracle_inundation_frequency_exact(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_oracle.tif")
+            out_inund = os.path.join(temp_dir, "out_oracle.tif")
+
+            width, height = 10, 10
+            transform = from_origin(120.0, 30.0, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(base_mean=0.0, base_amp=2.0, alpha_x=0.0, beta_y=0.0, gamma_nonlinear=0.0)
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-02 00:00:00",
+                freq="10min", dem_datum='msl',
+                initial_control_spacing_m=4000.0, inundation_error_tolerance_pct=1.0
+            )
+
+            with rasterio.open(out_inund) as src:
+                res_data = src.read(1)
+                # 对称余弦振荡潮位在 0m 高程处的理论淹没概率严格为 50%
+                np.testing.assert_allclose(res_data, 50.0, atol=2.0)
+
+    # 33. Test D: 验证非凸/复杂几何边界与拓扑屏障隔离 (杜绝跨陆地/无数据屏障非法插值)
+    def test_barrier_isolation_topology_guard(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_barrier.tif")
+            out_inund = os.path.join(temp_dir, "out_barrier.tif")
+            qc_out = os.path.join(temp_dir, "out_barrier_qc.tif")
+
+            width, height = 60, 60
+            transform = from_origin(500000.0, 3500000.0, 100.0, 100.0)
+            dem_data = np.full((height, width), -9999.0, dtype=np.float32)
+            dem_data[:, 0:20] = 0.0   # 盆地 1
+            dem_data[:, 40:60] = 0.0  # 盆地 2
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:32651', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(base_mean=0.0, base_amp=2.0, alpha_x=0.0, beta_y=0.0, gamma_nonlinear=0.0)
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund, qc_output_path=qc_out,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-02 00:00:00",
+                freq="1h", dem_datum='msl',
+                initial_control_spacing_m=2000.0, min_control_spacing_m=1000.0
+            )
+
+            with rasterio.open(out_inund) as src:
+                res_data = src.read(1)
+                self.assertTrue(np.isnan(res_data[:, 25:35]).all(), "中间陆地/屏障带像元必须保持 NaN 阻断传播")
+                self.assertTrue(np.isfinite(res_data[:, 5:15]).all())
+                self.assertTrue(np.isfinite(res_data[:, 45:55]).all())
+
+    # 34. Test E: 验证权威来源掩膜规范类别映射 (1->GOCO06s, 2/3->EIGEN-6C4, 0/255->Fallback, Invalid->Invalid)
+    def test_canonical_source_mask_categories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mask_path = os.path.join(temp_dir, "canonical_mask.tif")
+            width, height = 5, 1
+            transform = from_origin(0.0, 10.0, 1.0, 1.0)
+            mask_data = np.array([[1, 2, 3, 0, 255]], dtype=np.uint8)
+
+            with rasterio.open(
+                mask_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='uint8', crs='EPSG:4326', transform=transform, nodata=255
+            ) as dst:
+                dst.write(mask_data, 1)
+
+            transformer = DatumTransformer(source_mask_path=mask_path)
+
+            ref1, qc1 = transformer.get_mdt_reference_geoid(0.5, 9.5)
+            self.assertEqual(ref1, 'GOCO06s')
+            self.assertEqual(qc1, 'AUTHORITATIVE_MASK')
+
+            ref2, qc2 = transformer.get_mdt_reference_geoid(1.5, 9.5)
+            self.assertEqual(ref2, 'EIGEN-6C4')
+            self.assertEqual(qc2, 'AUTHORITATIVE_MASK')
+
+            ref3, qc3 = transformer.get_mdt_reference_geoid(2.5, 9.5)
+            self.assertEqual(ref3, 'EIGEN-6C4')
+            self.assertEqual(qc3, 'AUTHORITATIVE_MASK')
+
+            ref4, qc4 = transformer.get_mdt_reference_geoid(3.5, 9.5)
+            self.assertEqual(qc4, 'QC_DATUM_SOURCE_APPROX')
+
+            ref5, qc5 = transformer.get_mdt_reference_geoid(4.5, 9.5)
+            self.assertEqual(qc5, 'QC_DATUM_SOURCE_APPROX')
+
+            ref_inv, qc_inv = transformer.get_mdt_reference_geoid(999.0, 999.0)
+            self.assertEqual(ref_inv, 'INVALID')
+            self.assertEqual(qc_inv, 'QC_DATUM_INVALID')
+
+    # 35. Test F: 验证非 WGS84 投影坐标系权威掩膜的自动空间重投影与正确采样
+    def test_projected_crs_source_mask(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            mask_path = os.path.join(temp_dir, "utm_mask.tif")
+            width, height = 10, 10
+            transform = from_origin(500000.0, 3500000.0, 1000.0, 1000.0)
+            mask_data = np.ones((height, width), dtype=np.uint8)
+
+            with rasterio.open(
+                mask_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='uint8', crs='EPSG:32651', transform=transform, nodata=255
+            ) as dst:
+                dst.write(mask_data, 1)
+
+            transformer = DatumTransformer(source_mask_path=mask_path)
+            ref, qc = transformer.get_mdt_reference_geoid(123.0527, 31.5901)
+            self.assertEqual(ref, 'GOCO06s')
+            self.assertEqual(qc, 'AUTHORITATIVE_MASK')
+
+    # 36. Test G: 验证格林尼治与国际日期变更线环形经度跨度 (circular_longitude_span)
+    def test_circular_longitude_span(self):
+        span, _, _ = circular_longitude_span([120.0, 122.0])
+        self.assertAlmostEqual(span, 2.0, places=4)
+        span, _, _ = circular_longitude_span([-1.0, 1.0])
+        self.assertAlmostEqual(span, 2.0, places=4)
+        span, _, _ = circular_longitude_span([179.0, -179.0])
+        self.assertAlmostEqual(span, 2.0, places=4)
+        span, _, _ = circular_longitude_span([170.0, -170.0])
+        self.assertAlmostEqual(span, 20.0, places=4)
+        span, _, _ = circular_longitude_span([50.0])
+        self.assertEqual(span, 0.0)
+        span, _, _ = circular_longitude_span([])
+        self.assertEqual(span, 0.0)
+
+    # 37. Test H: 验证投影坐标系英制单位 (US Survey Feet) 的自适应米制换算与网格间距保持
+    def test_projected_crs_feet_units(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            engine = RasterTideEngine()
+            tif_path = os.path.join(temp_dir, "test_feet.tif")
+            width, height = 20, 20
+            transform = from_origin(6000000.0, 2000000.0, 10.0, 10.0)
+            data = np.ones((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                tif_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:2227', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data, 1)
+
+            info = engine.inspect_raster(tif_path, compute_valid_count=False)
+            self.assertTrue(info.is_projected)
+            self.assertAlmostEqual(info.unit_factor, 0.3048, delta=0.01)
+            self.assertIn("ft", info.formatted_resolution.lower())
+
+    # 38. Test I: 验证质检位掩膜 (QC Bitmask) 多标志共存保留与纯净有效性
+    def test_qc_bitmask_retention(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_qc_bits.tif")
+            out_inund = os.path.join(temp_dir, "out_qc_bits.tif")
+            qc_out = os.path.join(temp_dir, "out_qc_bits_qc.tif")
+
+            width, height = 20, 20
+            transform = from_origin(120.0, 30.0, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(base_mean=0.0, base_amp=2.0)
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund, qc_output_path=qc_out,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 04:00:00",
+                freq="1h", dem_datum='msl',
+                initial_control_spacing_m=4000.0, inundation_error_tolerance_pct=1.0
+            )
+
+            with rasterio.open(qc_out) as src:
+                self.assertEqual(src.dtypes[0], 'uint16')
+                qc_arr = src.read(1)
+                self.assertTrue((qc_arr == QC_BIT_VALID).all())
+
+    # 39. Test J: 验证解算像元数与输出 GeoTIFF 非 NaN 像元统计绝对一致性
+    def test_solved_pixel_count_consistency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_counts.tif")
+            out_snap = os.path.join(temp_dir, "out_snap_counts.tif")
+            out_inund = os.path.join(temp_dir, "out_inund_counts.tif")
+
+            width, height = 10, 10
+            transform = from_origin(120.0, 30.0, 0.01, 0.01)
+            dem_data = np.full((height, width), -9999.0, dtype=np.float32)
+            dem_data[0:5, :] = 1.0
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor()
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            # 1. 快照模式检验
+            snap_summary = engine.calculate_snapshot_raster(
+                input_raster_path=dem_path, output_raster_path=out_snap,
+                timestamp="2024-06-15 12:00:00", datum_target='msl'
+            )
+            self.assertEqual(snap_summary.total_pixels, 100)
+            self.assertEqual(snap_summary.valid_pixels, 50)
+            with rasterio.open(out_snap) as src:
+                arr = src.read(1)
+                finite_count = int(np.count_nonzero(~np.isnan(arr)))
+                self.assertEqual(finite_count, 50)
+
+            # 2. 淹没频率模式检验
+            inund_summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 02:00:00",
+                freq="1h", dem_datum='msl'
+            )
+            self.assertEqual(inund_summary.total_pixels, 100)
+            self.assertEqual(inund_summary.valid_pixels, 50)
+            with rasterio.open(out_inund) as src:
+                arr = src.read(1)
+                finite_count = int(np.count_nonzero(~np.isnan(arr)))
+                self.assertEqual(finite_count, 50)
+
+    # 40. Test K: 验证无头/CI环境直接导入 GUI 模块与取消信号线程安全性
+    def test_gui_direct_imports_headless(self):
+        from gui.main_window import MainWindow, RasterTideWorker, SingleTideWorker, BatchTideWorker
+        worker = RasterTideWorker('snapshot', {'input_path': 'test.tif'})
+        self.assertFalse(worker._is_cancelled)
+        worker.cancel()
+        self.assertTrue(worker._is_cancelled)
+        self.assertTrue(worker.cancel_event.is_set())
+
+    # 41. Test L: 验证合成潮汐预测器 (SyntheticTidePredictor) 离线全流程端到端集成
+    def test_synthetic_offline_end_to_end(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_synth.tif")
+            out_snap = os.path.join(temp_dir, "out_synth_snap.tif")
+            out_inund = os.path.join(temp_dir, "out_synth_inund.tif")
+
+            width, height = 20, 20
+            transform = from_origin(120.0, 30.0, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            synth = SyntheticTidePredictor(base_mean=0.5, base_amp=1.5)
+            engine = RasterTideEngine(tide_predictor=synth)
+
+            snap_sum = engine.calculate_snapshot_raster(
+                input_raster_path=dem_path, output_raster_path=out_snap,
+                timestamp="2024-01-01 12:00:00", datum_target='msl'
+            )
+            self.assertTrue(os.path.exists(out_snap))
+            self.assertEqual(snap_sum.valid_pixels, 400)
+
+            inund_sum = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_inund,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                freq="1h", dem_datum='msl'
+            )
+            self.assertTrue(os.path.exists(out_inund))
+            self.assertEqual(inund_sum.valid_pixels, 400)
 
 
 if __name__ == '__main__':

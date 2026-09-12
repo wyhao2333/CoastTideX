@@ -177,29 +177,26 @@ def get_mdt_reference_geoid(
     lat: float | np.ndarray,
     source_mask_data: np.ndarray = None,
     source_mask_inv_transform = None,
+    source_mask_nodata: float = None,
+    source_mask_transformer = None,
     return_qc: bool = False
 ) -> str | np.ndarray | tuple[str | np.ndarray, str | np.ndarray]:
     """
     严密判定指定空间坐标处 CNES-CLS22 Hybrid MDT 的参考重力场大地水准面基准。
-    架构优先级:
-      1. 若配置了权威来源掩膜 (Authoritative Source Mask):
-         0: INVALID / UNKNOWN
-         1: CNES-CLS22 / GOCO06s
-         2: CMEMS-MED / EIGEN-6C4
-         3: CMEMS-BLK / EIGEN-6C4
-         QC 状态输出: 'AUTHORITATIVE_MASK'
-      2. 若未配置权威掩膜文件，回退为几何多边形判定 (Fallback Polygon):
-         QC 状态输出: 'QC_DATUM_SOURCE_APPROX'
+    标准权威分类规范 (Canonical Specification):
+      0   = INVALID / UNKNOWN -> 回退多边形检验
+      1   = GOCO06s / CNES-CLS22 global ocean -> 'AUTHORITATIVE_MASK'
+      2   = CMEMS Mediterranean / EIGEN-6C4 -> 'AUTHORITATIVE_MASK'
+      3   = CMEMS Black Sea / EIGEN-6C4 -> 'AUTHORITATIVE_MASK'
+      255 = NoData -> 回退多边形检验
 
-    参数:
-        lon: 经度 (单值或数组)
-        lat: 纬度 (单值或数组)
-        source_mask_data: 掩膜栅格数组 (可选)
-        source_mask_inv_transform: 掩膜仿射逆变换 (可选)
-        return_qc: 若为 True，额外返回来源质量标记 ('AUTHORITATIVE_MASK' 或 'QC_DATUM_SOURCE_APPROX')
-
-    返回:
-        'GOCO06s' / 'EIGEN-6C4' / 'INVALID' (标量或 numpy 字符串数组)，或 (geoid, qc)
+    逐像元回退机制 (Pixelwise Fallback):
+      - 仅当掩膜像元具有有效明确分类 (1/2/3) 且非 NoData 时，赋予对应权威基准并标记 'AUTHORITATIVE_MASK'；
+      - 若掩膜为 0/255/NoData/超出掩膜范围/未知类别，仅对该点独立执行几何多边形回退：
+        - 若落在地中海/黑海多边形内：'EIGEN-6C4', 标记 'QC_DATUM_SOURCE_APPROX'
+        - 若落在多边形外（大洋）：'GOCO06s', 标记 'QC_DATUM_SOURCE_APPROX'
+      - 若未提供掩膜数据：所有有效点执行多边形判定，大洋标 'NORMAL'，地中海/黑海标 'QC_DATUM_SOURCE_APPROX'；
+      - 真正非法坐标 (NaN/Inf/越界)：赋值 'INVALID', 标记 'INVALID'。
     """
     is_scalar = np.isscalar(lon) and np.isscalar(lat)
     lons_arr = np.atleast_1d(normalize_longitude(lon, to_360=False))
@@ -214,34 +211,77 @@ def get_mdt_reference_geoid(
             raise ValueError(f"经纬度坐标长度不一致: len(lon)={len(lons_arr)}, len(lat)={len(lats_arr)}")
 
     n_pts = len(lons_arr)
-
-    # 1. 检查非法与越界坐标
     invalid_mask = ~np.isfinite(lons_arr) | ~np.isfinite(lats_arr) | (lats_arr < -90.0) | (lats_arr > 90.0)
+    valid_mask = ~invalid_mask
 
-    # 2. 优先查询权威掩膜 (Authoritative Source Mask)
+    geoid_res = np.full(n_pts, 'INVALID', dtype=object)
+    qc_res = np.full(n_pts, 'QC_DATUM_INVALID', dtype=object)
+
     if source_mask_data is not None and source_mask_inv_transform is not None:
-        cols, rows = _apply_affine_transform(source_mask_inv_transform, lons_arr, lats_arr)
+        # 坐标投影转换 (若掩膜为非 WGS84 投影坐标系)
+        if source_mask_transformer is not None and np.any(valid_mask):
+            xs_mask, ys_mask = source_mask_transformer.transform(lons_arr, lats_arr)
+            xs_arr = np.asarray(xs_mask, dtype=float)
+            ys_arr = np.asarray(ys_mask, dtype=float)
+        else:
+            xs_arr = lons_arr
+            ys_arr = lats_arr
+
+        cols, rows = _apply_affine_transform(source_mask_inv_transform, xs_arr, ys_arr)
         cols_int = np.round(cols - 0.5).astype(int)
         rows_int = np.round(rows - 0.5).astype(int)
         h, w = source_mask_data.shape
-        valid_pixel = (rows_int >= 0) & (rows_int < h) & (cols_int >= 0) & (cols_int < w) & (~invalid_mask)
-        cat_vals = np.zeros(n_pts, dtype=int)
-        cat_vals[valid_pixel] = np.nan_to_num(source_mask_data[rows_int[valid_pixel], cols_int[valid_pixel]], nan=0).astype(int)
+        in_bounds = (rows_int >= 0) & (rows_int < h) & (cols_int >= 0) & (cols_int < w) & valid_mask
 
-        geoid_res = np.where(
-            ~valid_pixel | (cat_vals == 0) | invalid_mask,
-            'INVALID',
-            np.where((cat_vals == 2) | (cat_vals == 3), 'EIGEN-6C4', 'GOCO06s')
-        )
-        qc_res = np.where(geoid_res == 'INVALID', 'INVALID', 'AUTHORITATIVE_MASK')
+        # 逐像元判定权威掩膜分类
+        if np.any(in_bounds):
+            pix_vals = source_mask_data[rows_int[in_bounds], cols_int[in_bounds]]
+
+            # 判断是否为 NoData
+            is_nd = (pix_vals == 255)
+            if source_mask_nodata is not None and np.isfinite(source_mask_nodata):
+                is_nd |= np.isclose(pix_vals, source_mask_nodata)
+
+            # 类别 1: GOCO06s
+            is_goco_auth = (pix_vals == 1) & ~is_nd
+            # 类别 2 或 3: EIGEN-6C4
+            is_eigen_auth = ((pix_vals == 2) | (pix_vals == 3)) & ~is_nd
+
+            idx_in_bounds = np.where(in_bounds)[0]
+            if np.any(is_goco_auth):
+                idx_g = idx_in_bounds[is_goco_auth]
+                geoid_res[idx_g] = 'GOCO06s'
+                qc_res[idx_g] = 'AUTHORITATIVE_MASK'
+
+            if np.any(is_eigen_auth):
+                idx_e = idx_in_bounds[is_eigen_auth]
+                geoid_res[idx_e] = 'EIGEN-6C4'
+                qc_res[idx_e] = 'AUTHORITATIVE_MASK'
+
+        # 对未获得有效权威分类的像元 (越界、0、255、NoData、未定义类别)，执行逐像元独立多边形回退
+        fallback_mask = valid_mask & (geoid_res == 'INVALID')
+        if np.any(fallback_mask):
+            sub_lons = lons_arr[fallback_mask]
+            sub_lats = lats_arr[fallback_mask]
+            in_med = _points_in_polygon(sub_lons, sub_lats, _MED_POLYGON_VERTICES)
+            in_blk = _points_in_polygon(sub_lons, sub_lats, _BLK_POLYGON_VERTICES)
+            is_poly_eigen = in_med | in_blk
+
+            idx_fb = np.where(fallback_mask)[0]
+            geoid_res[idx_fb] = np.where(is_poly_eigen, 'EIGEN-6C4', 'GOCO06s')
+            qc_res[idx_fb] = 'QC_DATUM_SOURCE_APPROX'
     else:
-        # 3. 回退为几何多边形判定 (纯 NumPy 射线法，标记为 QC_DATUM_SOURCE_APPROX)
-        in_med = _points_in_polygon(lons_arr, lats_arr, _MED_POLYGON_VERTICES)
-        in_blk = _points_in_polygon(lons_arr, lats_arr, _BLK_POLYGON_VERTICES)
-        is_eigen = (in_med | in_blk) & (~invalid_mask)
+        # 无权威掩膜配置，全部有效点回退为几何多边形判定
+        if np.any(valid_mask):
+            sub_lons = lons_arr[valid_mask]
+            sub_lats = lats_arr[valid_mask]
+            in_med = _points_in_polygon(sub_lons, sub_lats, _MED_POLYGON_VERTICES)
+            in_blk = _points_in_polygon(sub_lons, sub_lats, _BLK_POLYGON_VERTICES)
+            is_poly_eigen = in_med | in_blk
 
-        geoid_res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'EIGEN-6C4', 'GOCO06s'))
-        qc_res = np.where(invalid_mask, 'INVALID', np.where(is_eigen, 'QC_DATUM_SOURCE_APPROX', 'NORMAL'))
+            idx_valid = np.where(valid_mask)[0]
+            geoid_res[idx_valid] = np.where(is_poly_eigen, 'EIGEN-6C4', 'GOCO06s')
+            qc_res[idx_valid] = np.where(is_poly_eigen, 'QC_DATUM_SOURCE_APPROX', 'NORMAL')
 
     out_geoid = str(geoid_res[0]) if is_scalar else geoid_res
     out_qc = str(qc_res[0]) if is_scalar else qc_res
@@ -329,13 +369,20 @@ class DatumTransformer:
         self._delta_n_eigen_data = None
         self._delta_n_eigen_inv_transform = None
         self._source_mask_data = None
+        self._source_mask_crs = None
+        self._source_mask_transform = None
         self._source_mask_inv_transform = None
+        self._source_mask_nodata = None
+        self._source_mask_width = None
+        self._source_mask_height = None
+        self._source_mask_category_set = None
+        self._source_mask_transformer = None
 
         # 测试用数值夹具覆写机制 (Synthetic Fixtures for Regression Testing)
         self._synthetic_fixtures = None
 
     def _init_source_mask(self, strict: bool = False):
-        """加载 CNES-CLS22 Hybrid MDT 权威来源掩膜 GeoTIFF (若存在)"""
+        """加载 CNES-CLS22 Hybrid MDT 权威来源掩膜 GeoTIFF (若配置)"""
         if self._source_mask_data is None and self.source_mask_path:
             if not os.path.exists(self.source_mask_path):
                 msg = f"未找到权威 Hybrid MDT 来源掩膜文件: {self.source_mask_path}。将自动回退为空间多边形近似判定。"
@@ -344,8 +391,35 @@ class DatumTransformer:
                 return
             try:
                 with rasterio.open(self.source_mask_path) as src:
-                    self._source_mask_data = src.read(1).astype(np.uint8)
+                    if src.crs is None:
+                        msg = f"Hybrid MDT 来源掩膜文件缺少 CRS 坐标参考系 ({self.source_mask_path})"
+                        if strict:
+                            raise DatumDataError(msg)
+                        else:
+                            warnings.warn(msg + "，将回退为空间几何多边形判定。")
+                            return
+
+                    self._source_mask_data = src.read(1)
+                    self._source_mask_crs = src.crs
+                    self._source_mask_transform = src.transform
                     self._source_mask_inv_transform = ~src.transform
+                    self._source_mask_nodata = src.nodata
+                    self._source_mask_width = src.width
+                    self._source_mask_height = src.height
+                    self._source_mask_category_set = set(np.unique(self._source_mask_data))
+
+                    if not src.crs.is_geographic:
+                        try:
+                            from pyproj import Transformer
+                            self._source_mask_transformer = Transformer.from_crs("EPSG:4326", src.crs, always_xy=True)
+                        except Exception as te:
+                            if strict:
+                                raise DatumDataError(f"初始化投影掩膜坐标转换器失败: {te}") from te
+                            warnings.warn(f"初始化投影掩膜坐标转换器失败: {te}，回退为多边形判定。")
+                            self._source_mask_data = None
+                            return
+                    else:
+                        self._source_mask_transformer = None
             except Exception as e:
                 msg = f"打开 Hybrid MDT 来源掩膜失败 ({self.source_mask_path}): {e}"
                 if strict:
@@ -353,16 +427,30 @@ class DatumTransformer:
                 warnings.warn(msg + "，将回退为空间几何多边形判定。")
 
     def _get_ref_geoid_and_qc(self, lons_arr: np.ndarray, lats_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """内部调用，优先查询权威来源掩膜，无掩膜时回退为几何多边形并标记 QC_DATUM_SOURCE_APPROX"""
+        """内部调用，优先查询权威来源掩膜，无掩膜或掩膜点无分类独立回退为几何多边形并标记 QC_DATUM_SOURCE_APPROX"""
         self._init_source_mask(strict=False)
         geoids, qcs = get_mdt_reference_geoid(
             lons_arr,
             lats_arr,
             source_mask_data=self._source_mask_data,
             source_mask_inv_transform=self._source_mask_inv_transform,
+            source_mask_nodata=self._source_mask_nodata,
+            source_mask_transformer=self._source_mask_transformer,
             return_qc=True
         )
         return np.atleast_1d(geoids), np.atleast_1d(qcs)
+
+    def get_mdt_reference_geoid(self, lon, lat, return_qc: bool = True):
+        """外部接口：查询指定坐标点或数组处的 MDT 原始参考水准面 (GOCO06s 或 EIGEN-6C4) 及质量标识"""
+        self._init_source_mask(strict=False)
+        return get_mdt_reference_geoid(
+            lon, lat,
+            source_mask_data=self._source_mask_data,
+            source_mask_inv_transform=self._source_mask_inv_transform,
+            source_mask_nodata=self._source_mask_nodata,
+            source_mask_transformer=self._source_mask_transformer,
+            return_qc=return_qc
+        )
 
     def set_synthetic_fixture(
         self,
@@ -633,7 +721,7 @@ class DatumTransformer:
         target = str(datum_target).lower()
 
         ref_geoids, qc_source = self._get_ref_geoid_and_qc(lons_arr, lats_arr)
-        qc_warning = np.where(ref_geoids == 'EIGEN-6C4', qc_source, 'NORMAL')
+        qc_warning = qc_source
 
         # 1. 仅 MSL 模式：绝对零依赖任何外部 MDT/Geoid 栅格文件
         if target == 'msl':
@@ -768,7 +856,7 @@ class DatumTransformer:
         tgt = str(target).lower()
 
         ref_geoids, qc_source = self._get_ref_geoid_and_qc(lons_arr, lats_arr)
-        qc_warning = np.where(ref_geoids == 'EIGEN-6C4', qc_source, 'NORMAL')
+        qc_warning = qc_source
 
         if tgt == 'msl':
             res = {

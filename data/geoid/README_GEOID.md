@@ -10,8 +10,8 @@
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `us_nga_egm08_25.tif` | 全球 EGM2008 大地水准面起伏 $N_{\text{EGM2008}}$ | 2.5' 全球网格 (4321×8640) | **76.86 MB** | EPSG:4979 (WGS84 3D) | 美国国家地理空间情报局 (NGA) EGM2008 (d/o 2190) |
 | `delta_n_goco06s_minus_egm2008.tif` | 全球大洋 GOCO06s 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.66 MB** | EPSG:4326 (WGS84 2D) | ICGEM (GFZ Potsdam), GOCO06s (d/o 300) - EGM2008 (d/o 2190) |
-| `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (可由脚本本地生成，为保持轻量不入 Git 库) |
-| `hybrid_mdt_source_mask.tif` | [v1.4新增] 官方 Hybrid MDT 来源分类权威掩膜 (0=GOCO06s, 1=EIGEN-6C4, 255=NoData) | 0.05°~0.25° 网格 | 视配置而定 | EPSG:4326 (WGS84 2D) | 由官方 CNES-CLS22 MDT 空间定义或分类栅格派生，提供权威基准来源判定 |
+| `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (地中海/黑海非MSL必选，可由脚本本地生成，为保持轻量不强行入 Git 库) |
+| `hybrid_mdt_source_mask.tif` | [v1.4可选] 官方 Hybrid MDT 来源分类权威掩膜 (1=GOCO06s, 2=Med EIGEN-6C4, 3=Black Sea EIGEN-6C4, 0=未知, 255=NoData) | 0.05°~0.25° 网格 | 视配置而定 | EPSG:4326 或投影 CRS | 派生自官方 CNES-CLS22 MDT 空间定义，未配置时系统平滑退化至精细多边形判别 (QC_DATUM_SOURCE_APPROX) |
 
 ---
 

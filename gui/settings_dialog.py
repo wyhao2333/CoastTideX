@@ -50,11 +50,17 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
             import rasterio
             with rasterio.open(path) as src:
                 w, h = src.width, src.height
+                nodata = src.nodata
                 data = src.read(1)
                 unique_vals = np.unique(data)
-                allowed = {0, 1, 2, 3}
+                allowed = {0, 1, 2, 3, 255}
+                if nodata is not None and not np.isnan(nodata):
+                    try:
+                        allowed.add(int(nodata))
+                    except (ValueError, OverflowError):
+                        pass
                 if not set(unique_vals).issubset(allowed):
-                    return False, f"❌ 包含非法类别: {unique_vals} (仅允许 0, 1, 2, 3)"
+                    return False, f"❌ 包含非法类别: {unique_vals} (仅允许 0, 1, 2, 3, 255 或 NoData)"
             return True, f"✅ 正常 (有效类别={sorted(list(unique_vals))})"
         else:
             return (True, "✅ 正常存在") if os.path.exists(path) else (False, "❌ 文件不存在")

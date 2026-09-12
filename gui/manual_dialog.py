@@ -148,7 +148,7 @@ CoastTideX v1.4 正式引入工业级空间栅格潮位引擎 (<code>RasterTideE
     <li><b>[新增] GUI 栅格潮位专用面板 (Tab 3)</b>：提供 GeoTIFF 元数据检视卡、快照/淹没双模式面板、自适应网格参数配置、进度条与中途取消支持；</li>
     <li><b>[优化] 独立计算基准与展示基准</b>：GUI 单点计算区分计算基准与展示基准，切换整年时自动推荐 30min 步长并具备用户修改记忆；</li>
     <li><b>[CLI] 命令行全量扩展</b>：CLI 新增 <code>raster snapshot</code> 与 <code>raster inundation</code> 子命令；<code>scripts/calculate_inundation_raster.py</code> 升级为规范薄封装；</li>
-    <li><b>[测试] 单元测试套件扩展至 29 项全通过</b>：覆盖合成 GeoTIFF 元数据提取、像元中心对齐、快照 Mock、CCDF 预言机、阻隔水体不外插与全链路集成。</li>
+    <li><b>[测试] 单元测试套件扩展至 41 项全通过</b>：覆盖自适应四叉树动态细分、最小步长终止、拓扑连通防护、官方掩膜五类规范、投影重投影、经度圆周跨界、像元中心对齐、快照与 CCDF 离线预言机及全链路集成。</li>
 </ul>
 
 <h3>v1.3 (2026-09)</h3>

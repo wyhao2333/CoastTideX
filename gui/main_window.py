@@ -32,7 +32,7 @@ import threading
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
-from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary
+from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary, RasterCalculationCancelled
 from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
 from .settings_dialog import SettingsDialog
@@ -122,8 +122,9 @@ class SingleTideWorker(QThread):
             # 3. 运行严密四大垂直基准转换 (MSL -> MDT_REF -> EGM2008 -> WGS84)
             p_cb(85, "严密转换四大垂直基准 (MSL/MDT_REF/EGM2008/WGS84)...")
             transformer = DatumTransformer()
+            strict_mode = (self.datum_mode != 'msl')
             datum_res = transformer.convert_tide_datums(
-                df['tide_total_m'].values, self.lon, self.lat, datum_target=self.datum_mode, strict=False
+                df['tide_total_m'].values, self.lon, self.lat, datum_target=self.datum_mode, strict=strict_mode
             )
 
             df['tide_msl_m'] = datum_res['tide_msl_m']
@@ -209,7 +210,8 @@ class BatchTideWorker(QThread):
             lats = df_out[self.lat_col].astype(float).values
             tide_msl = df_out['tide_total_m'].values
 
-            datum_res = transformer.convert_tide_datums(tide_msl, lons, lats, datum_target=self.datum_mode, strict=False)
+            strict_mode = (self.datum_mode != 'msl')
+            datum_res = transformer.convert_tide_datums(tide_msl, lons, lats, datum_target=self.datum_mode, strict=strict_mode)
             df_out['tide_msl_m'] = datum_res['tide_msl_m']
             df_out['mdt_m'] = datum_res['mdt_m']
             df_out['delta_n_m'] = datum_res['delta_n_m']
@@ -232,6 +234,7 @@ class RasterTideWorker(QThread):
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(object)  # RasterResultSummary
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, mode: str, params: dict):
         super().__init__()
@@ -290,6 +293,9 @@ class RasterTideWorker(QThread):
 
             if not self._is_cancelled:
                 self.finished.emit(summary)
+        except RasterCalculationCancelled:
+            self._is_cancelled = True
+            self.cancelled.emit()
         except Exception as e:
             if not self._is_cancelled:
                 self.error.emit(str(e))
@@ -1194,9 +1200,9 @@ class MainWindow(QMainWindow):
         if datum_mode == 'msl':
             col = 'tide_msl_m' if 'tide_msl_m' in df.columns else 'tide_total_m'
             target_name = "MSL (相对海平面)"
-        elif datum_mode == 'goco':
-            col = 'h_goco06s_m'
-            target_name = "GOCO06s (Tide+MDT)"
+        elif datum_mode in ['goco', 'mdt_ref']:
+            col = 'h_mdt_ref_m' if 'h_mdt_ref_m' in df.columns else ('h_goco06s_m' if 'h_goco06s_m' in df.columns else None)
+            target_name = "MDT原始参考面 (GOCO06s / EIGEN-6C4)"
         elif datum_mode == 'wgs':
             col = 'h_wgs84_m'
             target_name = "WGS84 (几何空间椭球高)"
@@ -1206,7 +1212,7 @@ class MainWindow(QMainWindow):
 
         self.lbl_stat_target.setText(f"<b>{target_name}</b>")
 
-        if col in df.columns:
+        if col and col in df.columns:
             vals = df[col].values
             valid_vals = vals[~np.isnan(vals)]
             if len(valid_vals) > 0:
@@ -1217,9 +1223,18 @@ class MainWindow(QMainWindow):
                 self.lbl_min.setText(f"<b style='color:#10b981;'>{min_val:+.2f} m</b>")
                 self.lbl_range.setText(f"<b>{range_val:.2f} m</b>")
             else:
-                self.lbl_max.setText("<span style='color:#94a3b8;'>NaN (陆地/无数据)</span>")
-                self.lbl_min.setText("<span style='color:#94a3b8;'>NaN (陆地/无数据)</span>")
+                if 'tide_msl_m' in df.columns and datum_mode != 'msl':
+                    hint = "未在计算时包含大地基准 (仅选了MSL)"
+                else:
+                    hint = "NaN (陆地/无数据)"
+                self.lbl_max.setText(f"<span style='color:#94a3b8;'>{hint}</span>")
+                self.lbl_min.setText(f"<span style='color:#94a3b8;'>{hint}</span>")
                 self.lbl_range.setText("<span style='color:#94a3b8;'>-</span>")
+        else:
+            hint = "未在本次模拟中解算该基准面"
+            self.lbl_max.setText(f"<span style='color:#94a3b8;'>{hint}</span>")
+            self.lbl_min.setText(f"<span style='color:#94a3b8;'>{hint}</span>")
+            self.lbl_range.setText("<span style='color:#94a3b8;'>-</span>")
 
         # 更新静态高程基准参数
         mdt_v = _safe_float(self.current_scalar_datum.get('mdt_m', np.nan))
@@ -1234,10 +1249,14 @@ class MainWindow(QMainWindow):
             self.lbl_delta_n.setText(f"<span style='color:#94a3b8;'>NaN ({ref_g})</span>")
         self.lbl_geoid_n.setText(f"<b>{geoid_v:+.3f} m</b>" if np.isfinite(geoid_v) else "<span style='color:#94a3b8;'>NaN</span>")
 
-        # 更新网格质量评价标识
+        # 更新网格质量评价标识 (严密词汇)
         qc_warn = self.current_scalar_datum.get('qc_warning', 'NORMAL')
-        if qc_warn == 'QC_MED_BLACK_SEA_EIGEN6C4':
-            self.lbl_qc_status.setText("<span style='color:#38bdf8;font-weight:bold;'>ℹ️ 地中海/黑海 (MDT参考 EIGEN-6C4)</span>")
+        if qc_warn in ['QC_DATUM_SOURCE_APPROX', 'QC_MED_BLACK_SEA_EIGEN6C4']:
+            self.lbl_qc_status.setText(f"<span style='color:#38bdf8;font-weight:bold;'>ℹ️ {ref_g} (近似边界外推 / 粗略多边形)</span>")
+        elif qc_warn in ['QC_DATUM_SOURCE_NORMAL', 'NORMAL', 'AUTHORITATIVE_MASK']:
+            self.lbl_qc_status.setText(f"<span style='color:#10b981;font-weight:bold;'>✅ {ref_g} (权威掩膜正常)</span>")
+        elif qc_warn in ['QC_DATUM_INVALID', 'INVALID']:
+            self.lbl_qc_status.setText("<span style='color:#ef4444;font-weight:bold;'>❌ 无效坐标 / 越界 (QC_DATUM_INVALID)</span>")
         elif 'quality_flag' in df.columns:
             flags = df['quality_flag'].values
             if (flags == 0).any():
@@ -1570,6 +1589,7 @@ class MainWindow(QMainWindow):
         self.raster_worker = RasterTideWorker(mode=mode, params=params)
         self.raster_worker.progress.connect(self._on_raster_progress)
         self.raster_worker.finished.connect(self._on_raster_finished)
+        self.raster_worker.cancelled.connect(self._on_raster_cancelled)
         self.raster_worker.error.connect(self._on_raster_error)
         self.raster_worker.start()
 
@@ -1578,6 +1598,14 @@ class MainWindow(QMainWindow):
             self.raster_worker.cancel()
             self.lbl_raster_status.setText("正在取消任务并清理临时文件...")
             self.btn_cancel_raster.setEnabled(False)
+
+    def _on_raster_cancelled(self):
+        self.btn_run_raster.setEnabled(True)
+        self.btn_cancel_raster.setEnabled(False)
+        self.prog_raster.setValue(0)
+        self.lbl_raster_status.setText("用户已取消空间栅格解算任务并已清理临时文件。")
+        self.status_bar.showMessage("已取消空间栅格解算任务")
+        QMessageBox.information(self, "任务已取消", "空间栅格解算任务已被成功取消，临时中间文件已安全清理。")
 
     def _on_raster_progress(self, pct, msg):
         self.prog_raster.setValue(pct)
@@ -1633,6 +1661,9 @@ class MainWindow(QMainWindow):
         self.btn_run_raster.setEnabled(True)
         self.btn_cancel_raster.setEnabled(False)
         self.prog_raster.setValue(0)
+        if "RasterCalculationCancelled" in err_msg or "取消" in err_msg:
+            self._on_raster_cancelled()
+            return
         self.lbl_raster_status.setText("解算失败")
         self.status_bar.showMessage("栅格解算发生错误")
         QMessageBox.critical(self, "解算错误", f"空间栅格解算失败:\n{err_msg}")

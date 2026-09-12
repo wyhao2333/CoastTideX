@@ -104,7 +104,7 @@ class TideChartWidget(QWidget):
         # 识别潮位列
         msl_col = 'tide_msl_m' if 'tide_msl_m' in df.columns else ('tide_total_m' if 'tide_total_m' in df.columns else None)
         egm_col = 'h_egm2008_m' if 'h_egm2008_m' in df.columns else None
-        goco_col = 'h_goco06s_m' if 'h_goco06s_m' in df.columns else None
+        goco_col = 'h_mdt_ref_m' if 'h_mdt_ref_m' in df.columns else ('h_goco06s_m' if 'h_goco06s_m' in df.columns else None)
         wgs_col = 'h_wgs84_m' if 'h_wgs84_m' in df.columns else None
 
         # 1. 绘制平均海平面 (MSL) 相对潮高
@@ -115,11 +115,11 @@ class TideChartWidget(QWidget):
                 color='#38bdf8', linewidth=2.0, zorder=3
             )
 
-        # 2. 绘制 GOCO06s 基准面海面高
-        if datum_mode in ['goco', 'all'] and goco_col is not None:
+        # 2. 绘制 MDT 原始参考面海面高 (GOCO06s / EIGEN-6C4)
+        if datum_mode in ['goco', 'mdt_ref', 'all'] and goco_col is not None:
             goco_elev = df[goco_col].values
             self.ax.plot(
-                times, goco_elev, label='GOCO06s 海面高 (Tide+MDT, m)',
+                times, goco_elev, label='MDT原始参考面 (GOCO06s/EIGEN-6C4, m)',
                 color='#a855f7', linewidth=1.8, linestyle=':', zorder=3
             )
 
