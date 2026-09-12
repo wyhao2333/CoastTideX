@@ -267,6 +267,64 @@ def circular_longitude_span(lons: float | np.ndarray | list) -> tuple[float, flo
     return span, start_pt, end_pt
 
 
+def build_circular_fes_bboxes(
+    lons: float | np.ndarray | list,
+    lats: float | np.ndarray | list,
+    buffer_deg: float = 0.5
+) -> list[tuple[float, float, float, float]]:
+    """
+    根据给定的经纬度集合，构建环形圆周感知 (Circular-aware) 的局部 FES2022b 网格查询包围框 (BBox)。
+    彻底消除跨越格林尼治子午线 (0°附近, 如 -1° 与 +1°) 或国际日期变更线 (180°附近, 如 179° 与 -179°)
+    时生成近 360° 全球包围框而引发的内存暴涨与模型假死。
+
+    参数:
+        lons: 经度标量、列表或数组
+        lats: 纬度标量、列表或数组
+        buffer_deg: 空间缓冲外扩半径 (度，默认 0.5°)
+
+    返回:
+        list of bboxes: 每个 bbox 为 (lon_min, lat_min, lon_max, lat_max)
+        如果跨越 0°/360° 分界线且总跨度较小，拆分为两个紧凑的局部 BBox；
+        否则返回单个紧凑的局部 BBox。保证每个 BBox 的经度跨度均严格受控于局部真实几何跨度。
+    """
+    lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+    lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+    valid_mask = np.isfinite(lons_arr) & np.isfinite(lats_arr)
+    if not np.any(valid_mask):
+        return [(0.0, -90.0, 360.0, 90.0)]
+
+    valid_lons = lons_arr[valid_mask]
+    valid_lats = lats_arr[valid_mask]
+
+    lat_min = max(-90.0, float(np.min(valid_lats)) - buffer_deg)
+    lat_max = min(90.0, float(np.max(valid_lats)) + buffer_deg)
+
+    lons_360 = valid_lons % 360.0
+    span, arc_start, arc_end = circular_longitude_span(lons_360)
+
+    # 若点集跨度已达全球 (>= 180°)，直接返回全经度包围框
+    if span >= 180.0:
+        lon_min = max(0.0, float(np.min(lons_360)) - buffer_deg)
+        lon_max = min(360.0, float(np.max(lons_360)) + buffer_deg)
+        return [(lon_min, lat_min, lon_max, lat_max)]
+
+    if arc_end >= arc_start:
+        # 普通未跨越 0°/360° 边界的圆弧 (含 180° 日期变更线，因在 [0, 360) 体系下 180° 是平滑连续的)
+        lon_min = max(0.0, arc_start - buffer_deg)
+        lon_max = min(360.0, arc_end + buffer_deg)
+        return [(lon_min, lat_min, lon_max, lat_max)]
+    else:
+        # 跨越格林尼治 0°/360° 边界的圆弧: 拆分为 [arc_start - buf, 360] 与 [0, arc_end + buf] 两个紧凑局部 BBox
+        box1_lon_min = max(0.0, arc_start - buffer_deg)
+        box1_lon_max = 360.0
+        box2_lon_min = 0.0
+        box2_lon_max = min(360.0, arc_end + buffer_deg)
+        return [
+            (box1_lon_min, lat_min, box1_lon_max, lat_max),
+            (box2_lon_min, lat_min, box2_lon_max, lat_max)
+        ]
+
+
 def convert_time_to_utc(
     time_series: pd.DatetimeIndex | pd.Series | list,
     source_tz: str = 'UTC'

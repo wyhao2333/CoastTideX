@@ -57,6 +57,8 @@ def main():
     p_single.add_argument("--inclusive", type=str, default="both", choices=["both", "left", "right", "neither"], help="时间区间包含模式 (默认: both，整年模式下自动为 left)")
     p_single.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
     p_single.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
+    p_single.add_argument("--datum", type=str, default="both", choices=["msl", "egm2008", "both", "all", "wgs84", "mdt_ref"], help="目标垂直基准 (默认: both -> MSL + EGM2008)")
+    p_single.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似多边形回退 (默认对非 MSL 基准为严格模式)")
     p_single.add_argument("--output", "-o", type=str, default="predicted_tide.csv", help="输出文件路径")
 
     # 2. 批量模式参数
@@ -67,6 +69,8 @@ def main():
     p_batch.add_argument("--time-col", type=str, default="datetime", help="时间列名")
     p_batch.add_argument("--constituents", type=str, default="all", choices=["all", "major8"], help="分潮集合")
     p_batch.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="输入时间时区 (UTC 或 local)")
+    p_batch.add_argument("--datum", type=str, default="both", choices=["msl", "egm2008", "both", "all", "wgs84", "mdt_ref"], help="目标垂直基准 (默认: both -> MSL + EGM2008)")
+    p_batch.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似多边形回退 (默认对非 MSL 基准为严格模式)")
     p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
 
     # 3. 空间栅格模式参数
@@ -140,9 +144,22 @@ def main():
                 source_tz=args.tz
             )
 
-        print("[*] 严密计算多元垂直基准 (MSL, MDT_REF, GOCO06s, EGM2008, WGS84)...")
+        datum_target = args.datum.lower()
+        strict_mode = (not args.non_strict) if datum_target != "msl" else False
+
+        datum_desc_map = {
+            "msl": "MSL (相对平均海平面)",
+            "egm2008": "MSL + EGM2008",
+            "both": "MSL + EGM2008",
+            "mdt_ref": "MSL + MDT_REF",
+            "wgs84": "MSL + EGM2008 + WGS84",
+            "all": "MSL + MDT_REF + EGM2008 + WGS84"
+        }
+        datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
+        print(f"[*] 严密计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
         datum_res = transformer.convert_tide_datums(
-            df['tide_total_m'].values, args.lon, args.lat
+            df['tide_total_m'].values, args.lon, args.lat,
+            datum_target=datum_target, strict=strict_mode
         )
 
         df['tide_msl_m'] = datum_res['tide_msl_m']
@@ -180,12 +197,27 @@ def main():
             source_tz=args.tz
         )
 
-        print("[*] 向量化批量计算多元垂直基准...")
+        datum_target = args.datum.lower()
+        strict_mode = (not args.non_strict) if datum_target != "msl" else False
+
+        datum_desc_map = {
+            "msl": "MSL (相对平均海平面)",
+            "egm2008": "MSL + EGM2008",
+            "both": "MSL + EGM2008",
+            "mdt_ref": "MSL + MDT_REF",
+            "wgs84": "MSL + EGM2008 + WGS84",
+            "all": "MSL + MDT_REF + EGM2008 + WGS84"
+        }
+        datum_desc = datum_desc_map.get(datum_target, datum_target.upper())
+        print(f"[*] 向量化批量计算目标垂直基准 ({datum_desc}, strict={strict_mode})...")
         lons = df_out[args.lon_col].astype(float).values
         lats = df_out[args.lat_col].astype(float).values
         tide_msl = df_out['tide_total_m'].values
 
-        datum_res = transformer.convert_tide_datums(tide_msl, lons, lats)
+        datum_res = transformer.convert_tide_datums(
+            tide_msl, lons, lats,
+            datum_target=datum_target, strict=strict_mode
+        )
         df_out['tide_msl_m'] = datum_res['tide_msl_m']
         df_out['mdt_m'] = datum_res['mdt_m']
         df_out['delta_n_m'] = datum_res['delta_n_m']

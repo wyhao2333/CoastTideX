@@ -23,7 +23,7 @@ paths:
   # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (可选外部补充，Delta N = N_EIGEN6C4 - N_EGM2008)
   delta_n_eigen6c4_egm2008_tif: "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
 
-  # CNES-CLS22 Hybrid MDT 权威来源与基准参考掩膜栅格 (可选，0:无效, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK))
+  # CNES-CLS22 Hybrid MDT 权威来源与基准参考掩膜栅格 (可选外部补充，0:UNKNOWN, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK), 255:NoData)
   hybrid_mdt_source_mask: "data/geoid/hybrid_mdt_source_mask.tif"
 
 # 潮位计算配置
@@ -56,6 +56,21 @@ raster:
 
   # 2D 栅格读写块默认尺寸 (像元)
   default_block_size: 512
+
+  # 自适应控制网格控制节点批量评估大小 (Level-wise 批处理节点数)
+  control_node_batch_size: 128
+
+  # 控制网格细分最大绝对深度上限保护
+  absolute_max_refinement_depth: 12
+
+  # 拓扑连通防护粗粒度掩膜物理分辨率最大上限 (米，防止超大 10m GeoTIFF 被过度降采样抹平 100-300m 陆地屏障)
+  topology_max_resolution_m: 100
+
+  # 拓扑连通判定有效像元比例阈值 (保守保护陆地 NoData barrier)
+  topology_valid_fraction_threshold: 0.5
+
+  # 内存中允许驻留的最大控制节点数 (超过后启用临时 memmap 磁盘映射存储排序时序)
+  max_in_memory_control_nodes: 10000
 
 # 界面与展示默认配置
 gui:

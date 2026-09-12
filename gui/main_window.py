@@ -857,12 +857,17 @@ class MainWindow(QMainWindow):
         # 4. 自适应网格高级参数
         self.grp_grid = QGroupBox("4. 自适应潮位控制网格与性能优化参数")
         layout_grid = QGridLayout(self.grp_grid)
-        layout_grid.setSpacing(8)
+        cfg = load_app_config()
+        raster_cfg = cfg.get('raster', {})
+        init_sp = float(raster_cfg.get('initial_control_spacing_m', 4000.0))
+        min_sp = float(raster_cfg.get('min_control_spacing_m', 500.0))
+        tol = float(raster_cfg.get('inundation_error_tolerance_pct', 1.0))
+        blk = int(raster_cfg.get('default_block_size', 512))
 
         layout_grid.addWidget(QLabel("初始网格间距:"), 0, 0)
         self.spin_grid_init = QDoubleSpinBox()
         self.spin_grid_init.setRange(500.0, 50000.0)
-        self.spin_grid_init.setValue(4000.0)
+        self.spin_grid_init.setValue(init_sp)
         self.spin_grid_init.setSingleStep(500.0)
         self.spin_grid_init.setSuffix(" m")
         layout_grid.addWidget(self.spin_grid_init, 0, 1)
@@ -870,7 +875,7 @@ class MainWindow(QMainWindow):
         layout_grid.addWidget(QLabel("最小允许间距:"), 0, 2)
         self.spin_grid_min = QDoubleSpinBox()
         self.spin_grid_min.setRange(50.0, 10000.0)
-        self.spin_grid_min.setValue(500.0)
+        self.spin_grid_min.setValue(min_sp)
         self.spin_grid_min.setSingleStep(100.0)
         self.spin_grid_min.setSuffix(" m")
         layout_grid.addWidget(self.spin_grid_min, 0, 3)
@@ -878,7 +883,7 @@ class MainWindow(QMainWindow):
         layout_grid.addWidget(QLabel("容错误差阈值:"), 1, 0)
         self.spin_grid_tol = QDoubleSpinBox()
         self.spin_grid_tol.setRange(0.1, 20.0)
-        self.spin_grid_tol.setValue(1.0)
+        self.spin_grid_tol.setValue(tol)
         self.spin_grid_tol.setSingleStep(0.2)
         self.spin_grid_tol.setSuffix(" %")
         layout_grid.addWidget(self.spin_grid_tol, 1, 1)
@@ -886,7 +891,7 @@ class MainWindow(QMainWindow):
         layout_grid.addWidget(QLabel("2D 分块大小:"), 1, 2)
         self.spin_grid_block = QSpinBox()
         self.spin_grid_block.setRange(64, 4096)
-        self.spin_grid_block.setValue(512)
+        self.spin_grid_block.setValue(blk)
         self.spin_grid_block.setSingleStep(64)
         self.spin_grid_block.setSuffix(" px")
         layout_grid.addWidget(self.spin_grid_block, 1, 3)
@@ -994,20 +999,46 @@ class MainWindow(QMainWindow):
 
     def _on_compute_datum_changed(self):
         compute_mode = self.combo_compute_datum.currentData()
+        current_display = self.combo_display_datum.currentData()
+        self.combo_display_datum.blockSignals(True)
+        self.combo_display_datum.clear()
+
         if compute_mode == 'msl':
-            idx = self.combo_display_datum.findData('msl')
-            if idx >= 0:
-                self.combo_display_datum.setCurrentIndex(idx)
-            self.combo_display_datum.setEnabled(False)
-        elif compute_mode == 'egm2008':
-            self.combo_display_datum.setEnabled(True)
-            cur = self.combo_display_datum.currentData()
-            if cur not in ['egm', 'msl']:
-                idx = self.combo_display_datum.findData('egm')
-                if idx >= 0:
-                    self.combo_display_datum.setCurrentIndex(idx)
+            options = [("MSL (相对平均海平面)", "msl")]
+        elif compute_mode in ['egm2008', 'both']:
+            options = [
+                ("EGM2008 (大地水准面正高)", "egm"),
+                ("MSL (相对平均海平面)", "msl")
+            ]
+        elif compute_mode == 'mdt_ref':
+            options = [
+                ("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco"),
+                ("MSL (相对平均海平面)", "msl")
+            ]
+        elif compute_mode == 'all':
+            options = [
+                ("EGM2008 (大地水准面正高)", "egm"),
+                ("MSL (相对平均海平面)", "msl"),
+                ("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco"),
+                ("WGS84 (空间几何椭球高)", "wgs")
+            ]
         else:
-            self.combo_display_datum.setEnabled(True)
+            options = [
+                ("EGM2008 (大地水准面正高)", "egm"),
+                ("MSL (相对平均海平面)", "msl")
+            ]
+
+        for text, key in options:
+            self.combo_display_datum.addItem(text, key)
+
+        new_idx = self.combo_display_datum.findData(current_display)
+        if new_idx >= 0:
+            self.combo_display_datum.setCurrentIndex(new_idx)
+        else:
+            self.combo_display_datum.setCurrentIndex(0)
+
+        self.combo_display_datum.setEnabled(len(options) > 1)
+        self.combo_display_datum.blockSignals(False)
 
         if self.current_result_df is not None:
             self._update_stat_cards(self.current_result_df)
@@ -1251,12 +1282,12 @@ class MainWindow(QMainWindow):
 
         # 更新网格质量评价标识 (严密词汇)
         qc_warn = self.current_scalar_datum.get('qc_warning', 'NORMAL')
-        if qc_warn in ['QC_DATUM_SOURCE_APPROX', 'QC_MED_BLACK_SEA_EIGEN6C4']:
-            self.lbl_qc_status.setText(f"<span style='color:#38bdf8;font-weight:bold;'>ℹ️ {ref_g} (近似边界外推 / 粗略多边形)</span>")
-        elif qc_warn in ['QC_DATUM_SOURCE_NORMAL', 'NORMAL', 'AUTHORITATIVE_MASK']:
-            self.lbl_qc_status.setText(f"<span style='color:#10b981;font-weight:bold;'>✅ {ref_g} (权威掩膜正常)</span>")
+        if qc_warn == 'AUTHORITATIVE_MASK':
+            self.lbl_qc_status.setText(f"<span style='color:#10b981;font-weight:bold;'>✅ {ref_g} (权威来源掩膜)</span>")
+        elif qc_warn in ['QC_DATUM_SOURCE_APPROX', 'POLYGON_FALLBACK', 'NORMAL', 'QC_MED_BLACK_SEA_EIGEN6C4', 'QC_DATUM_SOURCE_NORMAL']:
+            self.lbl_qc_status.setText(f"<span style='color:#38bdf8;font-weight:bold;'>ℹ️ {ref_g} (几何多边形近似判定)</span>")
         elif qc_warn in ['QC_DATUM_INVALID', 'INVALID']:
-            self.lbl_qc_status.setText("<span style='color:#ef4444;font-weight:bold;'>❌ 无效坐标 / 越界 (QC_DATUM_INVALID)</span>")
+            self.lbl_qc_status.setText("<span style='color:#ef4444;font-weight:bold;'>❌ 无法确定 / 无效基准</span>")
         elif 'quality_flag' in df.columns:
             flags = df['quality_flag'].values
             if (flags == 0).any():

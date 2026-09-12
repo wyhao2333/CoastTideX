@@ -13,6 +13,7 @@ CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.4)
 
 import os
 import warnings
+from typing import Optional, Tuple, List, Dict, Any, Callable, Union
 import numpy as np
 import pandas as pd
 
@@ -26,8 +27,8 @@ except ImportError:
     HAS_PYFES = False
 
 from .utils import (
-    normalize_longitude, circular_longitude_span, convert_time_to_utc, load_app_config, resolve_project_path,
-    validate_coordinates, validate_time_params, build_time_index
+    normalize_longitude, circular_longitude_span, build_circular_fes_bboxes, convert_time_to_utc,
+    load_app_config, resolve_project_path, validate_coordinates, validate_time_params, build_time_index
 )
 from .datum_engine import DatumTransformer, DatumDataError, get_mdt_reference_geoid
 
@@ -372,9 +373,9 @@ class FESTidePredictor:
         # 严格进行时区校准转换为 UTC
         _, times_utc = convert_time_to_utc(df_records[time_col], source_tz=source_tz)
 
-        # 检查空间跨度是否集中在小区域
-        lon_span = np.ptp(lons_norm)
-        lat_span = np.ptp(lats)
+        # 检查空间跨度是否集中在小区域 (环形圆周感知)
+        lon_span, _, _ = circular_longitude_span(lons_norm) if len(lons_norm) > 1 else (0.0, 0.0, 0.0)
+        lat_span = np.ptp(lats) if len(lats) > 1 else 0.0
 
         df_out = df_records.copy()
         df_out['datetime_utc'] = pd.to_datetime(times_utc)
@@ -384,23 +385,31 @@ class FESTidePredictor:
         df_out['tide_total_m'] = np.nan
         df_out['quality_flag'] = 0
 
-        # 获取质量控制提示 (地中海/黑海 EIGEN-6C4 区域标记)
-        ref_geoids = get_mdt_reference_geoid(lons, lats)
-        df_out['qc_warning'] = np.where(ref_geoids == 'EIGEN-6C4', 'QC_MED_BLACK_SEA_EIGEN6C4', 'NORMAL')
+        # 获取质量控制提示与基准来源 Provenance
+        _, prov_res = get_mdt_reference_geoid(lons, lats, return_qc=True)
+        df_out['qc_warning'] = prov_res
 
-        # 如果所有点集中在 8°x8° 范围之内，直接使用单局部 BBox 计算
+        # 如果所有点集中在 8°x8° 范围之内，直接使用环形感知局部 BBox 计算
         if lon_span <= 8.0 and lat_span <= 8.0:
             if progress_callback:
                 progress_callback(20, f"单局部区域批量解算 ({total_rows} 个点)...")
 
-            bbox = (
-                float(np.min(lons_norm)) - 0.5,
-                max(-90.0, float(np.min(lats)) - 0.5),
-                float(np.max(lons_norm)) + 0.5,
-                min(90.0, float(np.max(lats)) + 0.5)
-            )
-            model = self._get_model(bbox, const_list)
-            sp, lp, flags = pyfes.evaluate_tide(model, times_utc, lons_norm, lats)
+            bboxes = build_circular_fes_bboxes(lons_norm, lats, buffer_deg=0.5)
+            if len(bboxes) == 1:
+                model = self._get_model(bboxes[0], const_list)
+                sp, lp, flags = pyfes.evaluate_tide(model, times_utc, lons_norm, lats)
+            else:
+                sp = np.full(total_rows, np.nan, dtype=np.float32)
+                lp = np.full(total_rows, np.nan, dtype=np.float32)
+                flags = np.zeros(total_rows, dtype=np.int8)
+                for cur_box in bboxes:
+                    cur_mask = (lons_norm >= cur_box[0] - 1e-6) & (lons_norm <= cur_box[2] + 1e-6)
+                    if np.any(cur_mask):
+                        cur_model = self._get_model(cur_box, const_list)
+                        s_sub, l_sub, f_sub = pyfes.evaluate_tide(cur_model, times_utc[cur_mask], lons_norm[cur_mask], lats[cur_mask])
+                        sp[cur_mask] = s_sub
+                        lp[cur_mask] = l_sub
+                        flags[cur_mask] = f_sub
 
             df_out['tide_short_period_cm'] = sp
             df_out['tide_long_period_cm'] = lp
@@ -518,8 +527,8 @@ class FESTidePredictor:
         tide_matrix = np.full((n_pts, n_times), np.nan, dtype=np.float32)
         flag_matrix = np.zeros((n_pts, n_times), dtype=np.int8)
 
-        # 检查空间跨度是否集中在局部
-        lon_span = np.ptp(lons_norm) if n_pts > 1 else 0.0
+        # 检查空间跨度是否集中在局部 (环形圆周感知)
+        lon_span, _, _ = circular_longitude_span(lons_norm) if n_pts > 1 else (0.0, 0.0, 0.0)
         lat_span = np.ptp(lats_arr) if n_pts > 1 else 0.0
 
         if lon_span <= 8.0 and lat_span <= 8.0:
@@ -534,39 +543,42 @@ class FESTidePredictor:
         for c_idx, point_indices in enumerate(chunks):
             sub_lons = lons_norm[point_indices]
             sub_lats = lats_arr[point_indices]
-            m_sub = len(point_indices)
 
-            chunk_bbox = (
-                float(np.min(sub_lons)) - 0.5,
-                max(-90.0, float(np.min(sub_lats)) - 0.5),
-                float(np.max(sub_lons)) + 0.5,
-                min(90.0, float(np.max(sub_lats)) + 0.5)
-            )
-            model = self._get_model(chunk_bbox, const_list)
+            # 环形感知局部 BBox 划分 (消除 0°/360° 跨界造成的近全球大 BBox)
+            bboxes = build_circular_fes_bboxes(sub_lons, sub_lats, buffer_deg=0.5)
 
-            # 时间分块：使得 m_sub * t_chunk_len <= max_fes_evaluate_points
-            max_eval = max(10000, int(max_fes_evaluate_points))
-            t_chunk_len = max(1, max_eval // m_sub)
-            n_t_chunks = int(np.ceil(n_times / t_chunk_len))
+            for cur_bbox in bboxes:
+                in_box = (sub_lons >= cur_bbox[0] - 1e-6) & (sub_lons <= cur_bbox[2] + 1e-6)
+                if not np.any(in_box):
+                    continue
 
-            for tc in range(n_t_chunks):
-                t_s = tc * t_chunk_len
-                t_e = min(t_s + t_chunk_len, n_times)
-                sub_dates = dates_np[t_s:t_e]
-                cur_t_len = len(sub_dates)
+                sub_box_lons = sub_lons[in_box]
+                sub_box_lats = sub_lats[in_box]
+                m_sub_box = len(sub_box_lons)
+                global_sub_indices = point_indices[in_box]
 
-                rep_lons = np.repeat(sub_lons, cur_t_len)
-                rep_lats = np.repeat(sub_lats, cur_t_len)
-                rep_dates = np.tile(sub_dates, m_sub)
+                model = self._get_model(cur_bbox, const_list)
 
-                sp, lp, flags = pyfes.evaluate_tide(model, rep_dates, rep_lons, rep_lats)
-                tot_m = (sp + lp) / 100.0
+                # 时间分块：使得 m_sub_box * t_chunk_len <= max_fes_evaluate_points
+                max_eval = max(10000, int(max_fes_evaluate_points))
+                t_chunk_len = max(1, max_eval // m_sub_box)
+                n_t_chunks = int(np.ceil(n_times / t_chunk_len))
 
-                tot_reshaped = tot_m.reshape(m_sub, cur_t_len)
-                flags_reshaped = flags.reshape(m_sub, cur_t_len)
+                for tc in range(n_t_chunks):
+                    t_s = tc * t_chunk_len
+                    t_e = min(t_s + t_chunk_len, n_times)
+                    sub_dates = dates_np[t_s:t_e]
+                    cur_t_len = len(sub_dates)
 
-                tide_matrix[point_indices, t_s:t_e] = tot_reshaped
-                flag_matrix[point_indices, t_s:t_e] = flags_reshaped
+                    rep_lons = np.repeat(sub_box_lons, cur_t_len)
+                    rep_lats = np.repeat(sub_box_lats, cur_t_len)
+                    rep_dates = np.tile(sub_dates, m_sub_box)
+
+                    sp, lp, flags = pyfes.evaluate_tide(model, rep_dates, rep_lons, rep_lats)
+                    tot_m = (sp + lp) / 100.0
+
+                    tide_matrix[global_sub_indices, t_s:t_e] = tot_m.reshape(m_sub_box, cur_t_len)
+                    flag_matrix[global_sub_indices, t_s:t_e] = flags.reshape(m_sub_box, cur_t_len)
 
             if progress_callback:
                 pct = int(10 + 85 * (c_idx + 1) / total_chunks)
@@ -626,26 +638,28 @@ class FESTidePredictor:
 
         lons_norm = np.array([normalize_longitude(x, to_360=True) for x in lons_arr], dtype=float)
 
-        # 环形感知 BBox
-        span, arc_start, arc_end = circular_longitude_span(lons_norm)
-        if span <= 180.0 and arc_end >= arc_start:
-            bbox_lon_min = arc_start - buf
-            bbox_lon_max = arc_end + buf
-        else:
-            bbox_lon_min = float(np.min(lons_norm)) - buf
-            bbox_lon_max = float(np.max(lons_norm)) + buf
-
-        chunk_bbox = (
-            bbox_lon_min,
-            max(-90.0, float(np.min(lats_arr)) - buf),
-            bbox_lon_max,
-            min(90.0, float(np.max(lats_arr)) + buf)
-        )
-
-        model = self._get_model(chunk_bbox, const_list)
+        # 环形圆周感知 BBox 划分 (消除 0°/360° 跨界造成的近全球大 BBox)
+        bboxes = build_circular_fes_bboxes(lons_norm, lats_arr, buffer_deg=buf)
         times_arr = np.full(n_pts, ts_utc_us)
 
-        sp, lp, flags = pyfes.evaluate_tide(model, times_arr, lons_norm, lats_arr)
+        if len(bboxes) == 1:
+            model = self._get_model(bboxes[0], const_list)
+            sp, lp, flags = pyfes.evaluate_tide(model, times_arr, lons_norm, lats_arr)
+        else:
+            sp = np.full(n_pts, np.nan, dtype=np.float32)
+            lp = np.full(n_pts, np.nan, dtype=np.float32)
+            flags = np.zeros(n_pts, dtype=np.int8)
+            for cur_bbox in bboxes:
+                in_box = (lons_norm >= cur_bbox[0] - 1e-6) & (lons_norm <= cur_bbox[2] + 1e-6)
+                if np.any(in_box):
+                    cur_model = self._get_model(cur_bbox, const_list)
+                    s_sub, l_sub, f_sub = pyfes.evaluate_tide(
+                        cur_model, times_arr[in_box], lons_norm[in_box], lats_arr[in_box]
+                    )
+                    sp[in_box] = s_sub
+                    lp[in_box] = l_sub
+                    flags[in_box] = f_sub
+
         tide_total_m = ((sp + lp) / 100.0).astype(np.float32)
         return tide_total_m, flags
 
@@ -669,6 +683,9 @@ class SyntheticTidePredictor:
         base_mean: float = 0.0,
         gradient_x: float = None,
         gradient_y: float = None,
+        valid_lon_range: Optional[Tuple[float, float]] = None,
+        valid_lat_range: Optional[Tuple[float, float]] = None,
+        validity_func: Optional[Any] = None,
         **kwargs
     ):
         if base_amp is not None:
@@ -687,13 +704,33 @@ class SyntheticTidePredictor:
         self.ref_lat = float(ref_lat)
         self.default_freq = str(default_freq)
         self.default_constituents = ['M2', 'S2']
+        self.valid_lon_range = valid_lon_range
+        self.valid_lat_range = valid_lat_range
+        self.validity_func = validity_func
+
+    def _is_valid_point(self, xs, ys):
+        xs_arr = np.asarray(xs, dtype=float)
+        ys_arr = np.asarray(ys, dtype=float)
+        valid = np.ones(xs_arr.shape, dtype=bool)
+        if self.valid_lon_range is not None:
+            valid &= (xs_arr >= self.valid_lon_range[0]) & (xs_arr <= self.valid_lon_range[1])
+        if self.valid_lat_range is not None:
+            valid &= (ys_arr >= self.valid_lat_range[0]) & (ys_arr <= self.valid_lat_range[1])
+        if self.validity_func is not None:
+            valid &= np.asarray(self.validity_func(xs_arr, ys_arr), dtype=bool)
+        return valid
 
     def _eval_h(self, lons, lats, t_hours):
         dx = np.asarray(lons, dtype=float) - self.ref_lon
         dy = np.asarray(lats, dtype=float) - self.ref_lat
         spatial_offset = self.alpha_x * dx + self.beta_y * dy + self.gamma_nonlinear * (dx**2 + dy**2)
         omega = 2.0 * np.pi / self.period_hours
-        return self.base_mean + self.base_amplitude * np.cos(omega * t_hours) + spatial_offset
+        val = self.base_mean + self.base_amplitude * np.cos(omega * t_hours) + spatial_offset
+
+        valid_mask = self._is_valid_point(lons, lats)
+        if not np.all(valid_mask):
+            val = np.where(valid_mask, val, np.nan)
+        return val
 
     def predict_spatial_snapshot(
         self,
@@ -710,9 +747,8 @@ class SyntheticTidePredictor:
 
         lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
         lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
-        n_pts = len(lons_arr)
         tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
-        flags = np.ones(n_pts, dtype=np.int8)
+        flags = np.where(np.isfinite(tide_m), 1, 0).astype(np.int8)
         return tide_m, flags
 
     def predict_points_period(
@@ -744,7 +780,12 @@ class SyntheticTidePredictor:
 
         cos_t = np.cos(omega * t_hours) * self.base_amplitude
         tide_mat = (self.base_mean + spatial_offsets[:, np.newaxis]) + cos_t[np.newaxis, :]
-        flag_mat = np.ones((m, t), dtype=np.int8)
+
+        valid_mask = self._is_valid_point(lons_arr, lats_arr)
+        if not np.all(valid_mask):
+            tide_mat[~valid_mask, :] = np.nan
+
+        flag_mat = np.where(np.isfinite(tide_mat), 1, 0).astype(np.int8)
         return tide_mat.astype(np.float32), utc_idx, flag_mat
 
     def predict_series(
@@ -791,6 +832,98 @@ class SyntheticTidePredictor:
         start = f"{int(year):04d}-01-01 00:00:00"
         end = f"{int(year)+1:04d}-01-01 00:00:00"
         return self.predict_series(lon, lat, start, end, freq=freq, inclusive=inclusive, source_tz=source_tz)
+
+
+class TwoBasinSyntheticPredictor(SyntheticTidePredictor):
+    """
+    双水体盆地合成预测器 (用于验证阻隔水体拓扑连通防护与跨盆地无污染插值)。
+    左盆地: x < barrier_x_min, mean sea level = left_msl (默认 +1.5m)
+    右盆地: x > barrier_x_max, mean sea level = right_msl (默认 -1.5m)
+    中间阻隔带: barrier_x_min <= x <= barrier_x_max, 严格为 NaN (陆地屏障)
+    """
+    def __init__(
+        self,
+        barrier_x_min: float = 500300.0,
+        barrier_x_max: float = 500700.0,
+        left_msl: float = 1.5,
+        right_msl: float = -1.5,
+        base_amplitude_m: float = 0.5,
+        period_hours: float = 12.0,
+        **kwargs
+    ):
+        if 'barrier_lon_left' in kwargs:
+            barrier_x_min = kwargs.pop('barrier_lon_left')
+        if 'barrier_lon_right' in kwargs:
+            barrier_x_max = kwargs.pop('barrier_lon_right')
+        if 'left_mean' in kwargs:
+            left_msl = kwargs.pop('left_mean')
+        if 'right_mean' in kwargs:
+            right_msl = kwargs.pop('right_mean')
+        super().__init__(
+            base_amplitude_m=base_amplitude_m,
+            period_hours=period_hours,
+            alpha_x=0.0,
+            beta_y=0.0,
+            gamma_nonlinear=0.0,
+            **kwargs
+        )
+        self.barrier_x_min = float(barrier_x_min)
+        self.barrier_x_max = float(barrier_x_max)
+        self.left_msl = float(left_msl)
+        self.right_msl = float(right_msl)
+
+    def _is_valid_point(self, xs, ys):
+        xs_arr = np.asarray(xs, dtype=float)
+        return (xs_arr < self.barrier_x_min) | (xs_arr > self.barrier_x_max)
+
+    def _eval_h(self, lons, lats, t_hours):
+        xs = np.asarray(lons, dtype=float)
+        ys = np.asarray(lats, dtype=float)
+        omega = 2.0 * np.pi / self.period_hours
+        tide_osc = self.base_amplitude * np.cos(omega * t_hours)
+
+        out = np.full(xs.shape, np.nan, dtype=float)
+        mask_left = xs < self.barrier_x_min
+        mask_right = xs > self.barrier_x_max
+
+        out[mask_left] = self.left_msl + tide_osc
+        out[mask_right] = self.right_msl + tide_osc
+        return out
+
+    def predict_points_period(
+        self,
+        lons,
+        lats,
+        start_time,
+        end_time,
+        freq='30min',
+        inclusive='both',
+        constituents=None,
+        source_tz='UTC',
+        max_fes_evaluate_points=500000,
+        progress_callback=None
+    ) -> tuple[np.ndarray, pd.DatetimeIndex, np.ndarray]:
+        _, utc_idx, dates_np = build_time_index(start_time, end_time, freq, source_tz=source_tz, inclusive=inclusive)
+        t_sec = dates_np.astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        m = len(lons_arr)
+        t = len(dates_np)
+
+        omega = 2.0 * np.pi / self.period_hours
+        cos_t = np.cos(omega * t_hours) * self.base_amplitude
+
+        offsets = np.full(m, np.nan, dtype=float)
+        mask_left = (lons_arr < self.barrier_x_min)
+        mask_right = (lons_arr > self.barrier_x_max)
+        offsets[mask_left] = self.left_msl
+        offsets[mask_right] = self.right_msl
+
+        tide_mat = offsets[:, np.newaxis] + cos_t[np.newaxis, :]
+        flag_mat = np.where(np.isfinite(tide_mat), 1, 0).astype(np.int8)
+        return tide_mat.astype(np.float32), utc_idx, flag_mat
 
 
 

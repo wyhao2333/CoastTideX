@@ -342,7 +342,7 @@ CoastTideX/
 │   ├── settings_dialog.py          # Data source path configuration dialog & deep file validation
 │   └── styles.py                   # High-contrast dark QSS stylesheet
 └── tests/                          # Automated unit and integration test suite
-    └── test_engines.py             # Comprehensive 41-test suite (full FES chain, adaptive quadtree, leap year, raster engine, closures)
+    └── test_engines.py             # Comprehensive 47-test suite (full FES chain, adaptive quadtree, barrier isolation, leap year, raster engine, closures)
 ```
 
 ---
@@ -360,18 +360,18 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 
 ### v1.4 (2026-09)
 * **[Major Upgrade] Spatial Raster Tide Engine (RasterTideEngine)**: Integrated `core/raster_engine.py` for any CRS-enabled GeoTIFF, evaluating 2D spatially varying sea surface heights with strict pixel-center alignment (`offset='center'`) and 512×512 atomic window streaming;
-* **[Algorithmic Breakthrough] Adaptive Tide Control Grid**: Solved the intractable computational barrier of multi-billion pixel evaluations on 10m/30m coastal DEMs by placing sparse adaptive quadtree control nodes (default 4km) with topological connectivity guards, evaluating batch time series, and applying IDW spatial interpolation with vectorized CCDF to stream potential astronomical inundation frequencies (0% ~ 100%);
+* **[Algorithmic Breakthrough] Adaptive Quadtree Control Grid**: Solved the intractable computational barrier of multi-billion pixel evaluations on 10m/30m coastal DEMs by dynamically refining adaptive quadtree control nodes with valid-mask topological connectivity guards, evaluating batch time series, and applying localized pre-sorted CCDF binary search with bilinear spatial interpolation to stream potential astronomical inundation frequencies (0% ~ 100%) and UInt16 quality masks;
 * **[Geodetic Rigor & Mask Priority]**: Priority matching against CNES official `hybrid_mdt_source_mask.tif` (canonical 0/1/2/3/255 categories) with projected CRS reprojection and polygon fallback; strict array dimension broadcast enforcement; decoupled EGM2008 and WGS84 raster dependencies;
 * **[GUI Dedicated Raster Tide Panel (Tab 3)]**: Added dedicated Raster Tide & Inundation tab featuring interactive GeoTIFF metadata cards, Snapshot vs. Inundation mode panels, adaptive grid spacing controls, progress bar, and cancellation support;
 * **[Decoupled Compute vs. Display Datums]**: GUI supports computing in one vertical datum and displaying another; auto-recommends 30-min interval upon toggling Year Mode with user memory;
 * **[Deep Settings Validation]**: Settings dialog incorporates deep format validation for NetCDF and GeoTIFFs, with unified reset keys;
 * **[Expanded CLI Suite]**: Added `raster snapshot` and `raster inundation` subcommands; refactored `scripts/calculate_inundation_raster.py` into a thin CLI wrapper;
-* **[Comprehensive Test Suite Expansion to 41 Tests]**: Added adaptive quadtree dynamic subdivision growth, minimum spacing termination & QC bit 32, topological connectivity barrier isolation, canonical mask 5-category handling, projected CRS source mask reprojection, circular longitude wrapping across 0°/180°, unit factor scaling (meters/feet), and end-to-end synthetic oracle validation (41/41 passing).
+* **[Comprehensive Test Suite Expansion to 47 Tests]**: Added adaptive quadtree dynamic subdivision growth, minimum spacing termination & QC bit 32, topological connectivity barrier isolation, canonical mask 5-category handling, projected CRS source mask reprojection, circular longitude wrapping across 0°/180°, unit factor scaling (meters/feet), and end-to-end synthetic oracle validation, circular split BBoxes, two-basin cross-barrier isolation oracle, validity-boundary refinement & edge probing, physical-scale topology downsampling barrier preservation, level-wise batching efficiency, and max_fes_evaluate_points passing (47/47 passing).
 
 ### v1.3 (2026-09)
 * **[Annual Mode & Long Time-Series]** Added Year Mode toggle with strict $[start, end)$ half-open interval, generating exactly **17,568** samples for leap year 2024 at 30-min cadence (17,520 for standard years), with dynamic sample budget estimation and coordinate validation;
 * **[Adaptive Time-Chunking Engine]** Implemented 5,000-point dynamic chunking with real-time per-slice progress callback in the tide engine, validated across 2-year continuous stress testing (35,089 timestamps) with zero memory/UI stalls;
-* **[Dual-Geoid Hybrid MDT]** Rigorously separated open oceans (GOCO06s) and Mediterranean/Black Sea (EIGEN-6C4) geodetic reference datums; introduced unified primary variable `h_mdt_ref_m`; strictly enforces `NaN` for `h_goco06s_m` in European hybrid zones to prevent datum spoofing; bundled `data/geoid/delta_n_eigen6c4_minus_egm2008.tif`;
+* **[Dual-Geoid Hybrid MDT]** Rigorously separated open oceans (GOCO06s) and Mediterranean/Black Sea (EIGEN-6C4) geodetic reference datums; introduced unified primary variable `h_mdt_ref_m`; strictly enforces `NaN` for `h_goco06s_m` in European hybrid zones to prevent datum spoofing; supports configuring external `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` (strict=True raises DatumDataError when missing, strict=False assigns NaN);
 * **[High-Precision Closed Polygon Masks]** Implemented `matplotlib.path.Path` closed boundary polygons for the Mediterranean and Black Sea, eliminating rectangular BBox misclassification in the Gulf of Cadiz, Portugal, Bay of Biscay, and Red Sea;
 * **[Potential Inundation Frequency Analysis & 10m DEM Tool]** Added `compute_inundation_frequency` vectorized complementary empirical cumulative distribution function (CCDF) and released `scripts/calculate_inundation_raster.py` for block-streaming 10m/30m coastal DEMs into annual potential astronomical inundation GeoTIFFs;
 * **[GUI Performance & Big Data Safety]** Capped table preview to 2,000 rows while preserving 100% full dataset export for CSV/Excel; added chart decimation and adaptive peak/trough text labeling thresholds for responsive navigation across 10,000+ points;

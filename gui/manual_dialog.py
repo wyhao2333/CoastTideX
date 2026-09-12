@@ -62,9 +62,9 @@ MANUAL_HTML = """
 
 <div class="callout-warn">
 <b>⚠️ 科学严密性提醒 (大地水准面差值改正与双水准面体系)：</b><br>
-CNES-CLS22 MDT 的参考重力场在大洋为 <b>GOCO06s (d/o=800)</b>，而在地中海与黑海为 <b>EIGEN-6C4 (d/o=2190)</b>，绝非 EGM2008！全球范围内水准面差距（ΔN）在 -6.6m ~ +6.8m 之间。<br>
-CoastTideX v1.4 优先读取官方 <code>hybrid_mdt_source_mask.tif</code> 掩膜，辅以闭合矢量多边形判定，杜绝加的斯湾、直布罗陀海峡西口、比斯开湾与红海被误判。<br>
-在 EIGEN-6C4 区域，<code>h_goco06s_m</code> 字段严格赋予 NaN（不冒充），系统内置 <code>data/geoid/delta_n_eigen6c4_minus_egm2008.tif</code> 差值文件支持无缝高精度换算至 EGM2008，并给出质量提示 <code>QC_MED_BLACK_SEA_EIGEN6C4</code>。
+CNES-CLS22 MDT 的参考重力场在大洋为 <b>GOCO06s (d/o=300)</b>，而在地中海与黑海为 <b>EIGEN-6C4 (d/o=2190)</b>，绝非 EGM2008！全球范围内水准面差距（ΔN）在 -6.6m ~ +6.8m 之间。<br>
+CoastTideX v1.4 优先读取可选官方 <code>hybrid_mdt_source_mask.tif</code> 掩膜（若未配置则平滑回退至精细闭合矢量多边形判别，并显式标记 <code>QC_DATUM_SOURCE_APPROX</code> 质量预警），杜绝加的斯湾、直布罗陀海峡西口、比斯开湾与红海被误判。<br>
+在 EIGEN-6C4 区域，<code>h_goco06s_m</code> 字段严格赋予 NaN（坚决不冒充 GOCO06s）；若需换算至 EGM2008/WGS84，可配置外部权威 <code>data/geoid/delta_n_eigen6c4_minus_egm2008.tif</code> 差值文件（支持通过 <code>scripts/generate_delta_n.py</code> 本地生成）；未配置该外部差值文件时，严格模式 (strict=True) 明确抛出异常，非严格模式返回 NaN。
 </div>
 
 <h2>二、 时区规范与长时序/整年高分辨率预测</h2>
@@ -148,7 +148,7 @@ CoastTideX v1.4 正式引入工业级空间栅格潮位引擎 (<code>RasterTideE
     <li><b>[新增] GUI 栅格潮位专用面板 (Tab 3)</b>：提供 GeoTIFF 元数据检视卡、快照/淹没双模式面板、自适应网格参数配置、进度条与中途取消支持；</li>
     <li><b>[优化] 独立计算基准与展示基准</b>：GUI 单点计算区分计算基准与展示基准，切换整年时自动推荐 30min 步长并具备用户修改记忆；</li>
     <li><b>[CLI] 命令行全量扩展</b>：CLI 新增 <code>raster snapshot</code> 与 <code>raster inundation</code> 子命令；<code>scripts/calculate_inundation_raster.py</code> 升级为规范薄封装；</li>
-    <li><b>[测试] 单元测试套件扩展至 41 项全通过</b>：覆盖自适应四叉树动态细分、最小步长终止、拓扑连通防护、官方掩膜五类规范、投影重投影、经度圆周跨界、像元中心对齐、快照与 CCDF 离线预言机及全链路集成。</li>
+    <li><b>[测试] 单元测试套件扩展至 47 项全通过</b>：覆盖自适应四叉树动态细分、最小步长终止、拓扑连通防护、官方掩膜五类规范、投影重投影、经度圆周跨界、像元中心对齐、快照与 CCDF 离线预言机及全链路集成。</li>
 </ul>
 
 <h3>v1.3 (2026-09)</h3>

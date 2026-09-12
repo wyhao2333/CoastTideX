@@ -44,13 +44,14 @@ from core.datum_engine import (
     get_mdt_reference_geoid, is_mediterranean_or_black_sea,
     _broadcast_pointwise_inputs
 )
-from core.tide_engine import FESTidePredictor, SyntheticTidePredictor
+from core.tide_engine import FESTidePredictor, SyntheticTidePredictor, TwoBasinSyntheticPredictor
 from core.raster_engine import (
     RasterTideEngine, RasterInfo, ControlNode,
     QC_VALID, QC_FES_EXTRAPOLATED, QC_SPATIAL_FALLBACK, QC_INSUFFICIENT_NODES,
     QC_BIT_VALID, QC_BIT_MIN_SPACING_REACHED, QC_BIT_DATUM_SOURCE_APPROX,
     QC_BIT_FES_EXTRAPOLATED, QC_BIT_SPATIAL_FALLBACK, QC_BIT_DATUM_INVALID,
-    QC_BIT_CONNECTIVITY_FALLBACK, QC_BIT_INSUFFICIENT_NODES
+    QC_BIT_CONNECTIVITY_FALLBACK, QC_BIT_INSUFFICIENT_NODES,
+    QC_BIT_FES_VALIDITY_BOUNDARY, QC_BIT_MAX_REFINEMENT_REACHED
 )
 from core.utils import (
     normalize_longitude, COASTAL_PRESETS,
@@ -58,7 +59,8 @@ from core.utils import (
     PROJECT_ROOT, get_resource_root, get_app_root,
     validate_coordinates, validate_time_params,
     build_time_index, compute_inundation_frequency,
-    extract_scalar_metadata, convert_time_to_utc, circular_longitude_span
+    extract_scalar_metadata, convert_time_to_utc, circular_longitude_span,
+    build_circular_fes_bboxes
 )
 
 try:
@@ -993,6 +995,242 @@ class TestCoastTideX(unittest.TestCase):
             )
             self.assertTrue(os.path.exists(out_inund))
             self.assertEqual(inund_sum.valid_pixels, 400)
+
+    # 42. Test M: 验证跨 0°/360° 本初子午线的紧致双 BBox 拆分与紧致跨度计算
+    def test_circular_fes_bboxes_and_span(self):
+        # 1. 跨越 0°/360° 本初子午线点集
+        lons_cross = np.array([-1.0, 1.0, 359.5])
+        lats_cross = np.array([51.0, 52.0, 51.5])
+        span, arc_start, arc_end = circular_longitude_span(lons_cross)
+        self.assertLess(span, 5.0)  # 跨度约 2.0~2.5 度，而非 358 度
+
+        bboxes = build_circular_fes_bboxes(lons_cross, lats_cross, buffer_deg=0.5)
+        self.assertEqual(len(bboxes), 2)
+        for (b_lon_min, b_lat_min, b_lon_max, b_lat_max) in bboxes:
+            self.assertGreaterEqual(b_lon_min, 0.0)
+            self.assertLessEqual(b_lon_max, 360.0)
+            self.assertGreaterEqual(b_lat_min, 50.0)
+            self.assertLessEqual(b_lat_max, 53.0)
+            self.assertLess(b_lon_max - b_lon_min, 5.0)
+
+        # 2. 正常单区域无跨越
+        lons_norm = np.array([120.0, 120.5])
+        lats_norm = np.array([30.0, 30.5])
+        span_norm, _, _ = circular_longitude_span(lons_norm)
+        self.assertAlmostEqual(span_norm, 0.5, places=4)
+        bboxes_norm = build_circular_fes_bboxes(lons_norm, lats_norm, buffer_deg=0.5)
+        self.assertEqual(len(bboxes_norm), 1)
+        self.assertAlmostEqual(bboxes_norm[0][0], 119.5, places=4)
+        self.assertAlmostEqual(bboxes_norm[0][2], 121.0, places=4)
+
+    # 43. Test N: 验证双水体盆地阻隔带 (TwoBasinSyntheticPredictor) 跨屏障隔离与 100%/0% Oracle
+    def test_two_basin_cross_barrier_oracle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_two_basin.tif")
+            out_inund = os.path.join(temp_dir, "out_inund_two_basin.tif")
+
+            width, height = 40, 20
+            transform = from_origin(120.0, 30.2, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            # 屏障经度处于 120.155 ~ 120.245
+            # 左盆地: left_msl = 1.5m, amp = 0.5m -> 水位 [1.0, 2.0] > 0m (100% 淹没)
+            # 右盆地: right_msl = -1.5m, amp = 0.5m -> 水位 [-2.0, -1.0] < 0m (0% 淹没)
+            predictor = TwoBasinSyntheticPredictor(
+                barrier_x_min=120.155,
+                barrier_x_max=120.245,
+                left_msl=1.5,
+                right_msl=-1.5,
+                base_amplitude_m=0.5,
+                period_hours=12.0
+            )
+            engine = RasterTideEngine(
+                tide_predictor=predictor,
+                initial_control_spacing_m=1000.0,
+                min_control_spacing_m=200.0,
+                inundation_error_tolerance_pct=1.0
+            )
+
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path,
+                output_path=out_inund,
+                start_time="2024-01-01 00:00:00",
+                end_time="2024-01-01 06:00:00",
+                freq="1h",
+                dem_datum='msl',
+                inclusive='both'
+            )
+
+            self.assertTrue(os.path.exists(out_inund))
+            with rasterio.open(out_inund) as src:
+                arr = src.read(1)
+                # 左盆地 (col 0..14): 严格 100.0%
+                left_vals = arr[:, :14]
+                self.assertTrue(np.allclose(left_vals[np.isfinite(left_vals)], 100.0, atol=1e-2))
+                # 右盆地 (col 26..39): 严格 0.0%
+                right_vals = arr[:, 26:]
+                self.assertTrue(np.allclose(right_vals[np.isfinite(right_vals)], 0.0, atol=1e-2))
+                # 阻隔带内部 (col 17..23): 严格为 NaN (无跨屏障污染插值)
+                barrier_vals = arr[:, 17:23]
+                self.assertTrue(np.isnan(barrier_vals).all())
+
+    # 44. Test O: 验证 FES 有效性突变区域四叉树自适应细分、边缘探测与 QC 掩膜生成
+    def test_fes_validity_boundary_refinement_and_probing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_boundary.tif")
+            out_path = os.path.join(temp_dir, "out_boundary.tif")
+            out_qc = os.path.join(temp_dir, "out_boundary_qc.tif")
+
+            width, height = 200, 100
+            transform = from_origin(120.0, 30.1, 0.0005, 0.0005)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            # 1. 突变边界细分检验: 在经度 120.05 处存在刚性有效/无效跃变
+            pred_boundary = SyntheticTidePredictor(valid_lon_range=(120.0, 120.05))
+            engine = RasterTideEngine(
+                tide_predictor=pred_boundary,
+                initial_control_spacing_m=4000.0,
+                min_control_spacing_m=500.0
+            )
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_path, qc_output_path=out_qc,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                freq="1h", dem_datum='msl', inclusive='both'
+            )
+
+            self.assertEqual(int(summary.metadata['MAX_REFINEMENT_LEVEL_USED']), 3)
+            with rasterio.open(out_qc) as src:
+                qc_arr = src.read(1)
+                boundary_count = int(np.count_nonzero(qc_arr & QC_BIT_FES_VALIDITY_BOUNDARY))
+                self.assertGreater(boundary_count, 0)
+                min_spacing_count = int(np.count_nonzero(qc_arr & QC_BIT_MIN_SPACING_REACHED))
+                self.assertGreater(min_spacing_count, 0)
+
+            # 2. 边缘探针探测检验: 四角与中心无效，但边缘中点有效
+            def probe_validity(xs, ys):
+                xs = np.asarray(xs, dtype=float)
+                ys = np.asarray(ys, dtype=float)
+                return (xs > 120.01) & (xs < 120.03) & (ys > 30.09)
+
+            pred_probe = SyntheticTidePredictor(validity_func=probe_validity)
+            engine_probe = RasterTideEngine(
+                tide_predictor=pred_probe,
+                initial_control_spacing_m=4000.0,
+                min_control_spacing_m=500.0
+            )
+            out_probe = os.path.join(temp_dir, "out_probe.tif")
+            sum_probe = engine_probe.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_probe,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                freq="1h", dem_datum='msl', inclusive='both'
+            )
+            self.assertEqual(int(sum_probe.metadata['MAX_REFINEMENT_LEVEL_USED']), 3)
+
+    # 45. Test P: 验证物理尺度拓扑连通域降采样 (downsample_factor > 1) 屏障保护与阈值判定
+    def test_topology_downsampling_barrier_preservation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_topo_barrier.tif")
+            out_path = os.path.join(temp_dir, "out_topo_barrier.tif")
+
+            # 10m 分辨率，高 50 宽 100，拓扑网格降采样因数为 10 (100m)
+            width, height = 100, 50
+            transform = from_origin(500000.0, 3400000.0, 10.0, 10.0)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+            # 在 40..60 列设置 200m 宽的陆地 NoData 阻隔屏障
+            dem_data[:, 40:60] = -9999.0
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:32651', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            pred = SyntheticTidePredictor()
+            engine = RasterTideEngine(
+                tide_predictor=pred,
+                topology_max_resolution_m=100.0,
+                topology_valid_fraction_threshold=0.5
+            )
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_path,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                freq="1h", dem_datum='msl', inclusive='both'
+            )
+            self.assertEqual(int(summary.metadata['TOPOLOGY_COMPONENT_COUNT']), 2)
+
+    # 46. Test Q: 验证四叉树逐层批量解算 (Level-wise Batched FES) 显著降低调用开销
+    def test_quadtree_level_wise_batching_efficiency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_batch_test.tif")
+            out_path = os.path.join(temp_dir, "out_batch_test.tif")
+
+            width, height = 100, 100
+            transform = from_origin(120.0, 30.1, 0.0005, 0.0005)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            pred = SyntheticTidePredictor(valid_lon_range=(120.0, 120.03))
+            engine = RasterTideEngine(
+                tide_predictor=pred,
+                initial_control_spacing_m=4000.0,
+                min_control_spacing_m=500.0,
+                control_node_batch_size=128
+            )
+            summary = engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_path,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 06:00:00",
+                freq="1h", dem_datum='msl', inclusive='both'
+            )
+            predict_calls = int(summary.metadata['FES_PREDICT_CALLS'])
+            total_evaluated_nodes = int(summary.metadata['FES_CONTROL_NODES_EVALUATED'])
+            self.assertGreater(total_evaluated_nodes, 40)
+            # 批量解算下调用次数远小于节点数 (O(levels) 级别，不超过 15 次)
+            self.assertLessEqual(predict_calls, 15)
+
+    # 47. Test R: 验证 max_fes_evaluate_points 参数正确传递至时序预测器
+    def test_max_fes_evaluate_points_configuration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dem_path = os.path.join(temp_dir, "dem_param.tif")
+            out_path = os.path.join(temp_dir, "out_param.tif")
+
+            width, height = 10, 10
+            transform = from_origin(120.0, 30.1, 0.01, 0.01)
+            dem_data = np.zeros((height, width), dtype=np.float32)
+
+            with rasterio.open(
+                dem_path, 'w', driver='GTiff', width=width, height=height, count=1,
+                dtype='float32', crs='EPSG:4326', transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(dem_data, 1)
+
+            real_pred = SyntheticTidePredictor()
+            pred_spy = MagicMock(wraps=real_pred)
+            engine = RasterTideEngine(tide_predictor=pred_spy, max_fes_evaluate_points=77777)
+            engine.calculate_inundation_raster(
+                dem_path=dem_path, output_path=out_path,
+                start_time="2024-01-01 00:00:00", end_time="2024-01-01 02:00:00",
+                freq="1h", dem_datum='msl', inclusive='both'
+            )
+            self.assertTrue(pred_spy.predict_points_period.called)
+            kwargs_passed = [call.kwargs for call in pred_spy.predict_points_period.call_args_list]
+            self.assertEqual(kwargs_passed[0].get('max_fes_evaluate_points'), 77777)
 
 
 if __name__ == '__main__':
