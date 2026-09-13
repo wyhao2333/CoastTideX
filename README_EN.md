@@ -1,7 +1,7 @@
 # CoastTideX: High-Precision Global Coastal Tide Simulation & Vertical Datum System
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.4-blue.svg" alt="Release v1.4">
+  <img src="https://img.shields.io/badge/Release-v1.5--alpha-blue.svg" alt="Release v1.5-alpha">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -357,6 +357,15 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 > `build_exe.bat` serves as a release reference script for Windows environments containing essential hidden import definitions. Validation on a target clean release environment is recommended before formal distribution.
 
 ## 📝 Changelog
+
+### v1.5 Alpha (2026-09)
+* **[Feature] Batch Intertidal Raster Engine (BatchRasterEngine)**: Automated folder scanning, filtering, and deterministic sorting with sequential tile processing (`max_parallel_tiles = 1`);
+* **[Feature] Persistent NetCDF4 Tide Cache (*_tide.nc)**: Decouples Stage 1 (FES control grid solving) and Stage 2 (Cache-driven inundation frequency), guaranteeing zero FES calls during Stage 2;
+* **[Feature] Single-Tile Failure Isolation & Manifest-Driven Resume**: `batch_manifest.json` and `.csv` track tile state machine; isolates single-file failures and resumes `TIDE_READY` tiles without recalculating tides;
+* **[Algorithm] Target-Aware Intertidal Refinement**: `target_mode="intertidal"` optimizes quadtree refinement based on DEM target elevation errors rather than purely land/ocean discontinuity;
+* **[Audit] Local FES2022b Package Read-Only Audit**: Fully audited local package (`docs/FES2022B_LOCAL_AUDIT_V1_5.md`), explicitly disabling compressed XZ extrapolated fallback in Phase 1;
+* **[GUI/CLI] Batch Tab and CLI Commands**: Added dedicated Batch Intertidal tab in GUI and `raster batch` / `raster batch-intertidal` CLI subcommands;
+* **[Testing] Test Suite Expanded to 61 Tests**: Added 11 tests covering batch discovery, time sampling fidelity, Tide Cache round-trip, Stage 2 zero FES verification, spatial attribute inheritance, narrow strip refinement, failure isolation, resume state machine, and adjacent tile seam continuity (61/61 OK).
 
 ### v1.4 (2026-09)
 * **[Major Upgrade] Spatial Raster Tide Engine (RasterTideEngine)**: Integrated `core/raster_engine.py` for any CRS-enabled GeoTIFF, evaluating 2D spatially varying sea surface heights with strict pixel-center alignment (`offset='center'`) and 512×512 atomic window streaming;

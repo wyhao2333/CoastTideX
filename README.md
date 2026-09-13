@@ -1,7 +1,7 @@
 # CoastTideX: 全球海岸带高精度潮位模拟与高程基准转换系统
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.4-blue.svg" alt="Release v1.4">
+  <img src="https://img.shields.io/badge/Release-v1.5--alpha-blue.svg" alt="Release v1.5-alpha">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b">
@@ -22,14 +22,23 @@
 
 系统基于国际权威的法国 CNES/AVISO **FES2022b 全球海洋潮汐模型**（包含全部 34 个主分潮的非结构有限元三角形网格 LGP2 二阶多项式解），攻克了传统规则方格网在曲折复杂海岸线、河口湾区由于“阶梯锯齿误差”导致的潮位失真问题。同时，系统内嵌 **CNES-CLS22 全球平均动态地形 (MDT)** 模型与 **NGA EGM2008 2.5分超高精度大地水准面栅格**，实现了从**局部平均海平面 (MSL)** 到 **EGM2008 大地水准面绝对海拔高**的一键高精度无缝转换。
 
-**v1.4 引入空间栅格潮位引擎 (Release Candidate 候选版本)**：支持输入任意具备标准 CRS 的 GeoTIFF 影像，在指定时刻进行真空间变化的水面高程快照计算；针对沿海 10m/30m 高分辨率 DEM，创新引入**自适应潮位控制网格 (Adaptive Tide Control Grid)**，高效流式解算整年潜在天文潮淹没频率（0% ~ 100%）空间栅格。当前版本为代码完备的实测验证候选版本（Code-complete release candidate for real-world validation）。
+**v1.5 Alpha 批量潮间带栅格引擎 (Functional Prototype)**：在 v1.4 稳定单影像引擎基础上，针对全球狭长沙滩、沿海潮滩与潮间带 10m/30m 高分辨率 DEM，创新引入**文件夹级批量解算管线 (BatchRasterEngine)** 与**持久化 NetCDF Tide Cache**。严格执行「Stage 1: 控制网格 FES 解算并固化 Tide Cache → Stage 2: 基于 Cache 流式解算潜在天文潮淹没频率（零 FES 重复开销）」的二阶段架构，结合单瓦片失败隔离与断点恢复清单，实现大范围沙滩/潮滩 DEM 的高效无人值守批处理。本阶段定义为功能原型 (Functional Prototype)，保留 v1.4 单影像模块用于测试与对比验证。
 
 ---
 
 ### ✨ 核心特性 (Key Features)
 
 * 🌊 **FES2022b 原生非结构网格支持**：直读 3.77 GB 原生三角网格，在复杂海岸带具备最高空间保真度，支持全部 34 个全日潮、半日潮、浅海非线性潮与长周期平衡潮。
-* 🛰️ **空间栅格潮位引擎 (v1.4 Spatial Raster Engine, RC)**：
+* 🗂️ **批量潮间带栅格引擎与持久化 Tide Cache (v1.5 Alpha Batch Intertidal Raster Engine)**：
+  * **高分辨率 DEM 与平缓潮位场解耦**：全球大洋与近海天文潮位在公里级尺度 (~4km) 平缓演化，而潮滩沙滩微地貌在 10m 像元尺度急剧起伏。系统在四叉树宏观控制网格 (4km 初始，梯度区细分至 500m) 上批量解算 FES 潮位，在像元级逐点通过 `np.searchsorted` 快速索引 CCDF，严格保真 10m 地貌边界，杜绝盲目加密导致的算力内存崩溃；
+  * **严格二阶段执行 (Stage 1 / Stage 2 Decoupling)**：
+    * **Stage 1 (Tide Cache)**: 构建自适应控制网格，解算各控制节点时间序列，原子写入 `*_tide.nc` 持久化缓存（保存节点坐标、原始与 MSL 潮位、静态基准偏移、单元拓扑与 `CACHE_COMPLETE` 完整性标记）；
+    * **Stage 2 (Inundation)**: 仅依赖 Tide Cache 流式分块计算潜在天文潮淹没频率 (`*_inundation.tif`) 与质量位掩膜 (`*_inundation_qc.tif`)，**零 FES 重复调用**，解算速度极大提升；
+  * **单瓦片失败隔离 (Failure Isolation)**：批量运行中单个损坏影像或异常瓦片被 `try...except` 安全捕获并在清单中标记 `FAILED`，绝不导致任务整体中断，后续瓦片继续平稳执行；
+  * **基于清单的断点恢复 (Manifest-Driven Resume)**：输出目录自动维护 `batch_manifest.json` 与 `.csv` 状态机。`DONE` 瓦片自动跳过，`TIDE_READY` 瓦片直接跳过 Stage 1 调起 Stage 2，零冗余 FES 重算；
+  * **潮间带目标感知细分 (Target-Aware Refinement)**：`target_mode="intertidal"` 以 DEM 目标高程频率误差为首要准则，单侧有效海洋支撑时不盲目进行 500m 过度加密，大幅精简近岸控制节点；
+  * **本地 FES2022b 数据包只读审计 (Audit Reference)**：经只读审查 (`docs/FES2022B_LOCAL_AUDIT_V1_5.md`)，近岸外推分潮为压缩 `.nc.xz` 格式且掩膜含四分类定义，Phase 1 阶段严格禁用未集成的外推回退，原生 FES 具备完整拓扑支撑。
+* 🛰️ **单影像空间栅格潮位引擎 (v1.4 Spatial Raster Engine, RC)**：
   * **单时刻空间水面高程快照 (Snapshot)**：输入任意 GeoTIFF 影像，按像元中心严格重投影并评估真实空间二维水面高程，严格继承原始投影与分辨率，512×512 窗口流式原子写入；
   * **自适应控制网格沿海 DEM 潜在天文潮淹没频率 (Inundation)**：针对千万级 10m/30m DEM 像元，在水域/潮滩提取自适应控制网格（默认 4km）长时序，结合四角控制节点已排序水位时序的二分检索 (`np.searchsorted`) 与叶单元内部双线性空间插值，高效解算整年/时段潜在天文潮淹没频率空间栅格；
   * **有效像元拓扑连通防护 (Valid-mask Topology-aware Interpolation Guard)**：基于输入 DEM 的有效像元/NoData 掩膜识别连通水体域，防止跨越 NoData 屏障（如陆地、闭流盲端）发生潮位泄漏。注意：此机制依赖 DEM 掩膜拓扑结构，并非严格二维流体水动力学传播模型；若堤坝、水闸在 DEM 中具有有效高程值，无法自动作为 NoData 屏障隔离；
@@ -72,7 +81,8 @@ CoastTideX 针对不同应用场景设计了精细的内存管理与空间拓扑
 | **单点连续时序预测**<br>*(Single Point Mode)* | **4 GB** | **8 GB** | 双核 CPU 及以上<br>SSD 剩余空间 ≥ 10 GB | 依靠局部 BBox 裁剪，仅载入目标点周边小区域网格拓扑，运行时常驻内存仅需 ~1.2 GB。 |
 | **局部区域批量解算**<br>*(Local Batch Mode, ≤8°跨度)* | **4 GB** | **8 GB** | 四核 CPU 及以上<br>SSD 剩余空间 ≥ 10 GB | 空间跨度在 8° 以内时，一次性构建局部包围框，内存开销轻量。 |
 | **全球离散散点批量解算**<br>*(Global Discrete Batch Mode)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD 优先 | 系统激活 $5^\circ \times 5^\circ$ 自适应空间网格分块聚类，逐块加载与释放，峰值内存受控于单块大小。 |
-| **空间栅格潮位与淹没解算**<br>*(Spatial Raster Engine, v1.4)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD | 采用 512×512 窗口流式写入与自适应控制网格，内存消耗与整景影像尺寸解耦，支持超大范围 10m DEM。 |
+| **单影像空间栅格解算**<br>*(Spatial Raster Engine, v1.4)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD | 采用 512×512 窗口流式写入与自适应控制网格，内存消耗与整景影像尺寸解耦，支持超大范围 10m DEM。 |
+| **批量潮间带栅格解算**<br>*(Batch Intertidal Engine, v1.5 Alpha)* | **8 GB** | **16 GB** | 四核至八核 CPU<br>高速 NVMe SSD 优先 | 采用 max_parallel_tiles=1 顺序瓦片推进与持久化 Tide Cache，单瓦片内存峰值受控，支持大规模文件夹无人值守批处理。 |
 | **全地球无约束大范围网格展开**<br>*(Full Unconstrained Grid)* | **16 GB** | **32 GB** | 八核 CPU 及以上<br>高速 NVMe SSD | 若强行一次性请求全球无约束范围，FES2022b 569 万节点及 34 分潮全展开需要约 6~8 GB 连续物理内存。 |
 
 * **支持操作系统**：Windows 10/11 64-bit、Ubuntu 20.04+、macOS (x86_64 / Apple Silicon via Rosetta 2)。
@@ -228,7 +238,8 @@ pip install -r requirements.txt
   ```
 * **潮滩 10m/30m DEM 潜在天文潮淹没频率栅格 (v1.4 Inundation)**：
   ```bash
-  python cli.py raster inundation --dem coastal_flat_dem.tif --output inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008 --spacing-m 4000
+  python cli.py raster batch --input-folder ./dem_tiles --output-folder ./output --mode tide-inundation --target-mode intertidal --year 2024 --freq 30min --resume
+python cli.py raster inundation --dem coastal_flat_dem.tif --output inundation_pct_2024.tif --year 2024 --freq 30min --datum egm2008 --spacing-m 4000
   ```
   *(注：`scripts/calculate_inundation_raster.py` 亦作为轻量封装完全兼容所有历史调用方式)*
 
@@ -369,6 +380,15 @@ CoastTideX/
 ---
 
 ## 📝 版本更新日志 (Changelog)
+
+### v1.5 Alpha (2026-09)
+* **[新增] 批量潮间带栅格解算引擎 (BatchRasterEngine)**：支持文件夹级批量沙滩/潮滩 DEM 自动扫描、过滤与确定性排序，以单瓦片安全推进 (max_parallel_tiles = 1) 顺序执行；
+* **[新增] 持久化 NetCDF4 Tide Cache (*_tide.nc)**：实现 Stage 1 (控制网格 FES 解算并固化缓存) 与 Stage 2 (基于缓存流式反演淹没频率) 严格二阶段解耦，Stage 2 硬性保证零 FES 调用；
+* **[新增] 单瓦片失败隔离与断点恢复清单**：自动生成并维护 `batch_manifest.json` 与 `.csv` 状态机，隔离单文件异常，支持跳过已完成瓦片与利用已有 Tide Cache 极速恢复；
+* **[优化] 潮间带目标感知自适应细分 (Target-Aware Refinement)**：`target_mode="intertidal"` 模式以 DEM 目标高程淹没误差为首要准则，单侧有效海洋支撑时不盲目进行 500m 过度加密，大幅精简近岸控制节点；
+* **[审查] 本地完整 FES2022b 数据包只读审计**：全面审查本地完整数据包并形成规范文档 `docs/FES2022B_LOCAL_AUDIT_V1_5.md`，明确 Phase 1 阶段严格禁用未集成的 XZ 压缩外推回退；
+* **[GUI/CLI] 批量选项卡与命令行接口扩充**：新增「🗂️ 批量潮间带栅格解算」专用 Tab，命令行新增 `raster batch` / `raster batch-intertidal` 完整参数支持；
+* **[测试] 单元测试套件扩充至 61 项全通过**：新增 11 项覆盖批量发现过滤、整年半开区间保真、Tide Cache 往返、Stage 2 零 FES 硬性验收、空间属性继承、狭长沙滩梯度细分、单瓦片失败隔离、断点恢复状态机与相邻瓦片接缝连续性评估测试 (61/61 OK)。（注：GitHub Actions CI 在无大文件模型环境下执行合成预言机与单元测试；本地完整数据环境下运行全量测试）。
 
 ### v1.4 (2026-09)
 * **[重大升级] 空间栅格潮位引擎 (RasterTideEngine)**：全面集成 `core/raster_engine.py`，支持任意具有标准 CRS 的 GeoTIFF 影像，严格按像元中心对齐 (`offset='center'`) 进行真实二维水面高程快照计算，512×512 窗口流式原子写入；
