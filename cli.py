@@ -107,6 +107,29 @@ def main(args_list: Optional[List[str]] = None):
     p_inund.add_argument("--tolerance", type=float, default=1.0, help="淹没频率容错阈值 (%%，默认: 1.0)")
     p_inund.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
     p_inund.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
+    p_inund.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标感知模式 (默认: intertidal)")
+    p_inund.add_argument("--export-cache", type=str, default=None, help="可选导出 Tide Cache (*_tide.nc)")
+
+    # 3.3 批量潮间带栅格解算 (v1.5)
+    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.5)")
+    p_batch_raster.add_argument("--input-folder", "-i", type=str, required=True, help="输入 GeoTIFF 文件夹路径")
+    p_batch_raster.add_argument("--output-folder", "-o", type=str, default=None, help="输出文件夹路径 (默认: <input_folder>/CoastTideX_output)")
+    p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache"], help="解算模式 (默认: tide-inundation)")
+    p_batch_raster.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
+    p_batch_raster.add_argument("--start", type=str, default=None, help="自定义起始时间")
+    p_batch_raster.add_argument("--end", type=str, default=None, help="自定义结束时间")
+    p_batch_raster.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
+    p_batch_raster.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_batch_raster.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
+    p_batch_raster.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标区域模式 (默认: intertidal)")
+    p_batch_raster.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
+    p_batch_raster.add_argument("--min-spacing", type=float, default=500.0, help="最小控制网格间距 (米，默认: 500)")
+    p_batch_raster.add_argument("--tolerance", type=float, default=1.0, help="淹没频率容错阈值 (%%，默认: 1.0)")
+    p_batch_raster.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
+    p_batch_raster.add_argument("--recursive", action="store_true", help="是否递归扫描子目录")
+    p_batch_raster.add_argument("--no-resume", action="store_true", help="禁用断点恢复 (从头重跑)")
+    p_batch_raster.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
+    p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
     args = parser.parse_args(args_list)
 
@@ -323,7 +346,9 @@ def main(args_list: Optional[List[str]] = None):
                 inundation_error_tolerance_pct=args.tolerance,
                 block_size=args.block_size,
                 strict=not args.non_strict,
-                progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}")
+                progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}"),
+                target_mode=args.target_mode,
+                export_tide_cache_path=args.export_cache
             )
             print(f"[OK] 潜在天文潮淹没频率解算成功！")
             print(f"     有效 DEM 像元数: {summary.valid_pixels:,} / {summary.total_pixels:,}")
@@ -331,6 +356,48 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     计算耗时: {summary.elapsed_seconds:.2f} 秒")
             print(f"     淹没频率栅格: {summary.output_path}")
             print(f"     质量控制掩膜: {summary.qc_output_path}")
+
+        elif args.raster_submode in ["batch", "batch-intertidal"]:
+            from core.batch_raster_engine import BatchRasterEngine
+            batch_engine = BatchRasterEngine(raster_engine=raster_engine)
+            print(f"[*] 启动批量潮间带栅格解算任务...")
+            print(f"[*] 输入目录: {args.input_folder}")
+            print(f"[*] 运行模式: {args.mode}")
+            print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
+            print(f"[*] 断点恢复: {not args.no_resume}, 覆盖模式: {args.overwrite}")
+
+            def _cli_batch_prog(ov, ti, f, m, c):
+                if f:
+                    print(f"    [{ov:3d}%] {f} [{ti:3d}%] {m}")
+                else:
+                    print(f"    [{ov:3d}%] {m}")
+
+            res = batch_engine.run_batch(
+                input_folder=args.input_folder,
+                output_folder=args.output_folder,
+                job_mode=args.mode,
+                year=args.year,
+                start_time=args.start,
+                end_time=args.end,
+                freq=args.step,
+                dem_datum=args.dem_datum,
+                constituents=args.constituents,
+                target_mode=args.target_mode,
+                initial_control_spacing_m=args.initial_spacing,
+                min_control_spacing_m=args.min_spacing,
+                inundation_error_tolerance_pct=args.tolerance,
+                block_size=args.block_size,
+                strict=not args.non_strict,
+                recursive=args.recursive,
+                resume=not args.no_resume,
+                overwrite=args.overwrite,
+                progress_callback=_cli_batch_prog
+            )
+            print(f"[OK] 批量任务执行完毕！")
+            print(f"     输出目录: {res['output_folder']}")
+            print(f"     任务清单 (JSON): {res['manifest_json']}")
+            print(f"     任务清单 (CSV):  {res['manifest_csv']}")
+            print(f"     统计结果: 完成 {res['counts']['completed']}, 失败 {res['counts']['failed']}, 跳过 {res['counts']['skipped']}, 取消 {res['counts']['cancelled']}")
 
 
 if __name__ == '__main__':

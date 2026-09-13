@@ -301,6 +301,64 @@ class RasterTideWorker(QThread):
                 self.error.emit(str(e))
 
 
+
+class BatchRasterWorker(QThread):
+    """批量潮间带栅格解算后台工作线程 (v1.5)"""
+    progress = pyqtSignal(int, int, str, str, dict)
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            from core.batch_raster_engine import BatchRasterEngine
+            batch_engine = BatchRasterEngine()
+
+            def p_cb(ov, ti, fn, msg, counts):
+                if not self._is_cancelled:
+                    self.progress.emit(ov, ti, fn, msg, counts)
+
+            res = batch_engine.run_batch(
+                input_folder=self.params['input_folder'],
+                output_folder=self.params.get('output_folder'),
+                job_mode=self.params.get('job_mode', 'tide-inundation'),
+                year=self.params.get('year', 2024),
+                start_time=self.params.get('start_time'),
+                end_time=self.params.get('end_time'),
+                freq=self.params.get('freq', '30min'),
+                dem_datum=self.params.get('dem_datum', 'egm2008'),
+                constituents=self.params.get('constituents', 'all'),
+                target_mode=self.params.get('target_mode', 'intertidal'),
+                initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
+                min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
+                inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
+                block_size=self.params.get('block_size', 512),
+                strict=self.params.get('strict', True),
+                recursive=self.params.get('recursive', False),
+                resume=self.params.get('resume', True),
+                overwrite=self.params.get('overwrite', False),
+                progress_callback=p_cb,
+                cancel_event=self.cancel_event
+            )
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(res)
+        except RasterCalculationCancelled:
+            self.cancelled.emit()
+        except Exception as e:
+            self.error.emit(f"批量任务发生异常: {str(e)}")
+
 class MainWindow(QMainWindow):
     """CoastTideX 桌面客户端主窗口"""
 
@@ -356,14 +414,17 @@ class MainWindow(QMainWindow):
         self.tab_single = QWidget()
         self.tab_batch = QWidget()
         self.tab_raster = QWidget()
+        self.tab_batch_raster = QWidget()
 
         self.tabs.addTab(self.tab_single, " 🌊 单点/时段潮位序列 ")
         self.tabs.addTab(self.tab_batch, " 📊 批量站点多时刻解算 ")
-        self.tabs.addTab(self.tab_raster, " 🗺️ 空间栅格解算 (Raster Engine) ")
+        self.tabs.addTab(self.tab_raster, " 🗺️ 单影像栅格解算 / 验证 ")
+        self.tabs.addTab(self.tab_batch_raster, " 🗂️ 批量潮间带栅格解算 ")
 
         self._setup_single_tab()
         self._setup_batch_tab()
         self._setup_raster_tab()
+        self._setup_batch_raster_tab()
 
         main_layout.addWidget(self.tabs)
 
@@ -1735,3 +1796,384 @@ class MainWindow(QMainWindow):
             "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)
+
+
+    def _setup_batch_raster_tab(self):
+        """初始化 v1.5 批量潮间带栅格解算与 Tide Cache 选项卡"""
+        layout = QHBoxLayout(self.tab_batch_raster)
+        layout.setSpacing(10)
+
+        # 左侧控制面板 (包装在 QScrollArea 内)
+        scroll_left = QScrollArea()
+        scroll_left.setWidgetResizable(True)
+        scroll_left.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_left.setMinimumWidth(390)
+        scroll_left.setMaximumWidth(450)
+
+        panel_widget = QWidget()
+        panel_layout = QVBoxLayout(panel_widget)
+        panel_layout.setSpacing(10)
+        panel_layout.setContentsMargins(5, 5, 5, 5)
+
+        # 1. 文件夹输入
+        grp_input = QGroupBox("📂 批量输入与输出目录 / Directories")
+        vbox_input = QVBoxLayout(grp_input)
+        
+        vbox_input.addWidget(QLabel("输入 GeoTIFF 文件夹路径:"))
+        h_in = QHBoxLayout()
+        self.txt_batch_in_dir = QLineEdit()
+        self.txt_batch_in_dir.setPlaceholderText("选择包含沙滩/潮滩 DEM 的文件夹...")
+        self.btn_browse_batch_in = QPushButton("浏览...")
+        self.btn_browse_batch_in.clicked.connect(self._on_browse_batch_input)
+        h_in.addWidget(self.txt_batch_in_dir)
+        h_in.addWidget(self.btn_browse_batch_in)
+        vbox_input.addLayout(h_in)
+
+        self.chk_batch_recursive = QCheckBox("递归扫描子目录 (Recursive)")
+        vbox_input.addWidget(self.chk_batch_recursive)
+
+        self.btn_scan_batch = QPushButton("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch.setStyleSheet("background-color: #2b5b84; color: white; font-weight: bold; padding: 6px;")
+        self.btn_scan_batch.clicked.connect(self._on_scan_batch_rasters)
+        vbox_input.addWidget(self.btn_scan_batch)
+
+        vbox_input.addWidget(QLabel("输出文件夹路径 (默认: <input>/CoastTideX_output):"))
+        h_out = QHBoxLayout()
+        self.txt_batch_out_dir = QLineEdit()
+        self.txt_batch_out_dir.setPlaceholderText("留空自动在输入目录下创建 CoastTideX_output...")
+        self.btn_browse_batch_out = QPushButton("更改...")
+        self.btn_browse_batch_out.clicked.connect(self._on_browse_batch_output)
+        h_out.addWidget(self.txt_batch_out_dir)
+        h_out.addWidget(self.btn_browse_batch_out)
+        vbox_input.addLayout(h_out)
+
+        panel_layout.addWidget(grp_input)
+
+        # 2. 预测时间与时间步长
+        grp_time = QGroupBox("⏱️ 预测时段与时间步长 / Temporal Scope")
+        vbox_time = QVBoxLayout(grp_time)
+
+        h_yr = QHBoxLayout()
+        h_yr.addWidget(QLabel("整年预测年份:"))
+        self.spn_batch_year = QSpinBox()
+        self.spn_batch_year.setRange(1950, 2099)
+        self.spn_batch_year.setValue(2024)
+        h_yr.addWidget(self.spn_batch_year)
+        vbox_time.addLayout(h_yr)
+
+        h_step = QHBoxLayout()
+        h_step.addWidget(QLabel("采样间隔 (步长):"))
+        self.cmb_batch_step = QComboBox()
+        self.cmb_batch_step.addItems(["30min (推荐)", "1h", "15min", "10min", "2h"])
+        self.cmb_batch_step.currentIndexChanged.connect(self._update_batch_expected_samples)
+        h_step.addWidget(self.cmb_batch_step)
+        vbox_time.addLayout(h_step)
+
+        self.lbl_batch_samples = QLabel("预期采样步数: 17,568 步 (2024 全年 30min)")
+        self.lbl_batch_samples.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        vbox_time.addWidget(self.lbl_batch_samples)
+
+        panel_layout.addWidget(grp_time)
+
+        # 3. 科学参数与目标感知
+        grp_sci = QGroupBox("⚙️ 科学参数与目标模式 / Scientific Options")
+        vbox_sci = QVBoxLayout(grp_sci)
+
+        h_datum = QHBoxLayout()
+        h_datum.addWidget(QLabel("DEM 高程基准:"))
+        self.cmb_batch_datum = QComboBox()
+        self.cmb_batch_datum.addItems(["EGM2008 (推荐全球)", "MSL (平均海平面)", "GOCO06s (全球大洋)", "WGS84 椭球高"])
+        h_datum.addWidget(self.cmb_batch_datum)
+        vbox_sci.addLayout(h_datum)
+
+        h_const = QHBoxLayout()
+        h_const.addWidget(QLabel("天文分潮集合:"))
+        self.cmb_batch_const = QComboBox()
+        self.cmb_batch_const.addItems(["all (全套 34 分潮)", "major8 (8大主分潮)"])
+        h_const.addWidget(self.cmb_batch_const)
+        vbox_sci.addLayout(h_const)
+
+        h_target = QHBoxLayout()
+        h_target.addWidget(QLabel("目标区域模式:"))
+        self.cmb_batch_target_mode = QComboBox()
+        self.cmb_batch_target_mode.addItems(["intertidal (沙滩/潮间带目标感知, 默认)", "standard (标准全网格自适应)"])
+        h_target.addWidget(self.cmb_batch_target_mode)
+        vbox_sci.addLayout(h_target)
+
+        # 沿岸外推 Fallback (根据审查结果禁用)
+        self.chk_batch_fallback = QCheckBox("允许官方沿岸外推 FES 回退 (Coastal Fallback)")
+        self.chk_batch_fallback.setChecked(False)
+        self.chk_batch_fallback.setEnabled(False)
+        self.chk_batch_fallback.setToolTip("【只读审查结论】本地 ocean_tide_extrapolated 均为 .nc.xz 压缩包且掩膜为规则网格，Phase 1 维持原生 LGP2 高阶非结构有限元网格，回退机制暂未激活。")
+        vbox_sci.addWidget(self.chk_batch_fallback)
+
+        panel_layout.addWidget(grp_sci)
+
+        # 4. 任务模式与调度
+        grp_job = QGroupBox("📋 运行模式与容灾调度 / Job Mode & Resume")
+        vbox_job = QVBoxLayout(grp_job)
+
+        self.cmb_batch_job_mode = QComboBox()
+        self.cmb_batch_job_mode.addItems([
+            "1. 完整流程: Tide Cache + 潜在淹没频率 (默认)",
+            "2. 仅解算控制节点潮位 (生成 *_tide.nc)",
+            "3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)"
+        ])
+        vbox_job.addWidget(self.cmb_batch_job_mode)
+
+        self.chk_batch_resume = QCheckBox("启用断点续算 (Resume, 跳过已完成项)")
+        self.chk_batch_resume.setChecked(True)
+        vbox_job.addWidget(self.chk_batch_resume)
+
+        self.chk_batch_overwrite = QCheckBox("强制覆盖已存在输出 (Overwrite)")
+        self.chk_batch_overwrite.setChecked(False)
+        vbox_job.addWidget(self.chk_batch_overwrite)
+
+        panel_layout.addWidget(grp_job)
+
+        # 5. 执行控制与进度
+        grp_exec = QGroupBox("🚀 批处理调度控制 / Execution Control")
+        vbox_exec = QVBoxLayout(grp_exec)
+
+        h_btns = QHBoxLayout()
+        self.btn_start_batch = QPushButton("🚀 开始批量解算")
+        self.btn_start_batch.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 8px;")
+        self.btn_start_batch.clicked.connect(self._on_start_batch)
+
+        self.btn_cancel_batch = QPushButton("⏹️ 取消")
+        self.btn_cancel_batch.setEnabled(False)
+        self.btn_cancel_batch.setStyleSheet("background-color: #c62828; color: white; font-weight: bold; padding: 8px;")
+        self.btn_cancel_batch.clicked.connect(self._on_cancel_batch)
+
+        h_btns.addWidget(self.btn_start_batch)
+        h_btns.addWidget(self.btn_cancel_batch)
+        vbox_exec.addLayout(h_btns)
+
+        vbox_exec.addWidget(QLabel("总览进度 (Overall Progress):"))
+        self.bar_batch_overall = QProgressBar()
+        self.bar_batch_overall.setValue(0)
+        vbox_exec.addWidget(self.bar_batch_overall)
+
+        vbox_exec.addWidget(QLabel("当前瓦片进度 (Current Tile):"))
+        self.bar_batch_tile = QProgressBar()
+        self.bar_batch_tile.setValue(0)
+        vbox_exec.addWidget(self.bar_batch_tile)
+
+        self.lbl_batch_status = QLabel("就绪: 请选择输入目录并点击扫描")
+        self.lbl_batch_status.setWordWrap(True)
+        vbox_exec.addWidget(self.lbl_batch_status)
+
+        self.lbl_batch_counts = QLabel("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
+        self.lbl_batch_counts.setStyleSheet("font-weight: bold;")
+        vbox_exec.addWidget(self.lbl_batch_counts)
+
+        panel_layout.addWidget(grp_exec)
+        panel_layout.addStretch()
+
+        scroll_left.setWidget(panel_widget)
+        layout.addWidget(scroll_left)
+
+        # 右侧：影像文件表格视图
+        grp_right = QGroupBox("📋 影像文件清单与实时解算状态 / Raster Tiles Queue")
+        vbox_right = QVBoxLayout(grp_right)
+
+        self.table_batch_rasters = QTableWidget()
+        self.table_batch_rasters.setColumnCount(8)
+        self.table_batch_rasters.setHorizontalHeaderLabels([
+            "文件名", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出"
+        ])
+        self.table_batch_rasters.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_batch_rasters.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_batch_rasters.horizontalHeader().setStretchLastSection(True)
+        vbox_right.addWidget(self.table_batch_rasters)
+
+        h_bot_right = QHBoxLayout()
+        self.btn_open_batch_out = QPushButton("📂 打开输出文件夹")
+        self.btn_open_batch_out.clicked.connect(self._on_open_batch_output_folder)
+        h_bot_right.addStretch()
+        h_bot_right.addWidget(self.btn_open_batch_out)
+        vbox_right.addLayout(h_bot_right)
+
+        layout.addWidget(grp_right, stretch=1)
+
+        self.batch_worker = None
+        self.discovered_batch_files = []
+
+    def _update_batch_expected_samples(self):
+        step_text = self.cmb_batch_step.currentText()
+        if "30min" in step_text:
+            n = 17568
+        elif "1h" in step_text:
+            n = 8784
+        elif "15min" in step_text:
+            n = 35136
+        elif "10min" in step_text:
+            n = 52704
+        elif "2h" in step_text:
+            n = 4392
+        else:
+            n = 17568
+        self.lbl_batch_samples.setText(f"预期采样步数: {n:,} 步 (2024 全年 {step_text.split()[0]})")
+
+    def _on_browse_batch_input(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输入 GeoTIFF 目录")
+        if d:
+            self.txt_batch_in_dir.setText(d)
+            if not self.txt_batch_out_dir.text().strip():
+                self.txt_batch_out_dir.setText(os.path.join(d, "CoastTideX_output"))
+
+    def _on_browse_batch_output(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        if d:
+            self.txt_batch_out_dir.setText(d)
+
+    def _on_scan_batch_rasters(self):
+        in_dir = self.txt_batch_in_dir.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "警告", "请先选择有效的输入文件夹！")
+            return
+
+        out_dir = self.txt_batch_out_dir.text().strip() or os.path.join(in_dir, "CoastTideX_output")
+        recursive = self.chk_batch_recursive.isChecked()
+
+        from core.batch_raster_engine import BatchRasterEngine
+        try:
+            self.discovered_batch_files = BatchRasterEngine.discover_rasters(
+                input_folder=in_dir,
+                recursive=recursive,
+                output_folder=out_dir
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "扫描错误", f"扫描目录失败: {str(e)}")
+            return
+
+        self.table_batch_rasters.setRowCount(len(self.discovered_batch_files))
+        for r_idx, meta in enumerate(self.discovered_batch_files):
+            self.table_batch_rasters.setItem(r_idx, 0, QTableWidgetItem(meta["filename"]))
+            self.table_batch_rasters.setItem(r_idx, 1, QTableWidgetItem(f"{meta['file_size_mb']:.1f} MB"))
+            self.table_batch_rasters.setItem(r_idx, 2, QTableWidgetItem(f"{meta['width']}×{meta['height']}"))
+            self.table_batch_rasters.setItem(r_idx, 3, QTableWidgetItem(str(meta['crs'])[:20]))
+            self.table_batch_rasters.setItem(r_idx, 4, QTableWidgetItem(f"{meta['resolution'][0]:.4f}"))
+            self.table_batch_rasters.setItem(r_idx, 5, QTableWidgetItem("就绪 (Ready)"))
+            self.table_batch_rasters.setItem(r_idx, 6, QTableWidgetItem("-"))
+            self.table_batch_rasters.setItem(r_idx, 7, QTableWidgetItem("-"))
+
+        self.lbl_batch_status.setText(f"扫描完成: 发现 {len(self.discovered_batch_files)} 个待解算 GeoTIFF 影像。")
+        self.lbl_batch_counts.setText(f"总文件: {len(self.discovered_batch_files)} | 完成: 0 | 失败: 0 | 跳过: 0")
+
+    def _on_start_batch(self):
+        in_dir = self.txt_batch_in_dir.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "警告", "请先选择有效的输入文件夹！")
+            return
+
+        if not self.discovered_batch_files:
+            self._on_scan_batch_rasters()
+            if not self.discovered_batch_files:
+                QMessageBox.information(self, "提示", "未在该目录下发现任何有效的 GeoTIFF 影像！")
+                return
+
+        out_dir = self.txt_batch_out_dir.text().strip() or os.path.join(in_dir, "CoastTideX_output")
+        mode_idx = self.cmb_batch_job_mode.currentIndex()
+        job_modes = ["tide-inundation", "tide", "inundation-from-cache"]
+        job_mode = job_modes[mode_idx]
+
+        step_raw = self.cmb_batch_step.currentText().split()[0]
+        dem_datum = self.cmb_batch_datum.currentText().split()[0].lower()
+        const_raw = self.cmb_batch_const.currentText().split()[0]
+        target_mode = self.cmb_batch_target_mode.currentText().split()[0]
+
+        params = {
+            "input_folder": in_dir,
+            "output_folder": out_dir,
+            "job_mode": job_mode,
+            "year": self.spn_batch_year.value(),
+            "freq": step_raw,
+            "dem_datum": dem_datum,
+            "constituents": const_raw,
+            "target_mode": target_mode,
+            "resume": self.chk_batch_resume.isChecked(),
+            "overwrite": self.chk_batch_overwrite.isChecked(),
+            "recursive": self.chk_batch_recursive.isChecked()
+        }
+
+        self.btn_start_batch.setEnabled(False)
+        self.btn_scan_batch.setEnabled(False)
+        self.btn_cancel_batch.setEnabled(True)
+        self.bar_batch_overall.setValue(0)
+        self.bar_batch_tile.setValue(0)
+
+        self.batch_worker = BatchRasterWorker(params)
+        self.batch_worker.progress.connect(self._on_batch_progress)
+        self.batch_worker.finished.connect(self._on_batch_finished)
+        self.batch_worker.error.connect(self._on_batch_error)
+        self.batch_worker.cancelled.connect(self._on_batch_cancelled)
+        self.batch_worker.start()
+
+    def _on_batch_progress(self, overall_pct, tile_pct, filename, msg, counts):
+        self.bar_batch_overall.setValue(overall_pct)
+        self.bar_batch_tile.setValue(tile_pct)
+        if filename:
+            self.lbl_batch_status.setText(f"[{filename}] {msg}")
+        else:
+            self.lbl_batch_status.setText(msg)
+        self.lbl_batch_counts.setText(
+            f"总文件: {counts['total']} | 完成: {counts['completed']} | 失败: {counts['failed']} | 跳过: {counts['skipped']}"
+        )
+
+        # 更新表格中对应行的状态
+        if filename:
+            for r_idx in range(self.table_batch_rasters.rowCount()):
+                item = self.table_batch_rasters.item(r_idx, 0)
+                if item and item.text() == filename:
+                    status_item = self.table_batch_rasters.item(r_idx, 5)
+                    if status_item:
+                        status_item.setText(msg[:25])
+                    break
+
+    def _on_batch_finished(self, res):
+        self.btn_start_batch.setEnabled(True)
+        self.btn_scan_batch.setEnabled(True)
+        self.btn_cancel_batch.setEnabled(False)
+        self.bar_batch_overall.setValue(100)
+        self.bar_batch_tile.setValue(100)
+        self.lbl_batch_status.setText("批量解算任务全部完成！")
+        c = res["counts"]
+        QMessageBox.information(
+            self,
+            "批量解算完成",
+            f"批量栅格解算任务执行完毕！\n\n"
+            f"• 总计瓦片: {c['total']}\n"
+            f"• 成功完成: {c['completed']}\n"
+            f"• 异常失败: {c['failed']}\n"
+            f"• 断点跳过: {c['skipped']}\n\n"
+            f"任务清单已保存至:\n{res['manifest_json']}"
+        )
+
+    def _on_batch_error(self, err_msg):
+        self.btn_start_batch.setEnabled(True)
+        self.btn_scan_batch.setEnabled(True)
+        self.btn_cancel_batch.setEnabled(False)
+        self.lbl_batch_status.setText("批量任务发生异常中断！")
+        QMessageBox.critical(self, "批量任务错误", err_msg)
+
+    def _on_batch_cancelled(self):
+        self.btn_start_batch.setEnabled(True)
+        self.btn_scan_batch.setEnabled(True)
+        self.btn_cancel_batch.setEnabled(False)
+        self.lbl_batch_status.setText("批量任务已被用户取消。")
+        QMessageBox.warning(self, "任务取消", "批量解算已被用户终止。已完成的瓦片与 Tide Cache 已安全保留。")
+
+    def _on_cancel_batch(self):
+        if self.batch_worker and self.batch_worker.isRunning():
+            self.lbl_batch_status.setText("正在取消批量任务，等待当前操作回滚退出...")
+            self.btn_cancel_batch.setEnabled(False)
+            self.batch_worker.cancel()
+
+    def _on_open_batch_output_folder(self):
+        out_dir = self.txt_batch_out_dir.text().strip()
+        if out_dir and os.path.exists(out_dir):
+            import subprocess
+            subprocess.Popen(f'explorer "{os.path.abspath(out_dir)}"')
+        else:
+            QMessageBox.information(self, "提示", "输出目录尚未生成或不存在。")
