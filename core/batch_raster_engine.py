@@ -1,7 +1,8 @@
 """
-CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.5 Alpha)
+CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.5 Alpha Hardened)
 支持文件夹级多 GeoTIFF 自动化发现、轻量级元数据检查、确定性排序、
-Tide Cache 序列化与二阶段淹没频率解算、全流程断点恢复 (Resume)、单文件失败隔离与任务清单 (Manifest) 管理。
+Tide Cache 序列化与二阶段淹没频率解算、统一 ExistingOutputPolicy 策略调度、
+全流程断点恢复 (Resume)、单文件失败隔离与任务清单 (Manifest) 管理。
 """
 
 import os
@@ -9,24 +10,68 @@ import csv
 import json
 import time
 import traceback
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Union
 from collections import OrderedDict
 
 import numpy as np
 import rasterio
 
-from .raster_engine import RasterTideEngine, RasterCalculationCancelled
+from .raster_engine import (
+    RasterTideEngine, RasterCalculationCancelled, ExistingOutputError
+)
 from .tide_cache import (
     write_tide_cache, read_tide_cache, is_cache_complete,
-    calculate_inundation_from_tide_cache, estimate_tide_cache_size
+    calculate_inundation_from_tide_cache, estimate_tide_cache_size,
+    inspect_tide_cache_metadata, validate_tide_cache_compatibility,
+    TideCacheCompatibilityError
 )
 
 # 任务运行模式
 JOB_MODE_TIDE_ONLY = "tide"                                 # 仅解算控制节点潮位并生成 Tide Cache (*_tide.nc)
 JOB_MODE_TIDE_AND_INUNDATION = "tide-inundation"            # 先生成 Tide Cache，再解算淹没频率 (默认完整两阶段流程)
 JOB_MODE_INUNDATION_FROM_CACHE = "inundation-from-cache"    # 从已有 Tide Cache 直接解算淹没频率 (零 FES 调用)
+
+# 现有输出处理策略 (ExistingOutputPolicy)
+class ExistingOutputPolicy(str, Enum):
+    RESUME = "resume"                      # 断点恢复: 完整产物安全跳过，未完工瓦片接续
+    ERROR_IF_EXISTS = "error_if_exists"    # 冲突报错: 目标产物已存在时显式报错拒绝覆写
+    OVERWRITE = "overwrite"                # 强制覆盖: 允许重新计算并安全原子替换
+
+
+def normalize_existing_output_policy(
+    existing_policy: Optional[Union[str, ExistingOutputPolicy]] = None,
+    resume: Optional[bool] = None,
+    overwrite: Optional[bool] = None
+) -> ExistingOutputPolicy:
+    """
+    归一化现有输出策略，彻底消除 resume 与 overwrite 互相冲突的不一致状态。
+    """
+    if resume is True and overwrite is True:
+        raise ValueError("参数冲突: resume 与 overwrite 不能同时为 True！请指定单一确定的策略。")
+
+    if existing_policy is not None:
+        if isinstance(existing_policy, ExistingOutputPolicy):
+            return existing_policy
+        p_str = str(existing_policy).strip().lower()
+        if p_str in ("resume", "resuming"):
+            return ExistingOutputPolicy.RESUME
+        elif p_str in ("error_if_exists", "error", "safe"):
+            return ExistingOutputPolicy.ERROR_IF_EXISTS
+        elif p_str in ("overwrite", "force"):
+            return ExistingOutputPolicy.OVERWRITE
+        else:
+            raise ValueError(f"未知的输出策略: '{existing_policy}'。必须为 'resume', 'error_if_exists', 或 'overwrite'。")
+
+    if overwrite is True:
+        return ExistingOutputPolicy.OVERWRITE
+    if resume is False and overwrite is False:
+        return ExistingOutputPolicy.ERROR_IF_EXISTS
+    # 默认兜底策略为 RESUME
+    return ExistingOutputPolicy.RESUME
+
 
 # 单文件执行状态
 STATUS_PENDING = "PENDING"
@@ -53,6 +98,7 @@ class BatchManifest:
         "frequency_path",
         "qc_path",
         "status",
+        "run_action",
         "time_start",
         "time_end",
         "time_step",
@@ -94,6 +140,7 @@ class BatchManifest:
             self.records[input_path]["input_path"] = input_path
             self.records[input_path]["input_name"] = os.path.basename(input_path)
             self.records[input_path]["status"] = STATUS_PENDING
+            self.records[input_path]["run_action"] = "PENDING"
         self.records[input_path].update(kwargs)
 
     def save(self) -> None:
@@ -105,11 +152,6 @@ class BatchManifest:
         tmp_json = self.json_path.with_suffix(".tmp.json")
         with open(tmp_json, "w", encoding="utf-8") as f:
             json.dump(items, f, indent=2, ensure_ascii=False)
-        if self.json_path.exists():
-            try:
-                self.json_path.unlink()
-            except Exception:
-                pass
         os.replace(tmp_json, self.json_path)
 
         # 写入临时 CSV
@@ -120,11 +162,6 @@ class BatchManifest:
             for it in items:
                 row = {k: it.get(k, "") for k in self.FIELDS}
                 writer.writerow(row)
-        if self.csv_path.exists():
-            try:
-                self.csv_path.unlink()
-            except Exception:
-                pass
         os.replace(tmp_csv, self.csv_path)
 
 
@@ -251,8 +288,9 @@ class BatchRasterEngine:
         block_size: Optional[int] = 512,
         strict: bool = True,
         recursive: bool = False,
-        resume: bool = True,
-        overwrite: bool = False,
+        existing_policy: Optional[Union[str, ExistingOutputPolicy]] = None,
+        resume: Optional[bool] = None,
+        overwrite: Optional[bool] = None,
         progress_callback: Optional[Callable[[int, int, str, str, Dict[str, int]], None]] = None,
         cancel_event = None
     ) -> Dict[str, Any]:
@@ -262,9 +300,19 @@ class BatchRasterEngine:
         特性与安全保障:
             1. 严格二阶段执行: Tide Cache 完成 (*_tide.nc) -> 淹没频率 (*_inundation.tif)；
             2. 单文件失败隔离 (Failure Isolation): 某瓦片异常不导致整体中断，记录 FAILED 并继续；
-            3. 断点恢复 (Resume): 已完成 DONE 瓦片跳过，TIDE_READY 瓦片直接计算频率 (零 FES 重复开销)；
-            4. 任务取消安全保护: 取消时仅清理当前瓦片的临时文件，已完成瓦片完好无损。
+            3. 统一 ExistingOutputPolicy 策略调度: 彻底避免 resume 与 overwrite 互相打架；
+            4. 断点恢复 (Resume): 已完成 DONE 瓦片安全跳过并维持 DONE 状态，TIDE_READY 瓦片直接计算频率；
+            5. Mode 3 (inundation-from-cache) 下 Tide Cache 绝对只读保护；
+            6. 递归同名文件子路径镜像输出 (Subdirectory Path Mirroring)；
+            7. 任务取消安全保护: 取消时仅清理当前瓦片的临时文件，已完成瓦片完好无损。
         """
+        # 归一化策略
+        policy = normalize_existing_output_policy(
+            existing_policy=existing_policy,
+            resume=resume,
+            overwrite=overwrite
+        )
+
         in_p = Path(input_folder)
         if not in_p.exists():
             raise FileNotFoundError(f"未找到输入目录: {input_folder}")
@@ -275,7 +323,7 @@ class BatchRasterEngine:
         out_p.mkdir(parents=True, exist_ok=True)
 
         manifest = BatchManifest(str(out_p))
-        if resume and not overwrite:
+        if policy in (ExistingOutputPolicy.RESUME, ExistingOutputPolicy.ERROR_IF_EXISTS):
             manifest.load()
 
         discovered = self.discover_rasters(input_folder, recursive=recursive, output_folder=str(out_p))
@@ -290,7 +338,7 @@ class BatchRasterEngine:
         }
 
         if progress_callback:
-            progress_callback(0, 0, "", "批量扫描就绪", summary_counts)
+            progress_callback(0, 0, "", f"批量扫描就绪 (策略: {policy.value})", summary_counts)
 
         # 逐个文件顺序解算 (max_parallel_tiles = 1)
         for idx, item in enumerate(discovered):
@@ -302,11 +350,20 @@ class BatchRasterEngine:
 
             input_path = item["input_path"]
             filename = item["filename"]
-            stem = Path(filename).stem
+            rel_file_path = Path(item["relative_path"])
 
-            tide_cache_path = str(out_p / f"{stem}_tide.nc")
-            frequency_path = str(out_p / f"{stem}_inundation.tif")
-            qc_path = str(out_p / f"{stem}_inundation_qc.tif")
+            # 递归同名文件子路径镜像保护 (Subdirectory Path Mirroring)
+            if recursive and len(rel_file_path.parts) > 1:
+                tile_out_dir = (out_p / rel_file_path.parent).resolve()
+            else:
+                tile_out_dir = out_p
+
+            tile_out_dir.mkdir(parents=True, exist_ok=True)
+            stem = rel_file_path.stem
+
+            tide_cache_path = str(tile_out_dir / f"{stem}_tide.nc")
+            frequency_path = str(tile_out_dir / f"{stem}_inundation.tif")
+            qc_path = str(tile_out_dir / f"{stem}_inundation_qc.tif")
 
             manifest.upsert(
                 input_path,
@@ -323,38 +380,81 @@ class BatchRasterEngine:
 
             # 检查文件基本有效性
             if not item["valid"]:
-                manifest.upsert(input_path, status=STATUS_FAILED, error_message=f"无效的 GeoTIFF 文件: {item.get('error', '')}")
+                manifest.upsert(
+                    input_path,
+                    status=STATUS_FAILED,
+                    run_action="FAILED",
+                    error_message=f"无效的 GeoTIFF 文件: {item.get('error', '')}"
+                )
                 manifest.save()
                 summary_counts["failed"] += 1
                 continue
 
             prev_status = manifest.get_status(input_path)
 
-            # 断点跳过检查 (Resume / Skip logic)
-            if resume and not overwrite:
+            # ---------------- ERROR_IF_EXISTS 策略防线 ----------------
+            if policy == ExistingOutputPolicy.ERROR_IF_EXISTS:
+                conflict_files = []
+                if job_mode in (JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION):
+                    if os.path.exists(tide_cache_path):
+                        conflict_files.append(tide_cache_path)
+                if job_mode in (JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE):
+                    if os.path.exists(frequency_path):
+                        conflict_files.append(frequency_path)
+                    if os.path.exists(qc_path):
+                        conflict_files.append(qc_path)
+
+                if conflict_files:
+                    err_msg = f"ExistingOutputError: 目标输出产物已存在且当前策略为 error_if_exists: {', '.join(conflict_files)}"
+                    manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+            # ---------------- RESUME 策略断点跳过检查 ----------------
+            if policy == ExistingOutputPolicy.RESUME:
                 if job_mode == JOB_MODE_TIDE_ONLY:
                     if is_cache_complete(tide_cache_path):
-                        manifest.upsert(input_path, status=STATUS_SKIPPED)
+                        # 维持 DONE 状态，标记本轮 run_action 为 SKIPPED_EXISTING
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
                 elif job_mode == JOB_MODE_TIDE_AND_INUNDATION:
-                    if os.path.exists(frequency_path) and is_cache_complete(tide_cache_path) and prev_status == STATUS_DONE:
-                        manifest.upsert(input_path, status=STATUS_SKIPPED)
+                    if os.path.exists(frequency_path) and (prev_status == STATUS_DONE or (os.path.exists(qc_path) and is_cache_complete(tide_cache_path))):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
                 elif job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
-                    if os.path.exists(frequency_path) and prev_status == STATUS_DONE:
-                        manifest.upsert(input_path, status=STATUS_SKIPPED)
+                    if os.path.exists(frequency_path) and (prev_status == STATUS_DONE or os.path.exists(qc_path)):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
-                    if not is_cache_complete(tide_cache_path):
-                        manifest.upsert(input_path, status=STATUS_FAILED, error_message="未找到完整的对应 Tide Cache (*_tide.nc)")
-                        manifest.save()
-                        summary_counts["failed"] += 1
-                        continue
+
+            # ---------------- JOB_MODE_INUNDATION_FROM_CACHE 前置检查 ----------------
+            if job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
+                if not os.path.exists(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"Mode 3 前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+                if not is_cache_complete(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"Mode 3 前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
 
             overall_pct = int(100 * idx / max(1, total_files))
 
@@ -362,10 +462,13 @@ class BatchRasterEngine:
             try:
                 # ---------------- Stage 1: Tide Calculation & Tide Cache ----------------
                 need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION])
-                cache_already_ready = (resume and not overwrite and is_cache_complete(tide_cache_path))
+                cache_already_ready = (
+                    policy == ExistingOutputPolicy.RESUME and
+                    is_cache_complete(tide_cache_path)
+                )
 
                 if need_tide and not cache_already_ready:
-                    manifest.upsert(input_path, status=STATUS_TIDE_RUNNING)
+                    manifest.upsert(input_path, status=STATUS_TIDE_RUNNING, run_action="TIDE_RUNNING")
                     manifest.save()
                     if progress_callback:
                         progress_callback(overall_pct, 10, filename, "Stage 1: 控制网格 FES 解算与 Tide Cache 生成...", summary_counts)
@@ -392,16 +495,15 @@ class BatchRasterEngine:
                         inundation_error_tolerance_pct=inundation_error_tolerance_pct,
                         strict=strict,
                         progress_callback=_tile_prog,
-                        cancel_event=cancel_event
+                        cancel_event=cancel_event,
+                        allow_overwrite=(policy == ExistingOutputPolicy.OVERWRITE)
                     )
-                    # 确保 cache 保存至指定 tide_cache_path
-                    if is_cache_complete(tide_cache_path):
-                        pass
 
                     elapsed_tide = time.time() - t_tide_start
                     manifest.upsert(
                         input_path,
                         status=STATUS_TIDE_READY,
+                        run_action="TIDE_READY",
                         control_node_count=grid_data.get("num_nodes", 0),
                         time_samples=grid_data.get("time_samples", 0),
                         elapsed_tide_seconds=round(elapsed_tide, 2)
@@ -414,13 +516,14 @@ class BatchRasterEngine:
 
                 # 如果仅要求 Tide Cache，则本瓦片到此完成
                 if job_mode == JOB_MODE_TIDE_ONLY:
-                    manifest.upsert(input_path, status=STATUS_DONE)
+                    manifest.upsert(input_path, status=STATUS_DONE, run_action="PROCESSED", error_message="")
                     manifest.save()
                     summary_counts["completed"] += 1
                     continue
 
                 # ---------------- Stage 2: Inundation Frequency Calculation ----------------
-                manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING)
+                # 注意: 在 JOB_MODE_INUNDATION_FROM_CACHE 下，tide_cache_path 严格为只读输入，绝不修改
+                manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
                 manifest.save()
                 if progress_callback:
                     progress_callback(overall_pct, 60, filename, "Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
@@ -437,6 +540,7 @@ class BatchRasterEngine:
                     output_path=frequency_path,
                     qc_output_path=qc_path,
                     block_size=block_size,
+                    allow_overwrite=(policy == ExistingOutputPolicy.OVERWRITE),
                     progress_callback=_freq_prog,
                     cancel_event=cancel_event
                 )
@@ -445,6 +549,7 @@ class BatchRasterEngine:
                 manifest.upsert(
                     input_path,
                     status=STATUS_DONE,
+                    run_action="PROCESSED",
                     valid_pixel_count=freq_summary.input_valid_pixels,
                     elapsed_frequency_seconds=round(elapsed_freq, 2),
                     error_message=""
@@ -453,7 +558,7 @@ class BatchRasterEngine:
                 summary_counts["completed"] += 1
 
             except RasterCalculationCancelled:
-                manifest.upsert(input_path, status=STATUS_CANCELLED, error_message="用户取消了任务")
+                manifest.upsert(input_path, status=STATUS_CANCELLED, run_action="CANCELLED", error_message="用户取消了任务")
                 manifest.save()
                 summary_counts["cancelled"] += 1
                 if progress_callback:
@@ -462,7 +567,7 @@ class BatchRasterEngine:
 
             except Exception as ex:
                 err_msg = f"{type(ex).__name__}: {str(ex)}"
-                manifest.upsert(input_path, status=STATUS_FAILED, error_message=err_msg)
+                manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
                 manifest.save()
                 summary_counts["failed"] += 1
                 # 隔离错误并继续后续瓦片

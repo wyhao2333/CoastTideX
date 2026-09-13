@@ -359,7 +359,7 @@ class TestBatchRasterV15(unittest.TestCase):
             self.assertEqual(out_src.transform, orig_transform)
             self.assertEqual(out_src.width, orig_width)
             self.assertEqual(out_src.height, orig_height)
-            self.assertEqual(out_src.nodata, orig_nodata)
+            self.assertTrue(np.isnan(out_src.nodata), '淹没频率栅格按规范必须为 Float32, nodata=NaN')
 
     # -------------------------------------------------------------
     # 7. 狭长沙滩目标感知自适应细分测试 (Narrow Beach Tests)

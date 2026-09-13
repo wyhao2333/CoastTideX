@@ -127,7 +127,9 @@ def main(args_list: Optional[List[str]] = None):
     p_batch_raster.add_argument("--tolerance", type=float, default=1.0, help="淹没频率容错阈值 (%%，默认: 1.0)")
     p_batch_raster.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
     p_batch_raster.add_argument("--recursive", action="store_true", help="是否递归扫描子目录")
-    p_batch_raster.add_argument("--no-resume", action="store_true", help="禁用断点恢复 (从头重跑)")
+    p_batch_raster.add_argument("--existing-policy", type=str, default=None, choices=["resume", "error_if_exists", "overwrite"], help="现有输出处理策略 (默认: resume)")
+    p_batch_raster.add_argument("--resume", action="store_true", default=False, help="显式指定断点恢复策略")
+    p_batch_raster.add_argument("--no-resume", action="store_true", help="禁用断点恢复")
     p_batch_raster.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
     p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
@@ -358,13 +360,31 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     质量控制掩膜: {summary.qc_output_path}")
 
         elif args.raster_submode in ["batch", "batch-intertidal"]:
-            from core.batch_raster_engine import BatchRasterEngine
+            from core.batch_raster_engine import BatchRasterEngine, ExistingOutputPolicy, normalize_existing_output_policy
+            
+            # 防御性校验: 严禁 --resume 与 --overwrite 同时指定
+            if args.resume and args.overwrite:
+                print("[Error] 参数冲突: --resume 与 --overwrite 不能同时指定！请指定单一确定的策略。", file=sys.stderr)
+                sys.exit(2)
+
+            if args.existing_policy:
+                eff_policy = normalize_existing_output_policy(existing_policy=args.existing_policy)
+            elif args.overwrite:
+                eff_policy = ExistingOutputPolicy.OVERWRITE
+            elif args.no_resume:
+                eff_policy = ExistingOutputPolicy.ERROR_IF_EXISTS
+            else:
+                eff_policy = ExistingOutputPolicy.RESUME
+
             batch_engine = BatchRasterEngine(raster_engine=raster_engine)
             print(f"[*] 启动批量潮间带栅格解算任务...")
             print(f"[*] 输入目录: {args.input_folder}")
-            print(f"[*] 运行模式: {args.mode}")
+            if args.mode == "inundation-from-cache":
+                print(f"[*] 运行模式: inundation-from-cache (Tide Cache is read-only input)")
+            else:
+                print(f"[*] 运行模式: {args.mode}")
+            print(f"[*] Existing output policy: {eff_policy.value}")
             print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
-            print(f"[*] 断点恢复: {not args.no_resume}, 覆盖模式: {args.overwrite}")
 
             def _cli_batch_prog(ov, ti, f, m, c):
                 if f:
@@ -389,8 +409,7 @@ def main(args_list: Optional[List[str]] = None):
                 block_size=args.block_size,
                 strict=not args.non_strict,
                 recursive=args.recursive,
-                resume=not args.no_resume,
-                overwrite=args.overwrite,
+                existing_policy=eff_policy,
                 progress_callback=_cli_batch_prog
             )
             print(f"[OK] 批量任务执行完毕！")

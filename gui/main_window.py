@@ -345,8 +345,7 @@ class BatchRasterWorker(QThread):
                 block_size=self.params.get('block_size', 512),
                 strict=self.params.get('strict', True),
                 recursive=self.params.get('recursive', False),
-                resume=self.params.get('resume', True),
-                overwrite=self.params.get('overwrite', False),
+                existing_policy=self.params.get('existing_policy', 'resume'),
                 progress_callback=p_cb,
                 cancel_event=self.cancel_event
             )
@@ -364,7 +363,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX - 全球海岸带潮位模拟与高程基准转换系统 v1.4")
+        self.setWindowTitle("CoastTideX v1.5 Alpha - 全球海岸带潮位模拟与高程基准转换系统")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -1770,7 +1769,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.4</h3>"
+            "<h3>CoastTideX v1.5 Alpha</h3>"
             "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统</b></p>"
             "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
@@ -1850,16 +1849,52 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(grp_input)
 
         # 2. 预测时间与时间步长
-        grp_time = QGroupBox("⏱️ 预测时段与时间步长 / Temporal Scope")
-        vbox_time = QVBoxLayout(grp_time)
+        self.grp_batch_time = QGroupBox("⏱️ 预测时段与时间步长 / Temporal Scope")
+        vbox_time = QVBoxLayout(self.grp_batch_time)
 
-        h_yr = QHBoxLayout()
+        h_tm = QHBoxLayout()
+        h_tm.addWidget(QLabel("时段模式:"))
+        self.combo_batch_time_mode = QComboBox()
+        self.combo_batch_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
+        self.combo_batch_time_mode.addItem("自定义时段 (Custom Period)", "period")
+        self.combo_batch_time_mode.currentIndexChanged.connect(self._on_batch_time_mode_changed)
+        h_tm.addWidget(self.combo_batch_time_mode)
+        vbox_time.addLayout(h_tm)
+
+        self.wgt_batch_year = QWidget()
+        h_yr = QHBoxLayout(self.wgt_batch_year)
+        h_yr.setContentsMargins(0, 0, 0, 0)
         h_yr.addWidget(QLabel("整年预测年份:"))
         self.spn_batch_year = QSpinBox()
         self.spn_batch_year.setRange(1950, 2099)
         self.spn_batch_year.setValue(2024)
+        self.spn_batch_year.valueChanged.connect(self._update_batch_expected_samples)
         h_yr.addWidget(self.spn_batch_year)
-        vbox_time.addLayout(h_yr)
+        vbox_time.addWidget(self.wgt_batch_year)
+
+        self.wgt_batch_period = QWidget()
+        vbox_period = QVBoxLayout(self.wgt_batch_period)
+        vbox_period.setContentsMargins(0, 0, 0, 0)
+        h_st = QHBoxLayout()
+        h_st.addWidget(QLabel("起始时间 (UTC):"))
+        self.time_batch_start = QDateTimeEdit(QDateTime.currentDateTimeUtc())
+        self.time_batch_start.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.time_batch_start.setCalendarPopup(True)
+        self.time_batch_start.dateTimeChanged.connect(self._update_batch_expected_samples)
+        h_st.addWidget(self.time_batch_start)
+        vbox_period.addLayout(h_st)
+
+        h_et = QHBoxLayout()
+        h_et.addWidget(QLabel("结束时间 (UTC):"))
+        self.time_batch_end = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(30))
+        self.time_batch_end.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.time_batch_end.setCalendarPopup(True)
+        self.time_batch_end.dateTimeChanged.connect(self._update_batch_expected_samples)
+        h_et.addWidget(self.time_batch_end)
+        vbox_period.addLayout(h_et)
+
+        self.wgt_batch_period.setVisible(False)
+        vbox_time.addWidget(self.wgt_batch_period)
 
         h_step = QHBoxLayout()
         h_step.addWidget(QLabel("采样间隔 (步长):"))
@@ -1871,13 +1906,14 @@ class MainWindow(QMainWindow):
 
         self.lbl_batch_samples = QLabel("预期采样步数: 17,568 步 (2024 全年 30min)")
         self.lbl_batch_samples.setStyleSheet("color: #4CAF50; font-weight: bold;")
+        self.lbl_batch_samples.setWordWrap(True)
         vbox_time.addWidget(self.lbl_batch_samples)
 
-        panel_layout.addWidget(grp_time)
+        panel_layout.addWidget(self.grp_batch_time)
 
         # 3. 科学参数与目标感知
-        grp_sci = QGroupBox("⚙️ 科学参数与目标模式 / Scientific Options")
-        vbox_sci = QVBoxLayout(grp_sci)
+        self.grp_batch_sci = QGroupBox("⚙️ 科学参数与目标模式 / Scientific Options")
+        vbox_sci = QVBoxLayout(self.grp_batch_sci)
 
         h_datum = QHBoxLayout()
         h_datum.addWidget(QLabel("DEM 高程基准:"))
@@ -1907,27 +1943,37 @@ class MainWindow(QMainWindow):
         self.chk_batch_fallback.setToolTip("【只读审查结论】本地 ocean_tide_extrapolated 均为 .nc.xz 压缩包且掩膜为规则网格，Phase 1 维持原生 LGP2 高阶非结构有限元网格，回退机制暂未激活。")
         vbox_sci.addWidget(self.chk_batch_fallback)
 
-        panel_layout.addWidget(grp_sci)
+        panel_layout.addWidget(self.grp_batch_sci)
 
         # 4. 任务模式与调度
-        grp_job = QGroupBox("📋 运行模式与容灾调度 / Job Mode & Resume")
+        grp_job = QGroupBox("📋 运行模式与输出策略 / Job Mode & Policy")
         vbox_job = QVBoxLayout(grp_job)
 
+        h_jm = QHBoxLayout()
+        h_jm.addWidget(QLabel("解算流程:"))
         self.cmb_batch_job_mode = QComboBox()
-        self.cmb_batch_job_mode.addItems([
-            "1. 完整流程: Tide Cache + 潜在淹没频率 (默认)",
-            "2. 仅解算控制节点潮位 (生成 *_tide.nc)",
-            "3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)"
-        ])
-        vbox_job.addWidget(self.cmb_batch_job_mode)
+        self.cmb_batch_job_mode.addItem("1. 完整流程: Tide Cache + 潜在淹没频率 (默认)", "tide-inundation")
+        self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (生成 *_tide.nc)", "tide")
+        self.cmb_batch_job_mode.addItem("3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)", "inundation-from-cache")
+        self.cmb_batch_job_mode.currentIndexChanged.connect(self._on_batch_job_mode_changed)
+        h_jm.addWidget(self.cmb_batch_job_mode)
+        vbox_job.addLayout(h_jm)
 
-        self.chk_batch_resume = QCheckBox("启用断点续算 (Resume, 跳过已完成项)")
-        self.chk_batch_resume.setChecked(True)
-        vbox_job.addWidget(self.chk_batch_resume)
+        # 模式专属提示横幅
+        self.lbl_batch_job_mode_tip = QLabel("💡 Mode 1 完整两阶段：先生成并保存 Tide Cache (*_tide.nc)，再基于缓存解算淹没频率 GeoTIFF。")
+        self.lbl_batch_job_mode_tip.setWordWrap(True)
+        self.lbl_batch_job_mode_tip.setStyleSheet("color: #00796B; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px;")
+        vbox_job.addWidget(self.lbl_batch_job_mode_tip)
 
-        self.chk_batch_overwrite = QCheckBox("强制覆盖已存在输出 (Overwrite)")
-        self.chk_batch_overwrite.setChecked(False)
-        vbox_job.addWidget(self.chk_batch_overwrite)
+        # 统一 ExistingOutputPolicy 策略选择下拉框 (取代两个相互冲突的 CheckBox)
+        h_policy = QHBoxLayout()
+        h_policy.addWidget(QLabel("已有产物策略:"))
+        self.cmb_batch_existing_policy = QComboBox()
+        self.cmb_batch_existing_policy.addItem("断点恢复 (Resume, 跳过已有完整产物) [默认]", "resume")
+        self.cmb_batch_existing_policy.addItem("冲突报错 (Error if exists, 拒绝覆写)", "error_if_exists")
+        self.cmb_batch_existing_policy.addItem("强制覆盖 (Overwrite, 重新计算并替换)", "overwrite")
+        h_policy.addWidget(self.cmb_batch_existing_policy)
+        vbox_job.addLayout(h_policy)
 
         panel_layout.addWidget(grp_job)
 
@@ -1999,21 +2045,73 @@ class MainWindow(QMainWindow):
         self.batch_worker = None
         self.discovered_batch_files = []
 
+    def _on_batch_time_mode_changed(self):
+        mode = self.combo_batch_time_mode.currentData()
+        is_year = (mode == "year")
+        self.wgt_batch_year.setVisible(is_year)
+        self.wgt_batch_period.setVisible(not is_year)
+        self._update_batch_expected_samples()
+
+    def _on_batch_job_mode_changed(self):
+        job_mode = self.cmb_batch_job_mode.currentData()
+        if job_mode == "inundation-from-cache":
+            # Mode 3: Tide Cache 是只读输入，禁用生成参数
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 Mode 3 从已有 Tide Cache 解算淹没频率：*_tide.nc 作为严格只读输入，不调用 FES 潮汐模型，绝不覆写或修改缓存！"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #1565C0; font-weight: bold; background-color: #E3F2FD; padding: 6px; border-radius: 4px; border: 1px solid #90CAF9;"
+            )
+        elif job_mode == "tide":
+            # Mode 2: 仅生成 Cache
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 Mode 2 仅解算自适应控制网格潮位时序并导出 *_tide.nc，不生成 2D 像元淹没频率 GeoTIFF。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #2E7D32; font-weight: bold; background-color: #E8F5E9; padding: 6px; border-radius: 4px; border: 1px solid #A5D6A7;"
+            )
+        else:
+            # Mode 1: 完整两阶段流程
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 Mode 1 完整两阶段：先生成并保存 Tide Cache (*_tide.nc)，再基于缓存解算淹没频率 GeoTIFF。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #00796B; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #80CBC4;"
+            )
+
     def _update_batch_expected_samples(self):
         step_text = self.cmb_batch_step.currentText()
-        if "30min" in step_text:
-            n = 17568
-        elif "1h" in step_text:
-            n = 8784
-        elif "15min" in step_text:
-            n = 35136
-        elif "10min" in step_text:
-            n = 52704
-        elif "2h" in step_text:
-            n = 4392
-        else:
-            n = 17568
-        self.lbl_batch_samples.setText(f"预期采样步数: {n:,} 步 (2024 全年 {step_text.split()[0]})")
+        freq = step_text.split()[0]
+        time_mode = self.combo_batch_time_mode.currentData() if hasattr(self, 'combo_batch_time_mode') else 'year'
+
+        try:
+            if time_mode == "year":
+                yr = self.spn_batch_year.value()
+                t_start = f"{yr:04d}-01-01 00:00:00"
+                t_end = f"{yr+1:04d}-01-01 00:00:00"
+                inc = 'left'
+                desc = f"{yr} 全年"
+            else:
+                t_start = self.time_batch_start.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
+                t_end = self.time_batch_end.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
+                inc = 'both'
+                desc = f"{t_start} 至 {t_end}"
+
+            dr = pd.date_range(t_start, t_end, freq=freq, inclusive=inc, tz="UTC")
+            n = len(dr)
+            raw_kb = (n * 4) / 1024.0
+            raw_100_mb = (n * 4 * 100) / (1024.0 * 1024.0)
+            self.lbl_batch_samples.setText(
+                f"预期采样步数: {n:,} 步 ({desc} @ {freq} | 单节点时序 ~{raw_kb:.1f} KB, 100节点 ~{raw_100_mb:.1f} MB)"
+            )
+        except Exception:
+            self.lbl_batch_samples.setText(f"采样步长: {freq}")
 
     def _on_browse_batch_input(self):
         d = QFileDialog.getExistingDirectory(self, "选择输入 GeoTIFF 目录")
@@ -2074,26 +2172,36 @@ class MainWindow(QMainWindow):
                 return
 
         out_dir = self.txt_batch_out_dir.text().strip() or os.path.join(in_dir, "CoastTideX_output")
-        mode_idx = self.cmb_batch_job_mode.currentIndex()
-        job_modes = ["tide-inundation", "tide", "inundation-from-cache"]
-        job_mode = job_modes[mode_idx]
+        job_mode = self.cmb_batch_job_mode.currentData()
 
         step_raw = self.cmb_batch_step.currentText().split()[0]
         dem_datum = self.cmb_batch_datum.currentText().split()[0].lower()
         const_raw = self.cmb_batch_const.currentText().split()[0]
         target_mode = self.cmb_batch_target_mode.currentText().split()[0]
+        existing_policy = self.cmb_batch_existing_policy.currentData()
+
+        time_mode = self.combo_batch_time_mode.currentData()
+        if time_mode == "year":
+            yr = self.spn_batch_year.value()
+            st_str = None
+            et_str = None
+        else:
+            yr = self.time_batch_start.dateTime().date().year()
+            st_str = self.time_batch_start.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
+            et_str = self.time_batch_end.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
 
         params = {
             "input_folder": in_dir,
             "output_folder": out_dir,
             "job_mode": job_mode,
-            "year": self.spn_batch_year.value(),
+            "year": yr,
+            "start_time": st_str,
+            "end_time": et_str,
             "freq": step_raw,
             "dem_datum": dem_datum,
             "constituents": const_raw,
             "target_mode": target_mode,
-            "resume": self.chk_batch_resume.isChecked(),
-            "overwrite": self.chk_batch_overwrite.isChecked(),
+            "existing_policy": existing_policy,
             "recursive": self.chk_batch_recursive.isChecked()
         }
 

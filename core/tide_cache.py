@@ -1,14 +1,17 @@
 """
-CoastTideX 控制网格潮汐缓存模块 (Tide Cache Module v1.5 Alpha)
-支持自适应四叉树控制节点潮位时序的高效 NetCDF4 序列化、流式压缩存储、完整性校验与
+CoastTideX 控制网格潮汐缓存模块 (Tide Cache Module v1.5 Alpha Hardened)
+支持自适应四叉树控制节点潮位时序的高效 NetCDF4 序列化、流式压缩存储、完整性校验、
+全要素兼容性签名 (Compatibility Signature) 与轻量元数据检视，以及
 基于 Tide Cache 的二阶段天文潮潜在淹没频率解算 (零 FES 重复调用)。
 """
 
 import os
+import json
 import time
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any, Callable
+from typing import Optional, Tuple, List, Dict, Any, Callable, Set
 from collections import defaultdict
 
 import numpy as np
@@ -24,28 +27,33 @@ from .raster_engine import (
     QC_BIT_INSUFFICIENT_NODES, QC_BIT_DATUM_INVALID, QC_BIT_DATUM_SOURCE_APPROX,
     QC_BIT_MIN_SPACING_REACHED, QC_BIT_CONNECTIVITY_FALLBACK,
     QC_BIT_FES_VALIDITY_BOUNDARY, QC_BIT_MAX_REFINEMENT_REACHED,
-    QC_NODATA, RasterCalculationCancelled
+    QC_NODATA, RasterCalculationCancelled,
+    build_support_topology, stream_inundation_frequency_interpolation
 )
 from .utils import compute_inundation_frequency
 
 COASTTIDEX_VERSION = "1.5-alpha"
-CACHE_SCHEMA_VERSION = "1.0"
+CACHE_SCHEMA_VERSION = "1.1"
+CACHE_SIGNATURE_ALGORITHM = "sha256"
+
+
+class ExistingOutputError(FileExistsError):
+    """目标正式产物已存在且当前策略不允许覆盖时抛出"""
+    pass
+
+
+class TideCacheCompatibilityError(ValueError):
+    """Tide Cache 与目标 DEM 或解算参数不兼容异常"""
+    pass
 
 
 def estimate_tide_cache_size(node_count: int, time_samples: int) -> Dict[str, Any]:
     """
     估算 Tide Cache 控制节点潮位数组原始内存与未压缩数据量 (Raw Array Estimate)。
-
-    参数:
-        node_count: 控制节点数量
-        time_samples: 时间序列采样步数
-
-    返回:
-        Dict 包含 raw_bytes, raw_mb, formatted_size 等。
     """
     raw_bytes = int(node_count) * int(time_samples) * 4  # float32 = 4 bytes
     raw_mb = raw_bytes / (1024.0 * 1024.0)
-    
+
     if raw_mb < 1.0:
         fmt = f"{raw_bytes / 1024.0:.1f} KB"
     elif raw_mb < 1024.0:
@@ -77,6 +85,264 @@ def is_cache_complete(cache_path: str) -> bool:
         return False
 
 
+def generate_tide_cache_signature(
+    info: Optional[RasterInfo] = None,
+    start_time: str = "",
+    end_time: str = "",
+    freq: str = "",
+    source_tz: str = "UTC",
+    inclusive: str = "both",
+    time_samples: int = 0,
+    dem_datum: str = "egm2008",
+    constituents: str = "all",
+    target_mode: str = "intertidal",
+    initial_control_spacing_m: float = 4000.0,
+    min_control_spacing_m: float = 500.0,
+    inundation_error_tolerance_pct: float = 1.0,
+    fes_model: str = "FES2022b",
+    fes_source_type: str = "native_lgp2",
+    topology_max_resolution_m: float = 200.0,
+    source_width: Optional[int] = None,
+    source_height: Optional[int] = None,
+    source_crs: Optional[str] = None,
+    source_transform = None,
+    source_bounds = None,
+    source_resolution = None,
+    source_nodata = None,
+    **kwargs
+) -> Tuple[str, str]:
+    """
+    生成确定性的 Tide Cache 兼容性规范签名 (SHA256)。
+    支持通过 RasterInfo 对象或直接通过字典关键字参数生成。
+    """
+    if info is not None:
+        w_val = int(info.width)
+        h_val = int(info.height)
+        c_val = str(info.crs).strip()
+        t_vals = [round(float(v), 8) for v in list(info.transform)[:6]]
+        b_vals = [round(float(v), 5) for v in info.bounds]
+        nodata_val = float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else None
+    else:
+        w_val = int(source_width or 0)
+        h_val = int(source_height or 0)
+        c_val = str(source_crs or "").strip()
+        raw_t = source_transform if source_transform is not None else []
+        t_vals = [round(float(v), 8) for v in list(raw_t)[:6]]
+        raw_b = source_bounds if source_bounds is not None else []
+        b_vals = [round(float(v), 5) for v in list(raw_b)[:4]]
+        nodata_val = float(source_nodata) if source_nodata is not None and np.isfinite(source_nodata) else None
+
+    canonical_dict = {
+        "source": {
+            "width": w_val,
+            "height": h_val,
+            "crs": c_val,
+            "transform": t_vals,
+            "bounds": b_vals,
+            "nodata": nodata_val
+        },
+        "time": {
+            "start_time": str(start_time),
+            "end_time": str(end_time),
+            "freq": str(freq),
+            "source_tz": str(source_tz),
+            "inclusive": str(inclusive),
+            "time_samples": int(time_samples)
+        },
+        "fes": {
+            "model": str(fes_model),
+            "source_type": str(fes_source_type),
+            "constituents": str(constituents)
+        },
+        "datum": {
+            "dem_datum": str(dem_datum).lower()
+        },
+        "algorithm": {
+            "target_mode": str(target_mode).lower(),
+            "initial_control_spacing_m": round(float(initial_control_spacing_m), 2),
+            "min_control_spacing_m": round(float(min_control_spacing_m), 2),
+            "inundation_error_tolerance_pct": round(float(inundation_error_tolerance_pct), 3),
+            "topology_max_resolution_m": round(float(topology_max_resolution_m), 2)
+        },
+        "cache": {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "signature_algorithm": CACHE_SIGNATURE_ALGORITHM
+        }
+    }
+
+    json_str = json.dumps(canonical_dict, sort_keys=True, separators=(',', ':'))
+    sig = hashlib.sha256(json_str.encode("utf-8")).hexdigest()
+    return sig, json_str
+
+
+def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
+    """
+    轻量读取 Tide Cache NetCDF 全局属性、维度与签名，严禁读取 tide_msl_m 大矩阵。
+    """
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
+
+    with netCDF4.Dataset(cache_path, mode="r") as ds:
+        attrs = {attr: getattr(ds, attr) for attr in ds.ncattrs()}
+
+        num_nodes = len(ds.dimensions["node"]) if "node" in ds.dimensions else int(attrs.get("CONTROL_NODE_COUNT", 0))
+        time_samples = len(ds.dimensions["time"]) if "time" in ds.dimensions else int(attrs.get("TIME_SAMPLES", 0))
+        num_cells = len(ds.dimensions["cell"]) if "cell" in ds.dimensions else int(attrs.get("LEAF_CELL_COUNT", 0))
+
+        is_complete = str(attrs.get("CACHE_COMPLETE", "false")).lower() == "true"
+        signature = str(attrs.get("CACHE_SIGNATURE", ""))
+
+        return {
+            "metadata": attrs,
+            "num_nodes": num_nodes,
+            "num_cells": num_cells,
+            "time_samples": time_samples,
+            "is_complete": is_complete,
+            "signature": signature,
+            "cache_path": str(cache_path)
+        }
+
+
+def validate_tide_cache_compatibility(
+    cache_path: str,
+    expected_spec: Dict[str, Any]
+) -> Tuple[bool, List[str]]:
+    """
+    验证已有 Tide Cache NetCDF 文件与当前 DEM 空间规格及计算参数是否严格兼容。
+    """
+    if not os.path.exists(cache_path):
+        return False, [f"Tide Cache 文件不存在: {cache_path}"]
+
+    try:
+        info = inspect_tide_cache_metadata(cache_path)
+    except Exception as ex:
+        return False, [f"无法读取 Tide Cache 元数据: {str(ex)}"]
+
+    if not info["is_complete"]:
+        return False, ["Tide Cache 未完整写入 (缺少 CACHE_COMPLETE=true 标记)"]
+
+    attrs = info["metadata"]
+    reasons: List[str] = []
+
+    # 1. 栅格尺寸校验 (Width / Height)
+    if "width" in expected_spec:
+        exp_w = int(expected_spec["width"])
+        c_w = int(attrs.get("SOURCE_WIDTH", 0))
+        if c_w != exp_w:
+            reasons.append(f"栅格宽度不匹配: Cache 为 {c_w} 像元，当前 DEM 为 {exp_w} 像元")
+
+    if "height" in expected_spec:
+        exp_h = int(expected_spec["height"])
+        c_h = int(attrs.get("SOURCE_HEIGHT", 0))
+        if c_h != exp_h:
+            reasons.append(f"栅格高度不匹配: Cache 为 {c_h} 像元，当前 DEM 为 {exp_h} 像元")
+
+    # 2. 坐标参考系 (CRS) 校验
+    if "crs" in expected_spec:
+        exp_crs = str(expected_spec["crs"]).strip()
+        c_crs = str(attrs.get("SOURCE_CRS", "")).strip()
+        if exp_crs and c_crs and exp_crs != c_crs:
+            exp_epsg = exp_crs.split(":")[-1] if "EPSG" in exp_crs.upper() else ""
+            c_epsg = c_crs.split(":")[-1] if "EPSG" in c_crs.upper() else ""
+            if not (exp_epsg and c_epsg and exp_epsg == c_epsg):
+                reasons.append(f"坐标系统 (CRS) 不匹配: Cache 为 '{c_crs}'，当前 DEM 为 '{exp_crs}'")
+
+    # 3. 仿射变换矩阵 (Transform) 校验
+    if "transform" in expected_spec:
+        exp_t = list(expected_spec["transform"])[:6]
+        c_t_raw = attrs.get("SOURCE_TRANSFORM")
+        if c_t_raw is not None:
+            if isinstance(c_t_raw, str):
+                try:
+                    c_t = json.loads(c_t_raw.replace("'", '"'))
+                except Exception:
+                    try:
+                        c_t = [float(x.strip(" []")) for x in c_t_raw.split(",")[:6]]
+                    except Exception:
+                        c_t = []
+            else:
+                c_t = list(c_t_raw)[:6]
+
+            if len(c_t) == 6 and len(exp_t) == 6:
+                diffs = [abs(float(a) - float(b)) for a, b in zip(c_t, exp_t)]
+                if any(d > 1e-4 for d in diffs):
+                    reasons.append(f"仿射变换 (Transform) 不匹配: Cache 为 {c_t}，当前 DEM 为 {exp_t}")
+
+    # 4. 高程基准面校验
+    if "dem_datum" in expected_spec:
+        exp_datum = str(expected_spec["dem_datum"]).strip().lower()
+        c_datum = str(attrs.get("DEM_DATUM", "")).strip().lower()
+        if exp_datum and c_datum and exp_datum != c_datum:
+            reasons.append(f"高程基准面不匹配: Cache 为 '{c_datum}'，当前请求为 '{exp_datum}'")
+
+    # 5. 时间采样点数与步长校验
+    if "time_samples" in expected_spec:
+        exp_samples = int(expected_spec["time_samples"])
+        c_samples = int(info["time_samples"])
+        if c_samples != exp_samples:
+            reasons.append(f"时间样本点数不匹配: Cache 为 {c_samples} 点，当前请求为 {exp_samples} 点")
+
+    if "freq" in expected_spec:
+        exp_freq = str(expected_spec["freq"]).strip()
+        c_freq = str(attrs.get("TIME_STEP", "")).strip()
+        if exp_freq and c_freq and exp_freq != c_freq:
+            reasons.append(f"采样步长不匹配: Cache 为 '{c_freq}'，当前请求为 '{exp_freq}'")
+
+    if "target_mode" in expected_spec:
+        exp_mode = str(expected_spec["target_mode"]).strip().lower()
+        c_mode = str(attrs.get("TARGET_MODE", "")).strip().lower()
+        if exp_mode and c_mode and exp_mode != c_mode:
+            reasons.append(f"目标区域模式不匹配: Cache 为 '{c_mode}'，当前请求为 '{exp_mode}'")
+
+    if "constituents" in expected_spec:
+        exp_const = str(expected_spec["constituents"]).strip().lower()
+        c_const = str(attrs.get("CONSTITUENTS", "")).strip().lower()
+        if exp_const and c_const and exp_const != c_const:
+            reasons.append(f"分潮集合不匹配: Cache 为 '{c_const}'，当前请求为 '{exp_const}'")
+
+    # 6. 签名自校验与篡改防御 (Tamper-evidence Verification)
+    stored_sig = str(attrs.get("CACHE_SIGNATURE", "")).strip()
+    if stored_sig:
+        try:
+            expected_c_sig, _ = generate_tide_cache_signature(
+                source_path=attrs.get("SOURCE_DEM_PATH", ""),
+                source_width=int(attrs.get("SOURCE_WIDTH", 0)),
+                source_height=int(attrs.get("SOURCE_HEIGHT", 0)),
+                source_crs=attrs.get("SOURCE_CRS", ""),
+                source_transform=json.loads(attrs.get("SOURCE_TRANSFORM", "[]")) if isinstance(attrs.get("SOURCE_TRANSFORM"), str) else attrs.get("SOURCE_TRANSFORM", []),
+                source_bounds=json.loads(attrs.get("SOURCE_BOUNDS", "[]")) if isinstance(attrs.get("SOURCE_BOUNDS"), str) else attrs.get("SOURCE_BOUNDS", []),
+                source_resolution=json.loads(attrs.get("SOURCE_RESOLUTION", "[]")) if isinstance(attrs.get("SOURCE_RESOLUTION"), str) else attrs.get("SOURCE_RESOLUTION", []),
+                source_nodata=float(attrs.get("SOURCE_NODATA")) if attrs.get("SOURCE_NODATA") is not None and str(attrs.get("SOURCE_NODATA")).lower() != "nan" else np.nan,
+                start_time=attrs.get("TIME_START", ""),
+                end_time=attrs.get("TIME_END", ""),
+                freq=attrs.get("TIME_STEP", ""),
+                source_tz=attrs.get("TIMEZONE", "UTC"),
+                inclusive=attrs.get("TIME_INCLUSIVE", "both"),
+                time_samples=int(attrs.get("TIME_SAMPLES", info["time_samples"])),
+                fes_model=attrs.get("TIDE_MODEL", "FES2022b"),
+                fes_source_type=attrs.get("FES_SOURCE_TYPE", "native_mesh"),
+                constituents=attrs.get("CONSTITUENTS", "all"),
+                dem_datum=attrs.get("DEM_DATUM", "egm2008"),
+                target_mode=attrs.get("TARGET_MODE", "intertidal"),
+                initial_control_spacing_m=float(attrs.get("INITIAL_CONTROL_SPACING_M", 4000.0)),
+                min_control_spacing_m=float(attrs.get("MIN_CONTROL_SPACING_M", 500.0)),
+                inundation_error_tolerance_pct=float(attrs.get("ERROR_TOLERANCE_PCT", 1.0)),
+                topology_max_resolution_m=float(attrs.get("TOPOLOGY_RESOLUTION_M", 200.0))
+            )
+            if stored_sig != expected_c_sig:
+                reasons.append(f"Tide Cache 元数据已被篡改或损坏 (签名不一致: {stored_sig[:12]}... != {expected_c_sig[:12]}...)")
+        except Exception as ex:
+            reasons.append(f"Tide Cache 签名校验异常: {str(ex)}")
+
+    if "signature" in expected_spec:
+        exp_sig = str(expected_spec["signature"]).strip()
+        c_sig = info["signature"].strip()
+        if exp_sig and c_sig and exp_sig != c_sig:
+            reasons.append(f"全要素规范签名不匹配: Cache 为 '{c_sig[:16]}...'，当前规格为 '{exp_sig[:16]}...'")
+
+    return len(reasons) == 0, reasons
+
+
 def write_tide_cache(
     cache_path: str,
     info: RasterInfo,
@@ -84,19 +350,17 @@ def write_tide_cache(
     node_cache: Dict[Tuple[int, int], ControlNode],
     time_index: pd.DatetimeIndex,
     metadata: Dict[str, Any],
+    allow_overwrite: bool = True,
     cancel_event = None
 ) -> str:
     """
     将自适应控制网格及其节点潮位时序原子级写入 NetCDF4 Tide Cache (*_tide.nc)。
-
-    存储结构与优化:
-        1. 节点与时间二维矩阵: tide_msl_m[node, time] (float32, chunked, zlib=4, shuffle=True)；
-        2. 仅保存基准面偏移 static_offset_m 与 MSL 潮位，杜绝内存/磁盘翻倍存储 sorted 冗余数据；
-        3. 记录叶单元空间包围盒与四角控制节点索引，支持二阶段零 FES 调用快速空间拓扑重建；
-        4. 写入 *.tmp.nc 临时文件，完成后注入 CACHE_COMPLETE 标记并原子重命名。
     """
     if cancel_event is not None and cancel_event.is_set():
         raise RasterCalculationCancelled("用户取消了 Tide Cache 写入。")
+
+    if os.path.exists(cache_path) and not allow_overwrite:
+        raise ExistingOutputError(f"Tide Cache 文件已存在且未开启覆盖权限 (OVERWRITE): {cache_path}")
 
     out_dir = os.path.dirname(os.path.abspath(cache_path))
     if out_dir:
@@ -117,32 +381,54 @@ def write_tide_cache(
     num_times = len(time_index)
     num_cells = len(leaf_cells)
 
-    # 提取时间轴 (Unix epoch seconds)
+    # 计算兼容性签名 (Signature)
+    sig_hex, sig_payload = generate_tide_cache_signature(
+        info=info,
+        start_time=str(metadata.get("start_time", time_index[0].isoformat())),
+        end_time=str(metadata.get("end_time", time_index[-1].isoformat())),
+        freq=str(metadata.get("freq", "30min")),
+        source_tz=str(metadata.get("source_tz", "UTC")),
+        inclusive=str(metadata.get("inclusive", "left")),
+        time_samples=num_times,
+        dem_datum=str(metadata.get("dem_datum", "egm2008")),
+        constituents=str(metadata.get("constituents", "all")),
+        target_mode=str(metadata.get("target_mode", "intertidal")),
+        initial_control_spacing_m=float(metadata.get("initial_control_spacing_m", 4000.0)),
+        min_control_spacing_m=float(metadata.get("min_control_spacing_m", 500.0)),
+        inundation_error_tolerance_pct=float(metadata.get("inundation_error_tolerance_pct", 1.0)),
+        fes_model="FES2022b",
+        fes_source_type="native_lgp2",
+        topology_max_resolution_m=float(metadata.get("topology_max_resolution_m", 200.0))
+    )
+
     time_epochs = (time_index.astype("int64") // 10**9).to_numpy(dtype=np.float64)
 
     try:
         with netCDF4.Dataset(tmp_cache_path, mode="w", format="NETCDF4") as ds:
-            # 1. 定义维度
             ds.createDimension("node", num_nodes)
             ds.createDimension("time", num_times)
             ds.createDimension("cell", num_cells)
             ds.createDimension("bounds_dim", 4)
             ds.createDimension("corners_dim", 4)
 
-            # 2. 写入全局元数据
             ds.setncattr("COASTTIDEX_VERSION", COASTTIDEX_VERSION)
             ds.setncattr("CACHE_SCHEMA_VERSION", CACHE_SCHEMA_VERSION)
+            ds.setncattr("CACHE_SIGNATURE", sig_hex)
+            ds.setncattr("CACHE_SIGNATURE_ALGORITHM", CACHE_SIGNATURE_ALGORITHM)
+            ds.setncattr("CACHE_SIGNATURE_PAYLOAD", sig_payload)
             ds.setncattr("SOURCE_RASTER_NAME", os.path.basename(info.path))
             ds.setncattr("SOURCE_RASTER_PATH", str(info.path))
             ds.setncattr("SOURCE_WIDTH", int(info.width))
             ds.setncattr("SOURCE_HEIGHT", int(info.height))
             ds.setncattr("SOURCE_CRS", str(info.crs))
-            ds.setncattr("SOURCE_TRANSFORM", str(list(info.transform)[:6]))
-            ds.setncattr("SOURCE_NODATA", float(info.nodata) if info.nodata is not None else np.nan)
+            ds.setncattr("SOURCE_TRANSFORM", json.dumps([round(float(v), 8) for v in list(info.transform)[:6]]))
+            ds.setncattr("SOURCE_BOUNDS", json.dumps([round(float(v), 5) for v in info.bounds]))
+            ds.setncattr("SOURCE_NODATA", float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else np.nan)
             ds.setncattr("TIME_START", str(metadata.get("start_time", time_index[0].isoformat())))
             ds.setncattr("TIME_END", str(metadata.get("end_time", time_index[-1].isoformat())))
             ds.setncattr("TIME_STEP", str(metadata.get("freq", "30min")))
             ds.setncattr("TIMEZONE", str(metadata.get("source_tz", "UTC")))
+            ds.setncattr("TIME_INCLUSIVE", str(metadata.get("inclusive", "left")))
             ds.setncattr("TIME_SAMPLES", int(num_times))
             ds.setncattr("FES_MODEL", "FES2022b")
             ds.setncattr("FES_SOURCE_TYPE", "native_lgp2")
@@ -157,13 +443,11 @@ def write_tide_cache(
             ds.setncattr("LEAF_CELL_COUNT", int(num_cells))
             ds.setncattr("CREATED_AT", datetime.now(timezone.utc).isoformat())
 
-            # 3. 创建并写入时间变量
             var_time = ds.createVariable("time", "f8", ("time",))
             var_time.units = "seconds since 1970-01-01 00:00:00 UTC"
             var_time.calendar = "proleptic_gregorian"
             var_time[:] = time_epochs
 
-            # 4. 创建并写入控制节点坐标与属性变量
             var_node_x = ds.createVariable("node_x", "f8", ("node",))
             var_node_y = ds.createVariable("node_y", "f8", ("node",))
             var_node_lon = ds.createVariable("node_lon", "f8", ("node",))
@@ -191,7 +475,6 @@ def write_tide_cache(
             var_comp_id[:] = node_cid_arr
             var_node_qc[:] = node_qc_arr
 
-            # 5. 创建并写入潮位时序大矩阵 (分块压缩写入，防止内存超载)
             chunk_nodes = min(500, max(1, num_nodes))
             chunk_times = min(1000, max(1, num_times))
             var_tide = ds.createVariable(
@@ -203,7 +486,6 @@ def write_tide_cache(
             var_tide.units = "metres"
             var_tide.long_name = "Tide elevation relative to Mean Sea Level (MSL)"
 
-            # 流式分块将各节点的潮位数组写入 NetCDF
             tide_block = np.full((chunk_nodes, num_times), np.nan, dtype=np.float32)
             block_fill = 0
             block_start_idx = 0
@@ -215,7 +497,6 @@ def write_tide_cache(
                 if getattr(node, "tide_msl_raw", None) is not None and len(node.tide_msl_raw) == num_times:
                     tide_block[block_fill, :] = node.tide_msl_raw
                 elif node.valid and len(node.water_levels_sorted) == num_times:
-                    # 若 raw tide 未留存，使用 sorted water levels 减去 static offset 兜底
                     tide_block[block_fill, :] = (node.water_levels_sorted - node.static_offset_m)
                 else:
                     tide_block[block_fill, :] = np.nan
@@ -227,7 +508,6 @@ def write_tide_cache(
                     block_start_idx = idx + 1
                     block_fill = 0
 
-            # 6. 创建并写入四叉树叶单元信息
             var_cell_bounds = ds.createVariable("cell_bounds", "f8", ("cell", "bounds_dim"))
             var_cell_bounds.description = "Bounding box: [x_min, y_min, x_max, y_max]"
 
@@ -269,15 +549,8 @@ def write_tide_cache(
             var_cell_qc[:] = cell_qc_arr
             var_cell_err[:] = cell_err_arr
 
-            # 7. 写入完成标识
             ds.setncattr("CACHE_COMPLETE", "true")
 
-        # 原子重命名为正式缓存文件
-        if os.path.exists(cache_path):
-            try:
-                os.remove(cache_path)
-            except Exception:
-                pass
         os.replace(tmp_cache_path, cache_path)
         return cache_path
 
@@ -293,7 +566,6 @@ def write_tide_cache(
 def read_tide_cache(cache_path: str) -> Dict[str, Any]:
     """
     读取 Tide Cache NetCDF 文件并重建自适应控制节点与叶单元拓扑。
-    在内存中根据 tide_msl + static_offset 原地构造各节点的升序水位序列，用于 CCDF 快速二分检索。
     """
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
@@ -303,10 +575,8 @@ def read_tide_cache(cache_path: str) -> Dict[str, Any]:
         if not is_complete:
             raise ValueError(f"Tide Cache 文件未完整写入 (缺少 CACHE_COMPLETE 标记): {cache_path}")
 
-        # 读取全局属性
         attrs = {attr: getattr(ds, attr) for attr in ds.ncattrs()}
 
-        # 读取节点数据
         node_x = ds.variables["node_x"][:]
         node_y = ds.variables["node_y"][:]
         node_lon = ds.variables["node_lon"][:]
@@ -319,13 +589,12 @@ def read_tide_cache(cache_path: str) -> Dict[str, Any]:
         num_nodes = len(node_x)
         nodes: List[ControlNode] = []
 
-        # 读取大潮位矩阵并原地重构升序水位
         tide_mat = ds.variables["tide_msl_m"][:]  # (node, time)
 
         for i in range(num_nodes):
             is_valid = bool(node_val[i])
             off_m = float(static_offset[i])
-            
+
             if is_valid:
                 raw_t = np.array(tide_mat[i], dtype=np.float32)
                 valid_t = raw_t[np.isfinite(raw_t)]
@@ -353,7 +622,6 @@ def read_tide_cache(cache_path: str) -> Dict[str, Any]:
             )
             nodes.append(node)
 
-        # 读取叶单元数据
         cell_bounds = ds.variables["cell_bounds"][:]
         cell_nodes = ds.variables["cell_node_indices"][:]
         cell_lvl = ds.variables["cell_level"][:]
@@ -408,21 +676,35 @@ def calculate_inundation_from_tide_cache(
     output_path: str,
     qc_output_path: Optional[str] = None,
     block_size: Optional[int] = 512,
+    allow_overwrite: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     cancel_event = None
 ) -> RasterResultSummary:
     """
     【Stage 2 核心解算器】基于已有 Tide Cache NetCDF 与原始 DEM 解算潜在天文潮淹没频率 GeoTIFF。
-
-    硬性验收准则:
-        1. 本函数执行全流程中严禁再次调用 FES 模型 (FESTidePredictor 调用次数恒等于 0)；
-        2. 严格遵循天文潮淹没频率科学物理定义: P(H(t) > z) * 100%；
-        3. 空间栅格属性完全继承原始 DEM: CRS, Transform, Dimensions, NoData, Resolution；
-        4. 流式块状写入，支持原子写入回滚保护 (*.tmp.tif) 与 UInt16 位掩码 QC 输出。
     """
     t_start = time.time()
     if progress_callback:
-        progress_callback(0, f"正在读取 Tide Cache: {os.path.basename(cache_path)}...")
+        progress_callback(0, f"正在验证 Tide Cache 兼容性: {os.path.basename(cache_path)}...")
+
+    from .raster_engine import RasterTideEngine
+    tmp_engine = RasterTideEngine()
+    info = tmp_engine.inspect_raster(dem_path, compute_valid_count=False)
+
+    expected_spec = {
+        "width": info.width,
+        "height": info.height,
+        "crs": info.crs,
+        "transform": list(info.transform)[:6]
+    }
+    compatible, reasons = validate_tide_cache_compatibility(cache_path, expected_spec)
+    if not compatible:
+        raise TideCacheCompatibilityError(
+            f"Tide Cache 与目标 DEM 不兼容，无法执行 Stage 2 解算: {'; '.join(reasons)}"
+        )
+
+    if progress_callback:
+        progress_callback(5, "Tide Cache 兼容性通过，正在重建控制网格拓扑...")
 
     cache_data = read_tide_cache(cache_path)
     leaf_cells: List[QuadCell] = cache_data["leaf_cells"]
@@ -433,324 +715,57 @@ def calculate_inundation_from_tide_cache(
         base, ext = os.path.splitext(output_path)
         qc_output_path = f"{base}_qc{ext}"
 
-    out_dir = os.path.dirname(os.path.abspath(output_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    tmp_output = f"{output_path}.tmp.tif"
-    tmp_qc = f"{qc_output_path}.tmp.tif"
-
     if block_size is None:
         block_size = 512
 
-    try:
-        with rasterio.open(dem_path) as src_dem:
-            profile = src_dem.profile.copy()
-            width = src_dem.width
-            height = src_dem.height
-            transform = src_dem.transform
-            crs = src_dem.crs
-            dem_nodata = src_dem.nodata
+    top_res_m = float(meta.get("TOPOLOGY_RESOLUTION_M", 200.0))
+    labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, _, input_valid_count = build_support_topology(
+        info=info,
+        topology_max_resolution_m=top_res_m,
+        topology_valid_fraction_threshold=0.20,
+        block_size=block_size,
+        cancel_event=cancel_event
+    )
 
-            # 验证 DEM 与 Cache 兼容性
-            cache_w = int(meta.get("SOURCE_WIDTH", width))
-            cache_h = int(meta.get("SOURCE_HEIGHT", height))
-            if cache_w != width or cache_h != height:
-                raise ValueError(
-                    f"DEM 尺寸 ({width}x{height}) 与 Tide Cache 记录的尺寸 ({cache_w}x{cache_h}) 不匹配！"
-                )
+    provenance_tags = {
+        "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
+        "DATA_PRODUCT": "Potential Astronomical Tidal Inundation Frequency",
+        "DEFINITION": "P(H(t) > z) under fixed representative terrain",
+        "SOURCE_DEM": os.path.basename(dem_path),
+        "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
+        "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
+        "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", "")),
+        "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
+        "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
+        "STAGE": "Stage 2 (Zero FES calls)",
+        "TOPOLOGY_GUARD": "valid_mask_topology_aware",
+        "QC_ENCODING": "UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached"
+    }
 
-            # 确定输出 NoData
-            if dem_nodata is not None and np.isfinite(dem_nodata):
-                out_nodata = float(dem_nodata)
-            else:
-                out_nodata = float(np.nan)
-
-            out_profile = profile.copy()
-            out_profile.update(
-                dtype=rasterio.float32,
-                count=1,
-                nodata=out_nodata,
-                compress="lzw"
-            )
-
-            qc_profile = profile.copy()
-            qc_profile.update(
-                dtype=rasterio.uint16,
-                count=1,
-                nodata=QC_NODATA,
-                compress="lzw"
-            )
-
-            # 建立空间桶索引 (Spatial Bucket Index)
-            min_x = min(cell.x_min for cell in leaf_cells)
-            max_x = max(cell.x_max for cell in leaf_cells)
-            min_y = min(cell.y_min for cell in leaf_cells)
-            max_y = max(cell.y_max for cell in leaf_cells)
-
-            span_x = max_x - min_x
-            span_y = max_y - min_y
-            bucket_size_x = max(100.0, span_x / 32.0)
-            bucket_size_y = max(100.0, span_y / 32.0)
-            spatial_buckets: Dict[Tuple[int, int], List[QuadCell]] = defaultdict(list)
-
-            for cell in leaf_cells:
-                bx0 = int((cell.x_min - min_x) // bucket_size_x)
-                bx1 = int((cell.x_max - min_x) // bucket_size_x)
-                by0 = int((cell.y_min - min_y) // bucket_size_y)
-                by1 = int((cell.y_max - min_y) // bucket_size_y)
-                for bx in range(bx0, bx1 + 1):
-                    for by in range(by0, by1 + 1):
-                        spatial_buckets[(bx, by)].append(cell)
-
-            total_valid_pixels = 0
-            total_solved_pixels = 0
-            total_unsolved_pixels = 0
-            total_pixels = width * height
-
-            n_blocks_x = (width + block_size - 1) // block_size
-            n_blocks_y = (height + block_size - 1) // block_size
-            total_blocks = n_blocks_x * n_blocks_y
-            completed_blocks = 0
-
-            if progress_callback:
-                progress_callback(10, f"空间索引就绪，开始流式插值解算 (总像元: {total_pixels:,})...")
-
-            with rasterio.open(tmp_output, "w", **out_profile) as dst_out,                  rasterio.open(tmp_qc, "w", **qc_profile) as dst_qc:
-
-                for r_idx in range(0, height, block_size):
-                    w_h = min(block_size, height - r_idx)
-                    for c_idx in range(0, width, block_size):
-                        if cancel_event is not None and cancel_event.is_set():
-                            raise RasterCalculationCancelled("用户取消了淹没频率计算。")
-
-                        w_w = min(block_size, width - c_idx)
-                        win = Window(c_idx, r_idx, w_w, w_h)
-
-                        dem_block = src_dem.read(1, window=win)
-                        freq_block = np.full((w_h, w_w), out_nodata, dtype=np.float32)
-                        qc_block = np.full((w_h, w_w), QC_NODATA, dtype=np.uint16)
-
-                        # 识别有效地形 Target Pixels
-                        if dem_nodata is not None and np.isfinite(dem_nodata):
-                            target_mask = (dem_block != dem_nodata) & np.isfinite(dem_block)
-                        else:
-                            target_mask = np.isfinite(dem_block)
-
-                        n_valid_in_win = int(np.count_nonzero(target_mask))
-                        total_valid_pixels += n_valid_in_win
-
-                        if n_valid_in_win > 0:
-                            rows_local, cols_local = np.where(target_mask)
-                            z_vals = dem_block[rows_local, cols_local]
-
-                            rows_global = r_idx + rows_local
-                            cols_global = c_idx + cols_local
-
-                            xs, ys = rasterio.transform.xy(transform, rows_global, cols_global, offset="center")
-                            xs = np.array(xs, dtype=np.float64)
-                            ys = np.array(ys, dtype=np.float64)
-
-                            # 收集候选单元
-                            w_min_x, w_max_x = np.min(xs), np.max(xs)
-                            w_min_y, w_max_y = np.min(ys), np.max(ys)
-
-                            b_col_min = int((w_min_x - min_x) // bucket_size_x)
-                            b_col_max = int((w_max_x - min_x) // bucket_size_x)
-                            b_row_min = int((w_min_y - min_y) // bucket_size_y)
-                            b_row_max = int((w_max_y - min_y) // bucket_size_y)
-
-                            candidate_cells_set: Set[int] = set()
-                            candidate_cells: List[QuadCell] = []
-                            for bx in range(b_col_min, b_col_max + 1):
-                                for by in range(b_row_min, b_row_max + 1):
-                                    for c in spatial_buckets.get((bx, by), []):
-                                        if c.cell_id not in candidate_cells_set:
-                                            candidate_cells_set.add(c.cell_id)
-                                            candidate_cells.append(c)
-
-                            if not candidate_cells:
-                                candidate_cells = leaf_cells
-
-                            c_x0 = np.array([c.x_min for c in candidate_cells])
-                            c_x1 = np.array([c.x_max for c in candidate_cells])
-                            c_y0 = np.array([c.y_min for c in candidate_cells])
-                            c_y1 = np.array([c.y_max for c in candidate_cells])
-
-                            win_freqs = np.full(n_valid_in_win, out_nodata, dtype=np.float32)
-                            win_qcs = np.full(n_valid_in_win, QC_BIT_INSUFFICIENT_NODES, dtype=np.uint16)
-
-                            for p_i in range(n_valid_in_win):
-                                px_x = xs[p_i]
-                                px_y = ys[p_i]
-                                p_z = z_vals[p_i]
-
-                                in_box = (
-                                    (px_x >= c_x0 - 1e-4) & (px_x <= c_x1 + 1e-4) &
-                                    (px_y >= c_y0 - 1e-4) & (px_y <= c_y1 + 1e-4)
-                                )
-                                hit_indices = np.where(in_box)[0]
-
-                                target_cell = None
-                                if len(hit_indices) == 1:
-                                    target_cell = candidate_cells[hit_indices[0]]
-                                elif len(hit_indices) > 1:
-                                    best_c = None
-                                    best_lvl = -1
-                                    for h_idx in hit_indices:
-                                        c_obj = candidate_cells[h_idx]
-                                        if c_obj.level > best_lvl:
-                                            best_lvl = c_obj.level
-                                            best_c = c_obj
-                                    target_cell = best_c
-                                else:
-                                    # 最近邻回退
-                                    c_xm = (c_x0 + c_x1) / 2.0
-                                    c_ym = (c_y0 + c_y1) / 2.0
-                                    dists = (c_xm - px_x)**2 + (c_ym - px_y)**2
-                                    target_cell = candidate_cells[np.argmin(dists)]
-
-                                c_na = target_cell.node_a
-                                c_nb = target_cell.node_b
-                                c_nc = target_cell.node_c
-                                c_nd = target_cell.node_d
-
-                                corners = [c_na, c_nb, c_nc, c_nd]
-                                val_corners = [cn for cn in corners if cn.valid and len(cn.water_levels_sorted) > 0]
-
-                                if len(val_corners) == 0:
-                                    win_freqs[p_i] = out_nodata
-                                    win_qcs[p_i] = QC_BIT_INSUFFICIENT_NODES
-                                    continue
-
-                                # 提取单元级基础 QC
-                                pix_qc = QC_BIT_VALID
-                                if getattr(target_cell, "qc_min_spacing_reached", False):
-                                    pix_qc |= QC_BIT_MIN_SPACING_REACHED
-                                if getattr(target_cell, "qc_max_refinement_reached", False):
-                                    pix_qc |= QC_BIT_MAX_REFINEMENT_REACHED
-                                if getattr(target_cell, "qc_validity_boundary", False):
-                                    pix_qc |= QC_BIT_FES_VALIDITY_BOUNDARY
-
-                                # 双线性空间插值权重
-                                cell_w = max(1e-6, target_cell.x_max - target_cell.x_min)
-                                cell_h = max(1e-6, target_cell.y_max - target_cell.y_min)
-                                u = np.clip((px_x - target_cell.x_min) / cell_w, 0.0, 1.0)
-                                v = np.clip((px_y - target_cell.y_min) / cell_h, 0.0, 1.0)
-
-                                w_a = (1.0 - u) * (1.0 - v)
-                                w_b = u * (1.0 - v)
-                                w_c = (1.0 - u) * v
-                                w_d = u * v
-
-                                w_list = [w_a, w_b, w_c, w_d]
-
-                                if len(val_corners) == 4:
-                                    f_a = compute_inundation_frequency(c_na.water_levels_sorted, p_z, as_percentage=True)
-                                    f_b = compute_inundation_frequency(c_nb.water_levels_sorted, p_z, as_percentage=True)
-                                    f_c = compute_inundation_frequency(c_nc.water_levels_sorted, p_z, as_percentage=True)
-                                    f_d = compute_inundation_frequency(c_nd.water_levels_sorted, p_z, as_percentage=True)
-                                    f_interp = w_a * f_a + w_b * f_b + w_c * f_c + w_d * f_d
-                                else:
-                                    pix_qc |= QC_BIT_SPATIAL_FALLBACK
-                                    sum_w = 0.0
-                                    f_accum = 0.0
-                                    for idx_cn, cn in enumerate(corners):
-                                        if cn.valid and len(cn.water_levels_sorted) > 0:
-                                            w_cur = w_list[idx_cn]
-                                            f_cur = compute_inundation_frequency(cn.water_levels_sorted, p_z, as_percentage=True)
-                                            f_accum += w_cur * f_cur
-                                            sum_w += w_cur
-                                    if sum_w > 1e-9:
-                                        f_interp = f_accum / sum_w
-                                    else:
-                                        f_interp = np.mean([
-                                            compute_inundation_frequency(cn.water_levels_sorted, p_z, as_percentage=True)
-                                            for cn in val_corners
-                                        ])
-
-                                for cn in val_corners:
-                                    pix_qc |= (cn.qc_bitmask & (QC_BIT_FES_EXTRAPOLATED | QC_BIT_DATUM_SOURCE_APPROX | QC_BIT_DATUM_INVALID))
-
-                                win_freqs[p_i] = np.clip(f_interp, 0.0, 100.0)
-                                win_qcs[p_i] = pix_qc
-
-                            freq_block[rows_local, cols_local] = win_freqs
-                            qc_block[rows_local, cols_local] = win_qcs
-
-                            solved_mask = np.isfinite(win_freqs) if not np.isfinite(out_nodata) else (win_freqs != out_nodata)
-                            n_solved = int(np.count_nonzero(solved_mask))
-                            total_solved_pixels += n_solved
-                            total_unsolved_pixels += (n_valid_in_win - n_solved)
-
-                        dst_out.write(freq_block, 1, window=win)
-                        dst_qc.write(qc_block, 1, window=win)
-
-                        completed_blocks += 1
-                        if progress_callback and (completed_blocks % 5 == 0 or completed_blocks == total_blocks):
-                            pct = 10 + int(85 * (completed_blocks / total_blocks))
-                            progress_callback(pct, f"流式插值解算中 ({completed_blocks}/{total_blocks} 块已完成)...")
-
-                # 嵌入 GeoTIFF Metadata
-                provenance_tags = {
-                    "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
-                    "DATA_PRODUCT": "Potential Astronomical Tidal Inundation Frequency",
-                    "DEFINITION": "P(H(t) > z) under fixed representative terrain",
-                    "SOURCE_DEM": os.path.basename(dem_path),
-                    "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
-                    "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", "")),
-                    "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
-                    "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
-                    "STAGE": "Stage 2 (Zero FES calls)",
-                    "SOLVED_PIXELS": str(total_solved_pixels),
-                    "INPUT_VALID_PIXELS": str(total_valid_pixels)
-                }
-                dst_out.update_tags(**provenance_tags)
-                dst_qc.update_tags(**provenance_tags)
-
-        # 原子重命名
-        if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-            except Exception:
-                pass
-        os.replace(tmp_output, output_path)
-
-        if os.path.exists(qc_output_path):
-            try:
-                os.remove(qc_output_path)
-            except Exception:
-                pass
-        os.replace(tmp_qc, qc_output_path)
-
-        elapsed = time.time() - t_start
+    def _stage2_prog(pct_val, msg_val):
         if progress_callback:
-            progress_callback(100, f"淹没频率解算完成，共耗时 {elapsed:.2f}s。")
+            progress_callback(10 + int(pct_val * 0.9), msg_val)
 
-        return RasterResultSummary(
-            output_path=output_path,
-            qc_output_path=qc_output_path,
-            mode="tide_cache_inundation",
-            width=width,
-            height=height,
-            valid_pixels=total_solved_pixels,
-            total_pixels=total_pixels,
-            input_valid_pixels=total_valid_pixels,
-            solved_pixels=total_solved_pixels,
-            unsolved_pixels=total_unsolved_pixels,
-            control_nodes_count=len(nodes),
-            elapsed_seconds=elapsed,
-            metadata=meta
-        )
+    summary = stream_inundation_frequency_interpolation(
+        info=info,
+        leaf_cells=leaf_cells,
+        labeled_coarse=labeled_coarse,
+        downsample_factor=downsample_factor,
+        h_coarse=h_coarse,
+        w_coarse=w_coarse,
+        input_valid_count=input_valid_count,
+        output_path=output_path,
+        qc_output_path=qc_output_path,
+        block_size=block_size,
+        metadata_tags=provenance_tags,
+        allow_overwrite=allow_overwrite,
+        progress_callback=_stage2_prog,
+        cancel_event=cancel_event
+    )
+    summary.mode = "tide_cache_inundation"
+    summary.metadata = meta
 
-    except Exception:
-        if os.path.exists(tmp_output):
-            try:
-                os.remove(tmp_output)
-            except Exception:
-                pass
-        if os.path.exists(tmp_qc):
-            try:
-                os.remove(tmp_qc)
-            except Exception:
-                pass
-        raise
+    if progress_callback:
+        progress_callback(100, f"Stage 2 淹没频率解算完毕 (耗时 {time.time() - t_start:.2f}s)！")
+
+    return summary

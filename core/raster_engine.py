@@ -19,7 +19,7 @@ import time
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Iterator, Optional, Tuple, List, Dict, Any, Set
+from typing import Iterator, Optional, Tuple, List, Dict, Any, Set, Callable
 
 import numpy as np
 import pandas as pd
@@ -45,6 +45,11 @@ from .tide_engine import FESTidePredictor
 
 class RasterCalculationCancelled(RuntimeError):
     """用户主动取消栅格解算任务异常"""
+    pass
+
+
+class ExistingOutputError(FileExistsError):
+    """目标正式产物已存在且当前策略不允许覆盖时抛出"""
     pass
 
 
@@ -241,6 +246,382 @@ class RasterResultSummary:
     control_nodes_count: Optional[int] = 0
     elapsed_seconds: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def build_support_topology(
+    info: RasterInfo,
+    topology_max_resolution_m: float = 200.0,
+    topology_valid_fraction_threshold: float = 0.20,
+    block_size: int = 512,
+    cancel_event = None
+) -> Tuple[np.ndarray, int, int, int, int, np.ndarray, int]:
+    """
+    基于 DEM 构建粗粒度连通域支撑掩膜 (Support Topology)。
+
+    【科学语义区分 (Scientific Distinction)】:
+    - TARGET MASK: 细粒度 (10m) 像元级有效地形高程，指示哪些像元需要计算并输出淹没频率；
+    - FES SUPPORT: 空间宏观上具有潮汐水动力学支撑的有效控制节点；
+    - SUPPORT TOPOLOGY: 粗粒度连通域划分，用于防止跨越陆地/NoData 屏障的错误插值。
+      特别说明: Target NoData 不等同于物理水力隔离屏障 (Physical Barrier)。
+
+    返回:
+        (labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, coarse_active_support, input_valid_count)
+    """
+    if info.is_projected:
+        pixel_size_m = min(abs(info.resolution[0]), abs(info.resolution[1])) * info.unit_factor
+    else:
+        mid_lat = (info.bounds[1] + info.bounds[3]) / 2.0
+        cos_lat = max(0.01, np.cos(np.radians(mid_lat)))
+        pixel_size_m = min(abs(info.resolution[0]) * 111320.0 * cos_lat, abs(info.resolution[1]) * 111320.0)
+
+    downsample_factor = max(1, int(round(topology_max_resolution_m / max(1e-3, pixel_size_m))))
+    h_coarse = int(np.ceil(info.height / downsample_factor))
+    w_coarse = int(np.ceil(info.width / downsample_factor))
+
+    coarse_active_support = np.zeros((h_coarse, w_coarse), dtype=bool)
+    coarse_valid_counts = np.zeros((h_coarse, w_coarse), dtype=np.int32)
+
+    cell_h = np.minimum(downsample_factor, info.height - np.arange(h_coarse) * downsample_factor)
+    cell_w = np.minimum(downsample_factor, info.width - np.arange(w_coarse) * downsample_factor)
+    coarse_total_counts = np.outer(cell_h, cell_w).astype(np.int32)
+
+    input_valid_count = 0
+    with rasterio.open(info.path) as src_dem:
+        for r_off in range(0, info.height, block_size):
+            bh = min(block_size, info.height - r_off)
+            for c_off in range(0, info.width, block_size):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RasterCalculationCancelled("用户取消了任务。")
+                bw = min(block_size, info.width - c_off)
+                win = Window(c_off, r_off, bw, bh)
+                chunk = src_dem.read(1, window=win)
+                if info.nodata is not None and np.isfinite(info.nodata):
+                    v_mask = ~np.isclose(chunk, info.nodata) & np.isfinite(chunk)
+                else:
+                    v_mask = np.isfinite(chunk)
+                input_valid_count += int(np.count_nonzero(v_mask))
+
+                if np.any(v_mask):
+                    rows_loc, cols_loc = np.where(v_mask)
+                    r_glob = rows_loc + r_off
+                    c_glob = cols_loc + c_off
+                    r_c = np.clip(r_glob // downsample_factor, 0, h_coarse - 1)
+                    c_c = np.clip(c_glob // downsample_factor, 0, w_coarse - 1)
+                    coarse_active_support[r_c, c_c] = True
+                    np.add.at(coarse_valid_counts, (r_c, c_c), 1)
+
+    if input_valid_count == 0:
+        raise ValueError(f"输入 DEM '{info.path}' 中未找到任何有效地形高程像元 (全部为 NoData/NaN)。")
+
+    valid_fractions = coarse_valid_counts / np.maximum(1, coarse_total_counts)
+    coarse_connectivity = (valid_fractions >= topology_valid_fraction_threshold)
+
+    labeled_coarse, num_features = scipy.ndimage.label(coarse_connectivity, structure=np.ones((3, 3)))
+    return labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, coarse_active_support, input_valid_count
+
+
+def stream_inundation_frequency_interpolation(
+    info: RasterInfo,
+    leaf_cells: List[QuadCell],
+    labeled_coarse: np.ndarray,
+    downsample_factor: int,
+    h_coarse: int,
+    w_coarse: int,
+    input_valid_count: int,
+    output_path: str,
+    qc_output_path: Optional[str] = None,
+    block_size: int = 512,
+    metadata_tags: Optional[Dict[str, str]] = None,
+    allow_overwrite: bool = True,
+    control_nodes_count: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_event = None
+) -> RasterResultSummary:
+    """
+    【共享流式插值内核 (Shared Interpolation Kernel)】
+    负责在 2D DEM 上根据自适应叶单元与控制节点排序时序流式评估潜在天文潮淹没频率与 QC 掩膜。
+    保证 Direct 单影像路径与 Stage 2 Cache 路径 100% 数学与科学连通域拓扑一致。
+    """
+    t_start = time.time()
+    if qc_output_path is None:
+        base, ext = os.path.splitext(output_path)
+        qc_output_path = f"{base}_qc{ext}"
+
+    if not allow_overwrite:
+        if os.path.exists(output_path):
+            raise ExistingOutputError(f"输出文件已存在且未开启覆盖权限: {output_path}")
+        if qc_output_path and os.path.exists(qc_output_path):
+            raise ExistingOutputError(f"QC 输出文件已存在且未开启覆盖权限: {qc_output_path}")
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    tmp_output = f"{output_path}.tmp.tif"
+    tmp_qc = f"{qc_output_path}.tmp.tif"
+
+    min_x, min_y, max_x, max_y = info.bounds
+    bucket_size_x = max(100.0, (max_x - min_x) / 32.0)
+    bucket_size_y = max(100.0, (max_y - min_y) / 32.0)
+    spatial_buckets: Dict[Tuple[int, int], List[QuadCell]] = defaultdict(list)
+
+    for cell in leaf_cells:
+        bx0 = int((cell.x_min - min_x) // bucket_size_x)
+        bx1 = int((cell.x_max - min_x) // bucket_size_x)
+        by0 = int((cell.y_min - min_y) // bucket_size_y)
+        by1 = int((cell.y_max - min_y) // bucket_size_y)
+        for bx in range(bx0, bx1 + 1):
+            for by in range(by0, by1 + 1):
+                spatial_buckets[(bx, by)].append(cell)
+
+    out_profile = {
+        'driver': 'GTiff',
+        'height': info.height,
+        'width': info.width,
+        'count': 1,
+        'dtype': rasterio.float32,
+        'crs': rasterio.crs.CRS.from_user_input(info.crs),
+        'transform': info.transform,
+        'nodata': np.nan,
+        'compress': 'deflate',
+        'predictor': 2,
+    }
+    if info.width >= 16 and info.height >= 16 and block_size >= 16:
+        out_profile['tiled'] = True
+        out_profile['blockxsize'] = min(512, max(16, (int(block_size) // 16) * 16))
+        out_profile['blockysize'] = min(512, max(16, (int(block_size) // 16) * 16))
+    else:
+        out_profile['tiled'] = False
+
+    qc_profile = out_profile.copy()
+    qc_profile.update({
+        'dtype': rasterio.uint16,
+        'nodata': QC_NODATA,
+        'predictor': 1
+    })
+
+    total_windows = int(np.ceil(info.width / block_size) * np.ceil(info.height / block_size))
+    win_idx = 0
+    solved_pixel_count = 0
+
+    try:
+        with rasterio.open(info.path) as src_dem,              rasterio.open(tmp_output, 'w', **out_profile) as dst_inund,              rasterio.open(tmp_qc, 'w', **qc_profile) as dst_qc:
+
+            for r_off in range(0, info.height, block_size):
+                bh = min(block_size, info.height - r_off)
+                for c_off in range(0, info.width, block_size):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RasterCalculationCancelled("用户取消了任务。")
+
+                    bw = min(block_size, info.width - c_off)
+                    window = Window(c_off, r_off, bw, bh)
+
+                    dem_chunk = src_dem.read(1, window=window).astype(np.float32)
+                    if info.nodata is not None and np.isfinite(info.nodata):
+                        valid_dem_mask = ~np.isclose(dem_chunk, info.nodata) & np.isfinite(dem_chunk)
+                    else:
+                        valid_dem_mask = np.isfinite(dem_chunk)
+
+                    inund_chunk = np.full(dem_chunk.shape, np.nan, dtype=np.float32)
+                    qc_chunk = np.full(dem_chunk.shape, QC_NODATA, dtype=np.uint16)
+
+                    n_chunk_valid = int(np.count_nonzero(valid_dem_mask))
+                    if n_chunk_valid > 0:
+                        rows_local, cols_local = np.where(valid_dem_mask)
+                        rows_global = rows_local + window.row_off
+                        cols_global = cols_local + window.col_off
+
+                        px_xs, px_ys = rasterio.transform.xy(info.transform, rows_global, cols_global, offset='center')
+                        px_xs = np.asarray(px_xs, dtype=float)
+                        px_ys = np.asarray(px_ys, dtype=float)
+                        z_vals = dem_chunk[valid_dem_mask]
+
+                        w_bounds = rasterio.windows.bounds(window, transform=info.transform)
+                        win_x0 = min(w_bounds[0], w_bounds[2])
+                        win_y0 = min(w_bounds[1], w_bounds[3])
+                        win_x1 = max(w_bounds[0], w_bounds[2])
+                        win_y1 = max(w_bounds[1], w_bounds[3])
+
+                        wbx0 = int((win_x0 - min_x) // bucket_size_x)
+                        wbx1 = int((win_x1 - min_x) // bucket_size_x)
+                        wby0 = int((win_y0 - min_y) // bucket_size_y)
+                        wby1 = int((win_y1 - min_y) // bucket_size_y)
+
+                        candidate_cells: List[QuadCell] = []
+                        seen_cids = set()
+                        for bx in range(wbx0, wbx1 + 1):
+                            for by in range(wby0, wby1 + 1):
+                                for c in spatial_buckets.get((bx, by), []):
+                                    if c.cell_id not in seen_cids:
+                                        seen_cids.add(c.cell_id)
+                                        candidate_cells.append(c)
+
+                        intersecting_cells = [
+                            c for c in candidate_cells
+                            if not (c.x_max < win_x0 or c.x_min > win_x1 or c.y_max < win_y0 or c.y_min > win_y1)
+                        ]
+
+                        freq_out = np.full(n_chunk_valid, np.nan, dtype=np.float32)
+                        qc_out = np.zeros(n_chunk_valid, dtype=np.uint16)
+
+                        r_c_arr = np.clip(rows_global // downsample_factor, 0, h_coarse - 1)
+                        c_c_arr = np.clip(cols_global // downsample_factor, 0, w_coarse - 1)
+                        pixel_comps = labeled_coarse[r_c_arr, c_c_arr]
+
+                        for cell in intersecting_cells:
+                            is_east = (cell.x_max >= info.bounds[2] - 1e-6)
+                            is_north = (cell.y_max >= info.bounds[3] - 1e-6)
+                            x_in = (px_xs >= cell.x_min) & (px_xs <= cell.x_max if is_east else px_xs < cell.x_max)
+                            y_in = (px_ys >= cell.y_min) & (px_ys <= cell.y_max if is_north else px_ys < cell.y_max)
+                            in_cell = x_in & y_in
+                            if not np.any(in_cell):
+                                continue
+
+                            sub_z = z_vals[in_cell]
+                            sub_x = px_xs[in_cell]
+                            sub_y = px_ys[in_cell]
+                            sub_comps = pixel_comps[in_cell]
+
+                            dx_cell = max(1e-6, cell.x_max - cell.x_min)
+                            dy_cell = max(1e-6, cell.y_max - cell.y_min)
+                            u = np.clip((sub_x - cell.x_min) / dx_cell, 0.0, 1.0)
+                            v = np.clip((sub_y - cell.y_min) / dy_cell, 0.0, 1.0)
+
+                            w_a = (1.0 - u) * (1.0 - v)
+                            w_b = u * (1.0 - v)
+                            w_c = (1.0 - u) * v
+                            w_d = u * v
+
+                            c_nodes = [
+                                (cell.node_a, w_a),
+                                (cell.node_b, w_b),
+                                (cell.node_c, w_c),
+                                (cell.node_d, w_d)
+                            ]
+
+                            valid_nodes = []
+                            for n, w_vec in c_nodes:
+                                if n.valid and len(n.water_levels_sorted) > 0:
+                                    valid_nodes.append((n, w_vec))
+
+                            sub_freq = np.full(len(sub_z), np.nan, dtype=np.float32)
+                            sub_qc = np.zeros(len(sub_z), dtype=np.uint16)
+
+                            cell_qc_flags = QC_BIT_VALID
+                            if cell.qc_min_spacing_reached:
+                                cell_qc_flags |= QC_BIT_MIN_SPACING_REACHED
+                            if cell.qc_max_refinement_reached:
+                                cell_qc_flags |= QC_BIT_MAX_REFINEMENT_REACHED
+                            if cell.qc_validity_boundary:
+                                cell_qc_flags |= QC_BIT_FES_VALIDITY_BOUNDARY
+
+                            node_comps = {n.component_id for n, _ in valid_nodes}
+                            non_z_node_comps = {c for c in node_comps if c > 0}
+
+                            if len(valid_nodes) == 0:
+                                sub_qc |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES)
+                            elif len(valid_nodes) == 4 and (len(non_z_node_comps) == 0 or (len(non_z_node_comps) == 1 and (sub_comps == list(non_z_node_comps)[0]).all())):
+                                na, nb, nc, nd = cell.node_a, cell.node_b, cell.node_c, cell.node_d
+                                fa = compute_inundation_frequency(na.water_levels_sorted, sub_z, as_percentage=True)
+                                fb = compute_inundation_frequency(nb.water_levels_sorted, sub_z, as_percentage=True)
+                                fc = compute_inundation_frequency(nc.water_levels_sorted, sub_z, as_percentage=True)
+                                fd = compute_inundation_frequency(nd.water_levels_sorted, sub_z, as_percentage=True)
+
+                                sub_freq = (w_a * fa + w_b * fb + w_c * fc + w_d * fd).astype(np.float32)
+                                node_bits = na.qc_bitmask | nb.qc_bitmask | nc.qc_bitmask | nd.qc_bitmask
+                                sub_qc |= (cell_qc_flags | node_bits)
+                            else:
+                                unique_p_comps = np.unique(sub_comps)
+                                for p_comp in unique_p_comps:
+                                    mask_pc = (sub_comps == p_comp)
+                                    pc_z = sub_z[mask_pc]
+
+                                    if p_comp > 0:
+                                        if p_comp in non_z_node_comps:
+                                            usable_nodes = [
+                                                (n, w_vec[mask_pc]) for n, w_vec in valid_nodes
+                                                if n.component_id == p_comp
+                                            ]
+                                        elif len(non_z_node_comps) == 0:
+                                            # 所有节点未划分连通域 (全为 0)，允许作为单连通域整体插值
+                                            usable_nodes = [(n, w_vec[mask_pc]) for n, w_vec in valid_nodes]
+                                        else:
+                                            usable_nodes = []
+                                    else:
+                                        # 像元处于未知连通域 (0): 仅当所有节点全归属同一连通域或全未划分时，方允许插值
+                                        if len(non_z_node_comps) <= 1:
+                                            usable_nodes = [(n, w_vec[mask_pc]) for n, w_vec in valid_nodes]
+                                        else:
+                                            usable_nodes = []
+
+                                    if len(usable_nodes) == 0:
+                                        sub_freq[mask_pc] = np.nan
+                                        sub_qc[mask_pc] |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES | QC_BIT_CONNECTIVITY_FALLBACK)
+                                    else:
+                                        total_w = sum(w for _, w in usable_nodes)
+                                        total_w = np.where(total_w > 1e-6, total_w, 1.0)
+                                        f_accum = np.zeros_like(pc_z, dtype=float)
+                                        p_bits = cell_qc_flags
+                                        if len(usable_nodes) < 4:
+                                            p_bits |= QC_BIT_SPATIAL_FALLBACK
+                                        if len(usable_nodes) < len(valid_nodes) or p_comp == 0:
+                                            p_bits |= QC_BIT_CONNECTIVITY_FALLBACK
+
+                                        for n, w_vec in usable_nodes:
+                                            fn = compute_inundation_frequency(n.water_levels_sorted, pc_z, as_percentage=True)
+                                            f_accum += (w_vec / total_w) * fn
+                                            p_bits |= n.qc_bitmask
+
+                                        sub_freq[mask_pc] = f_accum.astype(np.float32)
+                                        sub_qc[mask_pc] |= p_bits
+
+                            freq_out[in_cell] = sub_freq
+                            qc_out[in_cell] = sub_qc
+
+                        inund_chunk[valid_dem_mask] = freq_out
+                        qc_chunk[valid_dem_mask] = qc_out
+                        solved_pixel_count += int(np.count_nonzero(np.isfinite(freq_out)))
+
+                    dst_inund.write(inund_chunk, 1, window=window)
+                    dst_qc.write(qc_chunk, 1, window=window)
+
+                    win_idx += 1
+                    if progress_callback:
+                        pct = int(60 + (win_idx / total_windows) * 38)
+                        progress_callback(pct, f"正在流式写入淹没频率栅格 ({win_idx}/{total_windows} 块)...")
+
+            if metadata_tags:
+                dst_inund.update_tags(**metadata_tags)
+                dst_qc.update_tags(**metadata_tags)
+
+        # 原子重命名为正式文件 (安全替换，绝不提前 unlink)
+        os.replace(tmp_output, output_path)
+        os.replace(tmp_qc, qc_output_path)
+
+    except Exception:
+        for p in [tmp_output, tmp_qc]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    pass
+        raise
+
+    elapsed = time.time() - t_start
+    return RasterResultSummary(
+        output_path=output_path,
+        qc_output_path=qc_output_path,
+        mode='inundation',
+        width=info.width,
+        height=info.height,
+        valid_pixels=solved_pixel_count,
+        total_pixels=info.total_pixel_count,
+        input_valid_pixels=input_valid_count,
+        solved_pixels=solved_pixel_count,
+        unsolved_pixels=input_valid_count - solved_pixel_count,
+        control_nodes_count=control_nodes_count if control_nodes_count is not None else len({cell.node_a.node_id for cell in leaf_cells} | {cell.node_b.node_id for cell in leaf_cells} | {cell.node_c.node_id for cell in leaf_cells} | {cell.node_d.node_id for cell in leaf_cells}),
+        elapsed_seconds=elapsed,
+        metadata=metadata_tags or {}
+    )
 
 
 class RasterTideEngine:
@@ -615,13 +996,14 @@ class RasterTideEngine:
         progress_callback = None,
         cancel_event = None,
         inclusive: Optional[str] = None,
-        target_mode: str = 'intertidal'
+        target_mode: str = 'intertidal',
+        allow_overwrite: bool = True
     ) -> Dict[str, Any]:
         """
         【Stage 1 控制网格构建器】构建自适应四叉树控制网格并批量解算各控制节点的 FES 潮位时序。
         仅生成控制节点与叶单元拓扑 (不生成 2D 像元 GeoTIFF)，专供 Tide Cache 导出与批量管线调度。
         """
-        from .tide_cache import read_tide_cache
+        from .tide_cache import inspect_tide_cache_metadata
         if export_tide_cache_path:
             summary = self.calculate_inundation_raster(
                 dem_path=dem_path,
@@ -642,11 +1024,12 @@ class RasterTideEngine:
                 progress_callback=progress_callback,
                 cancel_event=cancel_event,
                 inclusive=inclusive,
-                target_mode=target_mode
+                target_mode=target_mode,
+                allow_overwrite=allow_overwrite
             )
-            cache_data = read_tide_cache(export_tide_cache_path)
-            cache_data['summary'] = summary
-            return cache_data
+            cache_meta = inspect_tide_cache_metadata(export_tide_cache_path)
+            cache_meta['summary'] = summary
+            return cache_meta
         else:
             import tempfile
             with tempfile.TemporaryDirectory() as td:
@@ -670,11 +1053,12 @@ class RasterTideEngine:
                     progress_callback=progress_callback,
                     cancel_event=cancel_event,
                     inclusive=inclusive,
-                    target_mode=target_mode
+                    target_mode=target_mode,
+                    allow_overwrite=True
                 )
-                cache_data = read_tide_cache(tmp_cache)
-                cache_data['summary'] = summary
-                return cache_data
+                cache_meta = inspect_tide_cache_metadata(tmp_cache)
+                cache_meta['summary'] = summary
+                return cache_meta
 
     def calculate_inundation_raster(
         self,
@@ -698,7 +1082,8 @@ class RasterTideEngine:
         inclusive: Optional[str] = None,
         target_mode: str = "standard",
         export_tide_cache_path: Optional[str] = None,
-        grid_only: bool = False
+        grid_only: bool = False,
+        allow_overwrite: bool = True
     ) -> RasterResultSummary:
         """
         【Mode B】自适应潮位控制网格 (Adaptive Tide Control Grid) 潜在天文潮淹没频率 GeoTIFF 解算。
@@ -730,6 +1115,12 @@ class RasterTideEngine:
                 base, ext = os.path.splitext(output_path)
                 qc_output_path = f"{base}_qc{ext}"
 
+            if not allow_overwrite:
+                if os.path.exists(output_path):
+                    raise ExistingOutputError(f"输出文件已存在且未开启覆盖权限: {output_path}")
+                if qc_output_path and os.path.exists(qc_output_path):
+                    raise ExistingOutputError(f"QC 输出文件已存在且未开启覆盖权限: {qc_output_path}")
+
             out_dir = os.path.dirname(os.path.abspath(output_path))
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
@@ -760,54 +1151,13 @@ class RasterTideEngine:
             progress_callback(3, "正在审查 DEM 物理分辨率与构建拓扑连通域掩膜...")
 
         # 1. 物理尺度控制的拓扑连通域分析 (Physical Scale Topology Guard)
-        if info.is_projected:
-            pixel_size_m = min(abs(info.resolution[0]), abs(info.resolution[1])) * info.unit_factor
-        else:
-            mid_lat = (info.bounds[1] + info.bounds[3]) / 2.0
-            cos_lat = max(0.01, np.cos(np.radians(mid_lat)))
-            pixel_size_m = min(abs(info.resolution[0]) * 111320.0 * cos_lat, abs(info.resolution[1]) * 111320.0)
-
-        downsample_factor = max(1, int(round(self.topology_max_resolution_m / max(1e-3, pixel_size_m))))
-        h_coarse = int(np.ceil(info.height / downsample_factor))
-        w_coarse = int(np.ceil(info.width / downsample_factor))
-
-        coarse_active_support = np.zeros((h_coarse, w_coarse), dtype=bool)
-        coarse_valid_counts = np.zeros((h_coarse, w_coarse), dtype=np.int32)
-
-        # 预计算每个粗像元包含的细像元总数 (边界处可能小于 downsample_factor^2)
-        cell_h = np.minimum(downsample_factor, info.height - np.arange(h_coarse) * downsample_factor)
-        cell_w = np.minimum(downsample_factor, info.width - np.arange(w_coarse) * downsample_factor)
-        coarse_total_counts = np.outer(cell_h, cell_w).astype(np.int32)
-
-        input_valid_count = 0
-        with rasterio.open(info.path) as src_dem:
-            for window in self.iter_raster_windows(info.width, info.height, block_size=block_size):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RasterCalculationCancelled("用户取消了任务。")
-                chunk = src_dem.read(1, window=window)
-                if info.nodata is not None and np.isfinite(info.nodata):
-                    v_mask = ~np.isclose(chunk, info.nodata) & np.isfinite(chunk)
-                else:
-                    v_mask = np.isfinite(chunk)
-                input_valid_count += int(np.count_nonzero(v_mask))
-
-                if np.any(v_mask):
-                    rows_loc, cols_loc = np.where(v_mask)
-                    r_glob = rows_loc + window.row_off
-                    c_glob = cols_loc + window.col_off
-                    r_c = np.clip(r_glob // downsample_factor, 0, h_coarse - 1)
-                    c_c = np.clip(c_glob // downsample_factor, 0, w_coarse - 1)
-                    coarse_active_support[r_c, c_c] = True
-                    np.add.at(coarse_valid_counts, (r_c, c_c), 1)
-
-        if input_valid_count == 0:
-            raise ValueError(f"输入 DEM '{dem_path}' 中未找到任何有效地形高程像元 (全部为 NoData/NaN)。")
-
-        # 连通域掩膜需满足有效像元比例阈值，以保留狭窄陆地/NoData屏障 (Barrier Preservation)
-        valid_fractions = coarse_valid_counts / np.maximum(1, coarse_total_counts)
-        coarse_connectivity = (valid_fractions >= self.topology_valid_fraction_threshold)
-
-        labeled_coarse, num_features = scipy.ndimage.label(coarse_connectivity, structure=np.ones((3, 3)))
+        labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, coarse_active_support, input_valid_count = build_support_topology(
+            info=info,
+            topology_max_resolution_m=self.topology_max_resolution_m,
+            topology_valid_fraction_threshold=self.topology_valid_fraction_threshold,
+            block_size=block_size,
+            cancel_event=cancel_event
+        )
 
         def _get_point_component(px_x: float, px_y: float) -> int:
             """
@@ -967,14 +1317,17 @@ class RasterTideEngine:
                         qc_bits |= QC_BIT_DATUM_INVALID
 
                     if is_valid:
-                        # 保存原始 MSL 潮位序列供 Tide Cache 导出
-                        n_obj.tide_msl_raw = t_ser.copy().astype(np.float32)
+                        # 保存原始 MSL 潮位序列供 Tide Cache 导出 (仅当指定导出 cache 时暂存)
+                        if export_tide_cache_path:
+                            n_obj.tide_msl_raw = t_ser.copy().astype(np.float32)
+                        else:
+                            n_obj.tide_msl_raw = None
                         # 原地添加基准偏移并排序，极大节省内存
                         valid_t += off_val
                         valid_t.sort()
                         sorted_w = valid_t.astype(np.float32)
                     else:
-                        n_obj.tide_msl_raw = np.full(len(t_ser), np.nan, dtype=np.float32) if len(t_ser) > 0 else np.array([], dtype=np.float32)
+                        n_obj.tide_msl_raw = None
                         sorted_w = np.array([], dtype=np.float32)
 
                     n_obj.water_levels_sorted = sorted_w
@@ -1253,8 +1606,12 @@ class RasterTideEngine:
                 node_cache=node_cache,
                 time_index=time_idx,
                 metadata=cache_meta,
+                allow_overwrite=allow_overwrite,
                 cancel_event=cancel_event
             )
+            # 导出 Cache 完成后立即解引用所有控制节点的 raw MSL 数组，常驻内存仅保留 water_levels_sorted
+            for n in node_cache.values():
+                n.tide_msl_raw = None
 
         if grid_only:
             elapsed = time.time() - t_start
@@ -1281,299 +1638,56 @@ class RasterTideEngine:
         if progress_callback:
             progress_callback(60, f"自适应细分完成: 共 {len(leaf_cells)} 个叶单元, {final_nodes_count} 个控制节点。构建空间索引并开始流式插值写入...")
 
-        # 6. 构建叶节点单元空间桶索引 (Spatial Bucket Index)
-        # 彻底解决 O(N_windows * N_leaf_cells) 慢扫描瓶颈
-        bucket_size_x = max(step_x_crs / 2.0, (max_x - min_x) / 32.0)
-        bucket_size_y = max(step_y_crs / 2.0, (max_y - min_y) / 32.0)
-        spatial_buckets: Dict[Tuple[int, int], List[QuadCell]] = defaultdict(list)
-
-        for cell in leaf_cells:
-            bx0 = int((cell.x_min - min_x) // bucket_size_x)
-            bx1 = int((cell.x_max - min_x) // bucket_size_x)
-            by0 = int((cell.y_min - min_y) // bucket_size_y)
-            by1 = int((cell.y_max - min_y) // bucket_size_y)
-            for bx in range(bx0, bx1 + 1):
-                for by in range(by0, by1 + 1):
-                    spatial_buckets[(bx, by)].append(cell)
-
-        # 7. 流式 2D 分块像元插值与 UInt16 QC 位掩码写入
-        out_profile = {
-            'driver': 'GTiff',
-            'height': info.height,
-            'width': info.width,
-            'count': 1,
-            'dtype': rasterio.float32,
-            'crs': rasterio.crs.CRS.from_user_input(info.crs),
-            'transform': info.transform,
-            'nodata': np.nan,
-            'compress': 'deflate',
-            'predictor': 2,
+        metadata = {
+            'SOFTWARE': 'CoastTideX v1.5 Alpha',
+            'ENGINE_MODE': 'inundation_frequency_raster',
+            'TIDE_MODEL': 'FES2022b',
+            'TIDE_CONSTITUENTS': 'all' if constituents == 'all' else str(constituents),
+            'INUNDATION_TYPE': 'potential_astronomical_tidal',
+            'TIME_START': t_start_str,
+            'TIME_END': t_end_str,
+            'TIME_STEP': freq,
+            'TIMEZONE': source_tz,
+            'VERTICAL_DATUM': str(dem_datum).upper(),
+            'SPATIAL_METHOD': 'adaptive_quadtree_control_grid',
+            'TOPOLOGY_GUARD': 'valid_mask_topology_aware',
+            'INITIAL_CONTROL_SPACING_M': str(initial_control_spacing_m),
+            'MIN_CONTROL_SPACING_M': str(min_control_spacing_m),
+            'ERROR_TOLERANCE_PCT': str(inundation_error_tolerance_pct),
+            'INITIAL_GRID_NODES': str(initial_grid_nodes_count),
+            'ACTIVE_CONTROL_NODES': str(active_nodes_count),
+            'FINAL_CONTROL_NODES': str(final_nodes_count),
+            'MAX_REFINEMENT_DEPTH_ALLOWED': str(effective_max_depth),
+            'MAX_REFINEMENT_LEVEL_USED': str(max_level_reached[0]),
+            'CONTROL_NODE_BATCH_SIZE': str(self.control_node_batch_size),
+            'FES_PREDICT_CALLS': str(predictor_call_count[0]),
+            'FES_CONTROL_NODES_EVALUATED': str(evaluated_node_count[0]),
+            'TOPOLOGY_RESOLUTION_M': str(self.topology_max_resolution_m),
+            'TOPOLOGY_COMPONENT_COUNT': str(num_features),
+            'INPUT_VALID_PIXELS': str(input_valid_count),
+            'TOTAL_PIXELS': str(info.total_pixel_count),
+            'MAX_IN_MEMORY_CONTROL_NODES': str(self.max_in_memory_control_nodes),
+            'RESIDENT_CONTROL_NODES': str(final_nodes_count),
+            'TIME_SAMPLES_PER_NODE': str(n_time_samples),
+            'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=4):.2f}",
+            'TARGET_MODE': str(target_mode),
+            'QC_ENCODING': 'UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached'
         }
-        if info.width >= 16 and info.height >= 16 and block_size >= 16:
-            out_profile['tiled'] = True
-            out_profile['blockxsize'] = min(512, max(16, (int(block_size) // 16) * 16))
-            out_profile['blockysize'] = min(512, max(16, (int(block_size) // 16) * 16))
-        else:
-            out_profile['tiled'] = False
 
-        qc_profile = out_profile.copy()
-        qc_profile.update({
-            'dtype': rasterio.uint16,
-            'nodata': QC_NODATA,
-            'predictor': 1
-        })
-
-        total_windows = int(np.ceil(info.width / block_size) * np.ceil(info.height / block_size))
-        win_idx = 0
-        solved_pixel_count = 0
-
-        try:
-            with rasterio.open(info.path) as src_dem,                  rasterio.open(tmp_output, 'w', **out_profile) as dst_inund,                  rasterio.open(tmp_qc, 'w', **qc_profile) as dst_qc:
-
-                for window in self.iter_raster_windows(info.width, info.height, block_size=block_size):
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise RasterCalculationCancelled("用户取消了任务。")
-
-                    dem_chunk = src_dem.read(1, window=window).astype(np.float32)
-                    if info.nodata is not None and np.isfinite(info.nodata):
-                        valid_dem_mask = ~np.isclose(dem_chunk, info.nodata) & np.isfinite(dem_chunk)
-                    else:
-                        valid_dem_mask = np.isfinite(dem_chunk)
-
-                    inund_chunk = np.full(dem_chunk.shape, np.nan, dtype=np.float32)
-                    qc_chunk = np.full(dem_chunk.shape, QC_NODATA, dtype=np.uint16)
-
-                    n_chunk_valid = int(np.count_nonzero(valid_dem_mask))
-                    if n_chunk_valid > 0:
-                        rows_local, cols_local = np.where(valid_dem_mask)
-                        rows_global = rows_local + window.row_off
-                        cols_global = cols_local + window.col_off
-
-                        px_xs, px_ys = rasterio.transform.xy(info.transform, rows_global, cols_global, offset='center')
-                        px_xs = np.asarray(px_xs, dtype=float)
-                        px_ys = np.asarray(px_ys, dtype=float)
-                        z_vals = dem_chunk[valid_dem_mask]
-
-                        w_bounds = rasterio.windows.bounds(window, transform=info.transform)
-                        win_x0 = min(w_bounds[0], w_bounds[2])
-                        win_y0 = min(w_bounds[1], w_bounds[3])
-                        win_x1 = max(w_bounds[0], w_bounds[2])
-                        win_y1 = max(w_bounds[1], w_bounds[3])
-
-                        # 通过空间桶索引快速获取相交叶节点单元
-                        wbx0 = int((win_x0 - min_x) // bucket_size_x)
-                        wbx1 = int((win_x1 - min_x) // bucket_size_x)
-                        wby0 = int((win_y0 - min_y) // bucket_size_y)
-                        wby1 = int((win_y1 - min_y) // bucket_size_y)
-
-                        candidate_cells: List[QuadCell] = []
-                        seen_cids = set()
-                        for bx in range(wbx0, wbx1 + 1):
-                            for by in range(wby0, wby1 + 1):
-                                for c in spatial_buckets.get((bx, by), []):
-                                    if c.cell_id not in seen_cids:
-                                        seen_cids.add(c.cell_id)
-                                        candidate_cells.append(c)
-
-                        intersecting_cells = [
-                            c for c in candidate_cells
-                            if not (c.x_max < win_x0 or c.x_min > win_x1 or c.y_max < win_y0 or c.y_min > win_y1)
-                        ]
-
-                        freq_out = np.full(n_chunk_valid, np.nan, dtype=np.float32)
-                        qc_out = np.zeros(n_chunk_valid, dtype=np.uint16)
-
-                        # 获取该窗口内有效像元的拓扑连通域标签
-                        r_c_arr = np.clip(rows_global // downsample_factor, 0, h_coarse - 1)
-                        c_c_arr = np.clip(cols_global // downsample_factor, 0, w_coarse - 1)
-                        pixel_comps = labeled_coarse[r_c_arr, c_c_arr]
-
-                        for cell in intersecting_cells:
-                            is_east = (cell.x_max >= info.bounds[2] - 1e-6)
-                            is_north = (cell.y_max >= info.bounds[3] - 1e-6)
-                            x_in = (px_xs >= cell.x_min) & (px_xs <= cell.x_max if is_east else px_xs < cell.x_max)
-                            y_in = (px_ys >= cell.y_min) & (px_ys <= cell.y_max if is_north else px_ys < cell.y_max)
-                            in_cell = x_in & y_in
-                            if not np.any(in_cell):
-                                continue
-
-                            sub_z = z_vals[in_cell]
-                            sub_x = px_xs[in_cell]
-                            sub_y = px_ys[in_cell]
-                            sub_comps = pixel_comps[in_cell]
-
-                            dx_cell = max(1e-6, cell.x_max - cell.x_min)
-                            dy_cell = max(1e-6, cell.y_max - cell.y_min)
-                            u = np.clip((sub_x - cell.x_min) / dx_cell, 0.0, 1.0)
-                            v = np.clip((sub_y - cell.y_min) / dy_cell, 0.0, 1.0)
-
-                            w_a = (1.0 - u) * (1.0 - v)
-                            w_b = u * (1.0 - v)
-                            w_c = (1.0 - u) * v
-                            w_d = u * v
-
-                            c_nodes = [
-                                (cell.node_a, w_a),
-                                (cell.node_b, w_b),
-                                (cell.node_c, w_c),
-                                (cell.node_d, w_d)
-                            ]
-
-                            # 拓扑连通性保护 (Topology Guard): 提取有效海洋控制节点
-                            valid_nodes = []
-                            for n, w_vec in c_nodes:
-                                if n.valid and len(n.water_levels_sorted) > 0:
-                                    valid_nodes.append((n, w_vec))
-
-                            sub_freq = np.full(len(sub_z), np.nan, dtype=np.float32)
-                            sub_qc = np.zeros(len(sub_z), dtype=np.uint16)
-
-                            cell_qc_flags = QC_BIT_VALID
-                            if cell.qc_min_spacing_reached:
-                                cell_qc_flags |= QC_BIT_MIN_SPACING_REACHED
-                            if cell.qc_max_refinement_reached:
-                                cell_qc_flags |= QC_BIT_MAX_REFINEMENT_REACHED
-                            if cell.qc_validity_boundary:
-                                cell_qc_flags |= QC_BIT_FES_VALIDITY_BOUNDARY
-
-                            if len(valid_nodes) == 0:
-                                sub_qc |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES)
-                            elif len(valid_nodes) == 4 and np.all([n.component_id > 0 and (sub_comps == n.component_id).all() for n, _ in valid_nodes]):
-                                # 标准四角双线性插值且全部与像元处于同一明确连通域
-                                na, nb, nc, nd = cell.node_a, cell.node_b, cell.node_c, cell.node_d
-                                fa = compute_inundation_frequency(na.water_levels_sorted, sub_z, as_percentage=True)
-                                fb = compute_inundation_frequency(nb.water_levels_sorted, sub_z, as_percentage=True)
-                                fc = compute_inundation_frequency(nc.water_levels_sorted, sub_z, as_percentage=True)
-                                fd = compute_inundation_frequency(nd.water_levels_sorted, sub_z, as_percentage=True)
-
-                                sub_freq = (w_a * fa + w_b * fb + w_c * fc + w_d * fd).astype(np.float32)
-                                node_bits = na.qc_bitmask | nb.qc_bitmask | nc.qc_bitmask | nd.qc_bitmask
-                                sub_qc |= (cell_qc_flags | node_bits)
-                            else:
-                                # 存在跨陆地屏障或节点连通域差异，逐像元连通域判定
-                                # component 0 严格为 UNKNOWN，绝不允许作为通配符跨域插值
-                                unique_p_comps = np.unique(sub_comps)
-                                for p_comp in unique_p_comps:
-                                    mask_pc = (sub_comps == p_comp)
-                                    pc_z = sub_z[mask_pc]
-
-                                    if p_comp > 0:
-                                        usable_nodes = [
-                                            (n, w_vec[mask_pc]) for n, w_vec in valid_nodes
-                                            if n.component_id == p_comp
-                                        ]
-                                    else:
-                                        # 像元自身连通域未知 (0): 仅当所有有效节点全部归属同一个明确连通域时，方允许插值
-                                        non_z_comps = {n.component_id for n, _ in valid_nodes if n.component_id > 0}
-                                        if len(non_z_comps) == 1:
-                                            usable_nodes = [(n, w_vec[mask_pc]) for n, w_vec in valid_nodes]
-                                        else:
-                                            usable_nodes = []
-
-                                    if len(usable_nodes) == 0:
-                                        sub_freq[mask_pc] = np.nan
-                                        sub_qc[mask_pc] |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES | QC_BIT_CONNECTIVITY_FALLBACK)
-                                    else:
-                                        total_w = sum(w for _, w in usable_nodes)
-                                        total_w = np.where(total_w > 1e-6, total_w, 1.0)
-                                        f_accum = np.zeros_like(pc_z, dtype=float)
-                                        p_bits = cell_qc_flags
-                                        if len(usable_nodes) < 4:
-                                            p_bits |= QC_BIT_SPATIAL_FALLBACK
-                                        if len(usable_nodes) < len(valid_nodes) or p_comp == 0:
-                                            p_bits |= QC_BIT_CONNECTIVITY_FALLBACK
-
-                                        for n, w_vec in usable_nodes:
-                                            fn = compute_inundation_frequency(n.water_levels_sorted, pc_z, as_percentage=True)
-                                            f_accum += (w_vec / total_w) * fn
-                                            p_bits |= n.qc_bitmask
-
-                                        sub_freq[mask_pc] = f_accum.astype(np.float32)
-                                        sub_qc[mask_pc] |= p_bits
-
-                            freq_out[in_cell] = sub_freq
-                            qc_out[in_cell] = sub_qc
-
-                        inund_chunk[valid_dem_mask] = freq_out
-                        qc_chunk[valid_dem_mask] = qc_out
-                        solved_pixel_count += int(np.count_nonzero(np.isfinite(freq_out)))
-
-                    dst_inund.write(inund_chunk, 1, window=window)
-                    dst_qc.write(qc_chunk, 1, window=window)
-
-                    win_idx += 1
-                    if progress_callback:
-                        pct = int(60 + (win_idx / total_windows) * 38)
-                        progress_callback(pct, f"正在流式写入淹没频率栅格 ({win_idx}/{total_windows} 块)...")
-
-                metadata = {
-                    'SOFTWARE': 'CoastTideX v1.4',
-                    'ENGINE_MODE': 'inundation_frequency_raster',
-                    'TIDE_MODEL': 'FES2022b',
-                    'TIDE_CONSTITUENTS': 'all' if constituents == 'all' else str(constituents),
-                    'INUNDATION_TYPE': 'potential_astronomical_tidal',
-                    'TIME_START': t_start_str,
-                    'TIME_END': t_end_str,
-                    'TIME_STEP': freq,
-                    'TIMEZONE': source_tz,
-                    'VERTICAL_DATUM': str(dem_datum).upper(),
-                    'SPATIAL_METHOD': 'adaptive_quadtree_control_grid',
-                    'TOPOLOGY_GUARD': 'valid_mask_topology_aware',
-                    'INITIAL_CONTROL_SPACING_M': str(initial_control_spacing_m),
-                    'MIN_CONTROL_SPACING_M': str(min_control_spacing_m),
-                    'ERROR_TOLERANCE_PCT': str(inundation_error_tolerance_pct),
-                    'INITIAL_GRID_NODES': str(initial_grid_nodes_count),
-                    'ACTIVE_CONTROL_NODES': str(active_nodes_count),
-                    'FINAL_CONTROL_NODES': str(final_nodes_count),
-                    'MAX_REFINEMENT_DEPTH_ALLOWED': str(effective_max_depth),
-                    'MAX_REFINEMENT_LEVEL_USED': str(max_level_reached[0]),
-                    'CONTROL_NODE_BATCH_SIZE': str(self.control_node_batch_size),
-                    'FES_PREDICT_CALLS': str(predictor_call_count[0]),
-                    'FES_CONTROL_NODES_EVALUATED': str(evaluated_node_count[0]),
-                    'TOPOLOGY_RESOLUTION_M': str(self.topology_max_resolution_m),
-                    'TOPOLOGY_COMPONENT_COUNT': str(num_features),
-                    'INPUT_VALID_PIXELS': str(input_valid_count),
-                    'SOLVED_PIXELS': str(solved_pixel_count),
-                    'UNSOLVED_PIXELS': str(input_valid_count - solved_pixel_count),
-                    'TOTAL_PIXELS': str(info.total_pixel_count),
-                    'MAX_IN_MEMORY_CONTROL_NODES': str(self.max_in_memory_control_nodes),
-                    'RESIDENT_CONTROL_NODES': str(final_nodes_count),
-                    'TIME_SAMPLES_PER_NODE': str(n_time_samples),
-                    'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=4):.2f}",
-                    'TARGET_MODE': str(target_mode),
-                    'QC_ENCODING': 'UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached'
-                }
-                dst_inund.update_tags(**metadata)
-                dst_qc.update_tags(**metadata)
-
-            os.replace(tmp_output, output_path)
-            os.replace(tmp_qc, qc_output_path)
-
-        except Exception:
-            for p in [tmp_output, tmp_qc]:
-                if os.path.exists(p):
-                    try:
-                        os.remove(p)
-                    except Exception:
-                        pass
-            raise
-
-        elapsed = time.time() - t_start
-        if progress_callback:
-            progress_callback(100, f"潜在天文潮淹没频率计算完成 (耗时 {elapsed:.1f}s)！")
-
-        return RasterResultSummary(
+        return stream_inundation_frequency_interpolation(
+            info=info,
+            leaf_cells=leaf_cells,
+            labeled_coarse=labeled_coarse,
+            downsample_factor=downsample_factor,
+            h_coarse=h_coarse,
+            w_coarse=w_coarse,
+            input_valid_count=input_valid_count,
             output_path=output_path,
             qc_output_path=qc_output_path,
-            mode='inundation',
-            width=info.width,
-            height=info.height,
-            valid_pixels=solved_pixel_count,
-            total_pixels=info.total_pixel_count,
-            input_valid_pixels=input_valid_count,
-            solved_pixels=solved_pixel_count,
-            unsolved_pixels=input_valid_count - solved_pixel_count,
+            block_size=block_size,
+            metadata_tags=metadata,
+            allow_overwrite=allow_overwrite,
             control_nodes_count=final_nodes_count,
-            elapsed_seconds=elapsed,
-            metadata=metadata
+            progress_callback=progress_callback,
+            cancel_event=cancel_event
         )
