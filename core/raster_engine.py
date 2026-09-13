@@ -197,6 +197,7 @@ class ControlNode:
     qc_bitmask: int = QC_BIT_VALID
     component_id: int = 0
     qc_code: Optional[int] = None
+    tide_msl_raw: Optional[np.ndarray] = None
 
     def __post_init__(self):
         if self.qc_code is not None:
@@ -596,10 +597,89 @@ class RasterTideEngine:
             metadata=metadata
         )
 
+    def build_tide_control_grid(
+        self,
+        dem_path: str,
+        export_tide_cache_path: Optional[str] = None,
+        year: int = 2024,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        freq: str = '30min',
+        dem_datum: str = 'egm2008',
+        constituents: str | list = 'all',
+        source_tz: str = 'UTC',
+        initial_control_spacing_m: Optional[float] = None,
+        min_control_spacing_m: Optional[float] = None,
+        inundation_error_tolerance_pct: Optional[float] = None,
+        strict: bool = True,
+        progress_callback = None,
+        cancel_event = None,
+        inclusive: Optional[str] = None,
+        target_mode: str = 'intertidal'
+    ) -> Dict[str, Any]:
+        """
+        【Stage 1 控制网格构建器】构建自适应四叉树控制网格并批量解算各控制节点的 FES 潮位时序。
+        仅生成控制节点与叶单元拓扑 (不生成 2D 像元 GeoTIFF)，专供 Tide Cache 导出与批量管线调度。
+        """
+        from .tide_cache import read_tide_cache
+        if export_tide_cache_path:
+            summary = self.calculate_inundation_raster(
+                dem_path=dem_path,
+                output_path="",
+                export_tide_cache_path=export_tide_cache_path,
+                grid_only=True,
+                year=year,
+                start_time=start_time,
+                end_time=end_time,
+                freq=freq,
+                dem_datum=dem_datum,
+                constituents=constituents,
+                source_tz=source_tz,
+                initial_control_spacing_m=initial_control_spacing_m,
+                min_control_spacing_m=min_control_spacing_m,
+                inundation_error_tolerance_pct=inundation_error_tolerance_pct,
+                strict=strict,
+                progress_callback=progress_callback,
+                cancel_event=cancel_event,
+                inclusive=inclusive,
+                target_mode=target_mode
+            )
+            cache_data = read_tide_cache(export_tide_cache_path)
+            cache_data['summary'] = summary
+            return cache_data
+        else:
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                tmp_cache = os.path.join(td, 'dummy_tide.nc')
+                summary = self.calculate_inundation_raster(
+                    dem_path=dem_path,
+                    output_path="",
+                    export_tide_cache_path=tmp_cache,
+                    grid_only=True,
+                    year=year,
+                    start_time=start_time,
+                    end_time=end_time,
+                    freq=freq,
+                    dem_datum=dem_datum,
+                    constituents=constituents,
+                    source_tz=source_tz,
+                    initial_control_spacing_m=initial_control_spacing_m,
+                    min_control_spacing_m=min_control_spacing_m,
+                    inundation_error_tolerance_pct=inundation_error_tolerance_pct,
+                    strict=strict,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
+                    inclusive=inclusive,
+                    target_mode=target_mode
+                )
+                cache_data = read_tide_cache(tmp_cache)
+                cache_data['summary'] = summary
+                return cache_data
+
     def calculate_inundation_raster(
         self,
         dem_path: str,
-        output_path: str,
+        output_path: str = "",
         qc_output_path: Optional[str] = None,
         year: int = 2024,
         start_time: Optional[str] = None,
@@ -615,7 +695,10 @@ class RasterTideEngine:
         strict: bool = True,
         progress_callback = None,
         cancel_event = None,
-        inclusive: Optional[str] = None
+        inclusive: Optional[str] = None,
+        target_mode: str = "standard",
+        export_tide_cache_path: Optional[str] = None,
+        grid_only: bool = False
     ) -> RasterResultSummary:
         """
         【Mode B】自适应潮位控制网格 (Adaptive Tide Control Grid) 潜在天文潮淹没频率 GeoTIFF 解算。
@@ -642,15 +725,19 @@ class RasterTideEngine:
         if block_size is None:
             block_size = self.default_block_size
 
-        if qc_output_path is None:
-            base, ext = os.path.splitext(output_path)
-            qc_output_path = f"{base}_qc{ext}"
+        if not grid_only:
+            if qc_output_path is None:
+                base, ext = os.path.splitext(output_path)
+                qc_output_path = f"{base}_qc{ext}"
 
-        out_dir = os.path.dirname(os.path.abspath(output_path))
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        tmp_output = f"{output_path}.tmp.tif"
-        tmp_qc = f"{qc_output_path}.tmp.tif"
+            out_dir = os.path.dirname(os.path.abspath(output_path))
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            tmp_output = f"{output_path}.tmp.tif"
+            tmp_qc = f"{qc_output_path}.tmp.tif"
+        else:
+            tmp_output = ""
+            tmp_qc = "" 
 
         # 时间范围对齐 (默认整年严格半开区间 [start, end) 保持权重均等，自定义时段支持显式 inclusive 参数)
         if inclusive is not None:
@@ -666,7 +753,8 @@ class RasterTideEngine:
             t_end_str = str(end_time)
             inclusive_mode = 'both'
 
-        n_time_samples = len(pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode))
+        time_idx = pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode, tz="UTC")
+        n_time_samples = len(time_idx)
 
         if progress_callback:
             progress_callback(3, "正在审查 DEM 物理分辨率与构建拓扑连通域掩膜...")
@@ -879,11 +967,14 @@ class RasterTideEngine:
                         qc_bits |= QC_BIT_DATUM_INVALID
 
                     if is_valid:
+                        # 保存原始 MSL 潮位序列供 Tide Cache 导出
+                        n_obj.tide_msl_raw = t_ser.copy().astype(np.float32)
                         # 原地添加基准偏移并排序，极大节省内存
                         valid_t += off_val
                         valid_t.sort()
                         sorted_w = valid_t.astype(np.float32)
                     else:
+                        n_obj.tide_msl_raw = np.full(len(t_ser), np.nan, dtype=np.float32) if len(t_ser) > 0 else np.array([], dtype=np.float32)
                         sorted_w = np.array([], dtype=np.float32)
 
                     n_obj.water_levels_sorted = sorted_w
@@ -1045,16 +1136,26 @@ class RasterTideEngine:
 
                     # 1. CCDF 插值误差计算
                     cell_error = 0.0
+                    corners = [na, nb, nc, nd]
+                    v_corners = [cn for cn in corners if cn.valid and len(cn.water_levels_sorted) > 0]
                     if ne.valid and len(ne.water_levels_sorted) > 0:
                         f_true = compute_inundation_frequency(ne.water_levels_sorted, z_test, as_percentage=True)
-                        corners = [na, nb, nc, nd]
-                        v_corners = [cn for cn in corners if cn.valid and len(cn.water_levels_sorted) > 0]
                         if len(v_corners) > 0:
                             f_interp = np.zeros_like(z_test, dtype=float)
                             w_each = 1.0 / len(v_corners)
                             for cn in v_corners:
                                 f_interp += w_each * compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True)
                             cell_error = float(np.max(np.abs(f_true - f_interp)))
+                    elif len(v_corners) >= 2:
+                        # 中心为陆地但有多个有效海角：评估有效角节点之间的频率变化梯度
+                        corner_freqs = [compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True) for cn in v_corners]
+                        max_diff = 0.0
+                        for i_cf in range(len(corner_freqs)):
+                            for j_cf in range(i_cf + 1, len(corner_freqs)):
+                                d_cf = float(np.max(np.abs(corner_freqs[i_cf] - corner_freqs[j_cf])))
+                                if d_cf > max_diff:
+                                    max_diff = d_cf
+                        cell_error = max_diff
 
                     # 2. FES 有效性突变与连通域边界分析 (Validity Discontinuity Check)
                     corner_valids = [na.valid, nb.valid, nc.valid, nd.valid]
@@ -1085,7 +1186,23 @@ class RasterTideEngine:
                     can_subdivide_spacing = (cur_spacing / 2.0 >= min_spacing_crs - 1e-6)
                     can_subdivide_depth = (lvl < effective_max_depth)
                     can_subdivide = can_subdivide_spacing and can_subdivide_depth
-                    should_subdivide = (cell_error > inundation_error_tolerance_pct) or validity_discontinuity
+
+                    if target_mode == "intertidal":
+                        # 潮间带目标感知模式:
+                        # 1. 连通域冲突 (跨水体屏障): 必须细分
+                        topology_conflict = (len(corner_comps) > 1)
+                        # 2. 精度指标: 频率误差超标必须细分
+                        accuracy_fail = (cell_error > inundation_error_tolerance_pct)
+                        # 3. 寻找水体支撑: 无有效角节点，但探测或中心有水体时，细分以捕获水体控制节点
+                        has_valid_corner = any(corner_valids)
+                        probes_found_water = False
+                        if idx_cell in cell_probe_map:
+                            probes_found_water = any(p.valid for p in cell_probe_map[idx_cell])
+                        need_water_anchor = (not has_valid_corner) and (center_valid or probes_found_water)
+
+                        should_subdivide = topology_conflict or accuracy_fail or need_water_anchor
+                    else:
+                        should_subdivide = (cell_error > inundation_error_tolerance_pct) or validity_discontinuity
 
                     if should_subdivide and can_subdivide:
                         next_level_cells.append((x0, y0, x_mid, y_mid, lvl + 1))
@@ -1113,6 +1230,53 @@ class RasterTideEngine:
 
         final_nodes_count = len(node_cache)
         active_nodes_count = sum(1 for n in node_cache.values() if n.valid)
+
+        # 若指定了导出 Tide Cache 路径，在此刻将控制网格及其时序原子序列化
+        if export_tide_cache_path:
+            from .tide_cache import write_tide_cache
+            cache_meta = {
+                "start_time": t_start_str,
+                "end_time": t_end_str,
+                "freq": freq,
+                "source_tz": source_tz,
+                "constituents": constituents,
+                "dem_datum": dem_datum,
+                "initial_control_spacing_m": initial_control_spacing_m,
+                "min_control_spacing_m": min_control_spacing_m,
+                "inundation_error_tolerance_pct": inundation_error_tolerance_pct,
+                "target_mode": target_mode
+            }
+            write_tide_cache(
+                cache_path=export_tide_cache_path,
+                info=info,
+                leaf_cells=leaf_cells,
+                node_cache=node_cache,
+                time_index=time_idx,
+                metadata=cache_meta,
+                cancel_event=cancel_event
+            )
+
+        if grid_only:
+            elapsed = time.time() - t_start
+            return RasterResultSummary(
+                output_path=output_path or "",
+                qc_output_path=qc_output_path or "",
+                mode="adaptive_control_grid_tide_only",
+                width=info.width,
+                height=info.height,
+                valid_pixels=0,
+                total_pixels=info.total_pixel_count,
+                input_valid_pixels=info.valid_pixel_count,
+                solved_pixels=0,
+                unsolved_pixels=0,
+                control_nodes_count=final_nodes_count,
+                elapsed_seconds=elapsed,
+                metadata={
+                    "TOTAL_CONTROL_NODES": final_nodes_count,
+                    "MAX_REFINEMENT_LEVEL_USED": max((c.level for c in leaf_cells), default=0),
+                    "TOTAL_LEAF_CELLS": len(leaf_cells)
+                }
+            )
 
         if progress_callback:
             progress_callback(60, f"自适应细分完成: 共 {len(leaf_cells)} 个叶单元, {final_nodes_count} 个控制节点。构建空间索引并开始流式插值写入...")
@@ -1376,6 +1540,7 @@ class RasterTideEngine:
                     'RESIDENT_CONTROL_NODES': str(final_nodes_count),
                     'TIME_SAMPLES_PER_NODE': str(n_time_samples),
                     'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=4):.2f}",
+                    'TARGET_MODE': str(target_mode),
                     'QC_ENCODING': 'UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached'
                 }
                 dst_inund.update_tags(**metadata)
