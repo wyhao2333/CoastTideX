@@ -29,6 +29,7 @@ predicted_tide_example.csv
 predicted_tide.csv
 predicted_tide.xlsx
 outputs/
+tmp/v1_5_beta_real_fes/
 
 # 忽略常见大文件格式，严禁将外部大体积栅格上传至 GitHub
 *.tif
