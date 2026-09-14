@@ -2,7 +2,7 @@ name: CoastTideX CI
 
 on:
   push:
-    branches: [ "main", "fix/**", "feat/**" ]
+    branches: [ "main", "fix/**", "feat/**", "test/**" ]
   pull_request:
     branches: [ "main" ]
 
