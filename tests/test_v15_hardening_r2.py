@@ -98,6 +98,12 @@ class TestV15HardeningRound2(unittest.TestCase):
             topology_max_resolution_m=60.0,
             topology_valid_fraction_threshold=0.01
         )
+        self.engine.transformer.get_static_datum_offsets = MagicMock(
+            side_effect=lambda lons, lats, target, strict=True: {
+                'offset_m': np.zeros(len(lons), dtype=float),
+                'qc_warning': [''] * len(lons)
+            }
+        )
         self.batch_engine = BatchRasterEngine(raster_engine=self.engine)
 
     def tearDown(self):
