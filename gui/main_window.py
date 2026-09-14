@@ -316,6 +316,7 @@ class BatchScanWorker(QThread):
 
     def run(self):
         try:
+            import time
             from core.batch_raster_engine import BatchRasterEngine
             res = BatchRasterEngine.discover_rasters(
                 input_folder=self.in_dir,
@@ -326,7 +327,7 @@ class BatchScanWorker(QThread):
                 "in_dir": self.in_dir,
                 "out_dir": self.out_dir,
                 "recursive": self.recursive,
-                "scan_time": time.time() if "time" in globals() else 0.0
+                "scan_time": time.time()
             }
             self.finished.emit(res, spec)
         except Exception as ex:
@@ -1802,8 +1803,8 @@ class MainWindow(QMainWindow):
     def _show_about(self):
         about_text = (
             "<h3>CoastTideX v1.5 Alpha</h3>"
-            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统</b></p>"
-            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供最高保真度的空间潮汐预测与严密基准转换工具。</p>"
+            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (Functional Prototype)</b></p>"
+            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
             "<li><b>四大多元基准体系</b>: "
@@ -1813,18 +1814,21 @@ class MainWindow(QMainWindow):
             "<li>EGM2008 (经 ΔN 改正的严密海拔正高)</li>"
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
-            "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品)</li>"
+            "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>v1.4 新特性 (Spatial Raster Engine)</b>: "
+            "<li><b>v1.4 空间栅格解算引擎</b>: "
             "<ul>"
-            "<li><b>空间栅格解算引擎 (Tab 3)</b>: 支持 GeoTIFF 空间单时刻潮位计算与高分辨率 DEM 潜在天文潮淹没频率解算；</li>"
-            "<li><b>自适应潮位控制网格 (Adaptive Tide Control Grid)</b>: 采用空间梯度自适应四叉树细分与经验互补分布 (CCDF)，防跨陆地盲插值；</li>"
-            "<li><b>基准计算与显示解耦</b>: 单点解算区分计算目标与显示/统计目标，切换显示零计算开销；</li>"
-            "<li><b>权威混合 MDT 掩膜优先</b>: 优先加载权威 GeoTIFF 掩膜，多边形作为安全备用并标记 QC_DATUM_SOURCE_APPROX；</li>"
-            "<li><b>流式 2D 矩形分块 I/O</b>: 512x512 内存安全分块流式吞吐，支持原子级写入保护与富元数据 (Provenance) 嵌入。</li>"
+            "<li>支持 GeoTIFF 空间单时刻潮位计算与高分辨率 DEM 潜在天文潮淹没频率解算；</li>"
+            "<li>自适应潮位控制网格与经验互补分布 (CCDF)，流式分块 I/O 内存安全保护。</li>"
+            "</ul></li>"
+            "<li><b>v1.5 Alpha 批量潮间带栅格引擎与 Tide Cache</b>: "
+            "<ul>"
+            "<li>文件夹级自动化发现与轻量扫描，单瓦片顺序推进 (max_parallel_tiles = 1)；</li>"
+            "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率；</li>"
+            "<li>任务清单 (Manifest) 管理、单瓦片失败隔离与防篡改断点恢复。</li>"
             "</ul></li>"
             "</ul>"
-            "<p>出品：wyhao2333 | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
+            "<p>作者 / 开发者：王宇豪 | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)
 
@@ -2251,6 +2255,24 @@ class MainWindow(QMainWindow):
         QApplication.restoreOverrideCursor()
         self.btn_scan_batch.setEnabled(True)
         self.btn_scan_batch.setText("🔄 重新扫描 / 刷新队列 (Refresh Queue)")
+
+        cur_in = self.txt_batch_in_dir.text().strip()
+        cur_out = self._get_effective_batch_output_dir()
+        cur_rec = self.chk_batch_recursive.isChecked()
+
+        if spec:
+            try:
+                same_in = os.path.samefile(spec.get("in_dir", ""), cur_in) if (os.path.exists(spec.get("in_dir", "")) and os.path.exists(cur_in)) else (os.path.abspath(spec.get("in_dir", "")) == os.path.abspath(cur_in))
+            except Exception:
+                same_in = (os.path.abspath(spec.get("in_dir", "")) == os.path.abspath(cur_in))
+
+            same_out = (os.path.abspath(spec.get("out_dir", "")) == os.path.abspath(cur_out))
+            same_rec = (spec.get("recursive") == cur_rec)
+
+            if not (same_in and same_out and same_rec):
+                self._invalidate_batch_scan()
+                self.lbl_batch_status.setText("⚠️ 目录或扫描配置已更改，已丢弃旧的扫描结果，请重新扫描。")
+                return
 
         self.discovered_batch_files = discovered_list
         self.scan_spec = spec

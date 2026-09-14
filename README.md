@@ -446,3 +446,17 @@ CoastTideX/
 4. **EGM2008 Geoid**:
    > Pavlis, N. K., Holmes, S. A., Kenyon, S. C., & Factor, J. K. (2012). The development and evaluation of the Earth Gravitational Model 2008 (EGM2008). *Journal of Geophysical Research: Solid Earth*, 117(B4).
 
+---
+
+## 👨‍💻 作者与开发者 (Author & Developer)
+
+* **王宇豪 (Yuhao Wang)**
+  * 负责：CoastTideX 系统全架构设计、核心解算引擎与算法研发
+
+---
+
+## 📄 开源许可证 (License)
+
+本项目采用 [MIT 许可证](LICENSE)。
+
+

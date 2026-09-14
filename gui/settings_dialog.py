@@ -1,6 +1,6 @@
 """
-CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.4)
-提供对 FES2022b 网格、MDT 数据、双重 DeltaN 栅格及 Hybrid MDT 权威来源掩膜的可视化路径配置与深层数据校验。
+CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.5 Alpha)
+提供对 FES2022b 网格、FES2022b 潮位掩膜、MDT 数据、双重 DeltaN 栅格及 Hybrid MDT 来源掩膜的可视化路径配置与深层数据校验。
 """
 
 import os
@@ -36,6 +36,20 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
             n_vars = len(ds.variables)
             ds.close()
             return True, f"✅ 正常 (NetCDF有效, {n_vars} 个变量)"
+        elif file_type == 'fes_mask':
+            import netCDF4 as nc
+            ds = nc.Dataset(path)
+            for var in ['mask', 'lat', 'lon']:
+                if var not in ds.variables:
+                    ds.close()
+                    return False, f"❌ FES掩膜缺少关键变量: {var}"
+            mask_arr = ds.variables['mask'][:]
+            unique_vals = np.unique(mask_arr)
+            allowed = {0, 1, 2, 3}
+            ds.close()
+            if not set(unique_vals).issubset(allowed):
+                return False, f"❌ FES掩膜包含非预期类别: {unique_vals} (仅允许 0:Native, 1:Extrapolated, 2:Land, 3:Lake)"
+            return True, f"✅ 正常 (FES掩膜有效类别={[int(x) for x in sorted(list(unique_vals))]})"
         elif file_type == 'raster':
             import rasterio
             with rasterio.open(path) as src:
@@ -69,11 +83,11 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
 
 
 class SettingsDialog(QDialog):
-    """数据源配置弹窗 (v1.4)"""
+    """数据源配置弹窗 (v1.5 Alpha)"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.4")
+        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.5 Alpha")
         self.resize(720, 520)
         self.config = load_app_config()
 
@@ -104,6 +118,18 @@ class SettingsDialog(QDialog):
         layout_fes.addWidget(self.edit_fes)
         layout_fes.addWidget(btn_fes)
         layout_oc.addLayout(layout_fes)
+
+        # FES2022b Extrapolation Mask NetCDF
+        layout_fes_mask = QHBoxLayout()
+        layout_fes_mask.addWidget(QLabel("FES2022b 潮位掩膜 (.nc，可选):"))
+        self.edit_fes_mask = QLineEdit(self.config['paths'].get('fes_extrapolation_mask_nc', ''))
+        self.edit_fes_mask.setToolTip("FES2022b 1/30° 规则网格潮位来源与外推掩膜 (0=Native Ocean, 1=Extrapolated Tide, 2=Land, 3=Lake)。\n注意：当前 Native LGP2 主解算流程不使用此文件参与潮位计算，此文件亦不是 Hybrid MDT 基准来源掩膜。")
+        btn_fes_mask = QPushButton("浏览...")
+        btn_fes_mask.setObjectName("btn_secondary")
+        btn_fes_mask.clicked.connect(self._browse_fes_mask)
+        layout_fes_mask.addWidget(self.edit_fes_mask)
+        layout_fes_mask.addWidget(btn_fes_mask)
+        layout_oc.addLayout(layout_fes_mask)
 
         # MDT NetCDF
         layout_mdt = QHBoxLayout()
@@ -160,9 +186,10 @@ class SettingsDialog(QDialog):
 
         # Hybrid MDT Source Mask
         layout_mask = QHBoxLayout()
-        layout_mask.addWidget(QLabel("Hybrid MDT 来源掩膜 (.tif):"))
+        layout_mask.addWidget(QLabel("Hybrid MDT 来源掩膜 (.tif，可选):"))
         mask_val = self.config['paths'].get('hybrid_mdt_source_mask', '')
         self.edit_source_mask = QLineEdit(mask_val)
+        self.edit_source_mask.setToolTip("CNES-CLS22 Hybrid MDT 参考基准分类掩膜栅格 (0=UNKNOWN, 1=GOCO06s, 2=EIGEN-6C4(MED), 3=EIGEN-6C4(BLK), 255=NoData)。\n当前项目未内置。留空时系统自动采用几何多边形 Fallback。注意：这不是 FES2022b/mask_fes2022B.nc。")
         btn_mask = QPushButton("浏览...")
         btn_mask.setObjectName("btn_secondary")
         btn_mask.clicked.connect(self._browse_source_mask)
@@ -204,6 +231,11 @@ class SettingsDialog(QDialog):
         if f:
             self.edit_fes.setText(f)
 
+    def _browse_fes_mask(self):
+        f, _ = QFileDialog.getOpenFileName(self, "选择 FES2022b 潮位外推掩膜文件", "", "NetCDF Files (*.nc)")
+        if f:
+            self.edit_fes_mask.setText(f)
+
     def _browse_mdt(self):
         f, _ = QFileDialog.getOpenFileName(self, "选择 CNES-CLS22 MDT 文件", "", "NetCDF Files (*.nc)")
         if f:
@@ -225,12 +257,13 @@ class SettingsDialog(QDialog):
             self.edit_delta_n_eigen.setText(f)
 
     def _browse_source_mask(self):
-        f, _ = QFileDialog.getOpenFileName(self, "选择 Hybrid MDT 权威来源掩膜", "", "GeoTIFF Files (*.tif *.tiff)")
+        f, _ = QFileDialog.getOpenFileName(self, "选择 Hybrid MDT 来源掩膜", "", "GeoTIFF Files (*.tif *.tiff)")
         if f:
             self.edit_source_mask.setText(f)
 
     def _validate_paths(self):
         fes_path = resolve_project_path(self.edit_fes.text().strip())
+        fes_mask_path = resolve_project_path(self.edit_fes_mask.text().strip())
         mdt_path = resolve_project_path(self.edit_mdt.text().strip())
         egm_path = resolve_project_path(self.edit_egm.text().strip(), prefer_resource=True)
         goco_path = resolve_project_path(self.edit_delta_n_goco.text().strip(), prefer_resource=True)
@@ -239,7 +272,13 @@ class SettingsDialog(QDialog):
 
         msg = []
         _, res = _deep_validate_file(fes_path, 'netcdf_fes')
-        msg.append(f"• FES2022b 网格: {res}")
+        msg.append(f"• FES2022b 原生网格: {res}")
+
+        if fes_mask_path:
+            _, res = _deep_validate_file(fes_mask_path, 'fes_mask')
+            msg.append(f"• FES2022b 潮位外推掩膜: {res}")
+        else:
+            msg.append("• FES2022b 潮位外推掩膜: ℹ️ 未配置（可选，当前主解算路线未启用规则外推回退）")
 
         _, res = _deep_validate_file(mdt_path, 'netcdf_mdt')
         msg.append(f"• CNES-CLS22 MDT: {res}")
@@ -254,19 +293,20 @@ class SettingsDialog(QDialog):
             _, res = _deep_validate_file(eigen_path, 'raster')
             msg.append(f"• EIGEN-6C4-EGM2008 ΔN: {res}")
         else:
-            msg.append("• EIGEN-6C4-EGM2008 ΔN: ⚠️ 未指定 (若在地中海/黑海计算非MSL将严格报错)")
+            msg.append("• EIGEN-6C4-EGM2008 ΔN: ℹ️ 未配置（可选，若在地中海/黑海计算非MSL将严格报错）")
 
         if mask_path:
             _, res = _deep_validate_file(mask_path, 'source_mask')
-            msg.append(f"• Hybrid MDT 权威来源掩膜: {res}")
+            msg.append(f"• Hybrid MDT 来源掩膜: {res}")
         else:
-            msg.append("• Hybrid MDT 权威来源掩膜: ℹ️ 未配置 (系统将自动采用几何多边形作为 Fallback)")
+            msg.append("• Hybrid MDT 来源掩膜: ℹ️ 未配置（可选，当前未内置，系统将采用几何多边形 Fallback）")
 
         QMessageBox.information(self, "数据源深度校验结果", "\n".join(msg))
 
     def _save_settings(self):
         paths = self.config.setdefault('paths', {})
         paths['fes_ns_grid'] = self.edit_fes.text().strip()
+        paths['fes_extrapolation_mask_nc'] = self.edit_fes_mask.text().strip()
         paths['mdt_nc'] = self.edit_mdt.text().strip()
         paths['egm2008_tif'] = self.edit_egm.text().strip()
 

@@ -63,9 +63,27 @@ MANUAL_HTML = """
 <div class="callout-warn">
 <b>⚠️ 科学严密性提醒 (大地水准面差值改正与双水准面体系)：</b><br>
 CNES-CLS22 MDT 的参考重力场在大洋为 <b>GOCO06s (d/o=300)</b>，而在地中海与黑海为 <b>EIGEN-6C4 (d/o=2190)</b>，绝非 EGM2008！全球范围内水准面差距（ΔN）在 -6.6m ~ +6.8m 之间。<br>
-CoastTideX v1.4 优先读取可选官方 <code>hybrid_mdt_source_mask.tif</code> 掩膜（若未配置则平滑回退至精细闭合矢量多边形判别，并显式标记 <code>QC_DATUM_SOURCE_APPROX</code> 质量预警），杜绝加的斯湾、直布罗陀海峡西口、比斯开湾与红海被误判。<br>
+CoastTideX 可配置外部 <code>hybrid_mdt_source_mask.tif</code> 来源掩膜（若未配置则平滑回退至精细闭合矢量多边形判别，并显式标记 <code>QC_DATUM_SOURCE_APPROX</code> 质量预警），杜绝加的斯湾、直布罗陀海峡西口、比斯开湾与红海被误判。<br>
 在 EIGEN-6C4 区域，<code>h_goco06s_m</code> 字段严格赋予 NaN（坚决不冒充 GOCO06s）；若需换算至 EGM2008/WGS84，可配置外部权威 <code>data/geoid/delta_n_eigen6c4_minus_egm2008.tif</code> 差值文件（支持通过 <code>scripts/generate_delta_n.py</code> 本地生成）；未配置该外部差值文件时，严格模式 (strict=True) 明确抛出异常，非严格模式返回 NaN。
 </div>
+
+<h3>3. 关键数据来源与双掩膜科学边界澄清 (权威区分两类掩膜)</h3>
+<p>系统涉及两个极易混淆但本质截然不同的掩膜文件，其物理语义与在系统中的作用具有严格边界：</p>
+<table>
+    <tr><th>掩膜类型</th><th>文件格式与典型路径</th><th>内部编码与含义</th><th>科学功能与作用边界</th></tr>
+    <tr>
+        <td><b>Hybrid MDT 来源掩膜<br>(Geoid Source Mask)</b></td>
+        <td>GeoTIFF 栅格<br><code>data/geoid/hybrid_mdt_source_mask.tif</code><br>(可选外部配置，当前未内置)</td>
+        <td><code>0: UNKNOWN</code><br><code>1: GOCO06s (全球大洋)</code><br><code>2: EIGEN-6C4 (地中海)</code><br><code>3: EIGEN-6C4 (黑海)</code><br><code>255: NoData</code></td>
+        <td><b>唯一用于基准判别</b>：决定 CNES-CLS22 MDT 在给定位置采用 GOCO06s 还是 EIGEN-6C4 作为参考水准面，直接关联 ΔN 差值改正。<br><b>未配置时</b>：系统自动采用几何多边形 Fallback 并标记 <code>QC_DATUM_SOURCE_APPROX</code>。<br><b>注意</b>：绝非 FES 潮位外推掩膜！</td>
+    </tr>
+    <tr>
+        <td><b>FES2022b 潮位外推掩膜<br>(Tide Extrapolation Mask)</b></td>
+        <td>NetCDF 文件<br><code>fes2022b/mask_fes2022B.nc</code><br>(1/30° 规则网格外部参考)</td>
+        <td><code>0: Native Ocean (原生海洋)</code><br><code>1: Extrapolated Tide (外推潮位)</code><br><code>2: Land (陆地)</code><br><code>3: Lake (湖泊)</code></td>
+        <td><b>仅用于描述 1/30° 规则网格来源</b>：标明 FES2022b 规则经纬度网格的插值溯源与陆地边界。<br><b>边界澄清</b>：<b>既不是 MDT 掩膜，亦不参与大地水准面基准选择</b>。当前 CoastTideX Native LGP2 主解算流程不使用此文件参与计算，外推回退处于禁用状态。</td>
+    </tr>
+</table>
 
 <h2>二、 时区规范与长时序/整年高分辨率预测</h2>
 <p>
@@ -110,18 +128,25 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
     </li>
     <li><b>严格二阶段执行 (Strict Two-Stage Execution)</b>：
         <ol>
-            <li><b>Stage 1: 控制网格 FES 解算与持久化 Tide Cache 生成</b>：构建四叉树控制网格并批量解算各控制节点的 FES 潮位时序，原子写入 NetCDF 格式的 <code>*_tide.nc</code> 缓存（包含节点坐标、原始与 MSL 潮位时序、基准静态偏移、单元拓扑与完整性标记）；</li>
+            <li><b>Stage 1: 控制网格 FES 解算与持久化 Tide Cache 生成</b>：构建四叉树控制网格并批量解算各控制节点的 FES 潮位时序，原子写入 NetCDF 格式的 <code>*_tide.nc</code> 缓存（包含节点坐标、原始与 MSL 潮位时序、基准静态偏移、单元拓扑与 <code>CACHE_COMPLETE</code> 完整性标记）；</li>
             <li><b>Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率</b>：流式逐分块读取 DEM 高程与 Tide Cache，双线性空间平滑插值解算潜在天文潮淹没频率 (<code>*_inundation.tif</code>) 与质量位掩膜 (<code>*_inundation_qc.tif</code>)。本阶段<b>零 FES 调用</b>，速度提升数倍至数十倍。</li>
         </ol>
     </li>
     <li><b>文件夹级轻量扫描与排重过滤</b>：
-        仅读取 GeoTIFF 头文件元数据，绝不扫描全像元；自动排除输出目录文件、衍生文件 (<code>*_inundation.tif</code>, <code>*_qc.tif</code>, <code>*_tide.nc</code>) 与临时文件，按字母字典序确定性排序。
+        仅读取 GeoTIFF 头文件元数据，绝不扫描全像元；自动排除输出目录文件、衍生文件 (<code>*_inundation.tif</code>, <code>*_qc.tif</code>, <code>*_tide.nc</code>) 与临时文件，按字母字典序确定性排序。GUI 后台工作线程扫描，若用户在中途修改目录或递归设置，系统立即判定快照失效并提示重新扫描，杜绝竞态脏数据。
+    </li>
+    <li><b>三种现有输出策略与严密断点恢复 (Existing Output Policies & Resume Hardening)</b>：
+        <ul>
+            <li><code>error_if_exists</code>: 若目标产物存在则严格拦截报错，防止意外覆盖；</li>
+            <li><code>overwrite</code>: 强制清除旧文件并全新重算；</li>
+            <li><code>resume</code>: 严密断点恢复。深度校验已有 Tide Cache 的参数集签名 (<code>signature</code>) 与兼容性；若缓存属于不同年份或参数，系统拒绝静默跳过并报错阻断；同时对已有 <code>*_inundation.tif</code> 和 <code>*_qc.tif</code> 严格核验尺寸、CRS、Transform 仿射变换矩阵、数据类型 (Float32 / UInt16) 及缓存签名，确认无损后方执行 <code>SKIPPED_EXISTING</code> 跳过。</li>
+        </ul>
+    </li>
+    <li><b>DEM NoData 科学保护</b>：
+        若输入 DEM 的 NoData 值恰好落入潜在天文潮淹没频率的物理有效区间 <code>[0.0, 100.0]</code>%（例如 0 或 100），系统自动回退输出 NoData 为 <code>NaN</code>，彻底杜绝 0% 淹没或 100% 淹没正常像元被误当做 NoData 的严重冲突。
     </li>
     <li><b>单瓦片失败隔离 (Failure Isolation)</b>：
         批量运行中单个瓦片若遇到损坏、非法投影或读取异常，系统自动捕获并在 <code>batch_manifest.json</code> 与 CSV 清单中标记 <code>FAILED</code>，严密隔离故障并立即继续执行后续瓦片，杜绝整批任务因单个异常文件半途废弃。
-    </li>
-    <li><b>任务断点恢复 (Resume Capability)</b>：
-        基于输出目录的 <code>batch_manifest.json</code> 状态机：已完成 (<code>DONE</code>) 瓦片自动跳过；已完成潮位缓存 (<code>TIDE_READY</code>) 瓦片直接进入 Stage 2 计算淹没频率，零重复 FES 开销。
     </li>
     <li><b>FES2022b 本地数据包与近岸外推边界</b>：
         经本地完整数据包审查 (<code>docs/FES2022B_LOCAL_AUDIT_V1_5.md</code>)，FES2022b 外推分潮数据为压缩 <code>.nc.xz</code> 格式，且掩膜具有四分类物理含义。v1.5 Alpha 阶段近岸外推回退机制保持<b>禁用与未集成</b>状态，原生 FES 具备完整的有效控制网格拓扑支撑。

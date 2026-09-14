@@ -24,7 +24,7 @@ from .raster_engine import (
 )
 from .tide_cache import (
     write_tide_cache, read_tide_cache, is_cache_complete,
-    calculate_inundation_from_tide_cache, estimate_tide_cache_size, build_expected_cache_spec, validate_tide_cache_compatibility,
+    calculate_inundation_from_tide_cache, estimate_tide_cache_size, build_expected_cache_spec,
     inspect_tide_cache_metadata, validate_tide_cache_compatibility,
     TideCacheCompatibilityError
 )
@@ -181,7 +181,7 @@ def _verify_raster_artifacts(
     qc_path: str,
     expected_cache_sig: Optional[str] = None
 ) -> bool:
-    """验证已有淹没频率和 QC 栅格产物的尺寸、坐标系与签名一致性"""
+    """验证已有淹没频率和 QC 栅格产物的尺寸、坐标系、仿射变换、数据类型与签名一致性"""
     if not os.path.exists(frequency_path) or not os.path.exists(qc_path):
         return False
     try:
@@ -190,15 +190,23 @@ def _verify_raster_artifacts(
                 return False
             if str(src_f.crs) != str(dem_info.crs):
                 return False
+            if not np.allclose(src_f.transform, dem_info.transform, atol=1e-5):
+                return False
+            if src_f.dtypes[0] != 'float32':
+                return False
             if expected_cache_sig:
                 tags = src_f.tags()
                 sig = tags.get("CACHE_SIGNATURE", "")
-                if sig and sig != expected_cache_sig:
+                if not sig or sig != expected_cache_sig:
                     return False
         with rasterio.open(qc_path) as src_qc:
             if src_qc.width != dem_info.width or src_qc.height != dem_info.height:
                 return False
             if str(src_qc.crs) != str(dem_info.crs):
+                return False
+            if not np.allclose(src_qc.transform, dem_info.transform, atol=1e-5):
+                return False
+            if src_qc.dtypes[0] != 'uint16':
                 return False
         return True
     except Exception:

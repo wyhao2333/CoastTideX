@@ -375,8 +375,8 @@ def stream_inundation_frequency_interpolation(
             for by in range(by0, by1 + 1):
                 spatial_buckets[(bx, by)].append(cell)
 
-    # 遵守原始需求 (Requirement 20): 如果输入 DEM nodata 是可表示的有限 Float32，则输出继承该 nodata；否则为 NaN
-    if info.nodata is not None and np.isfinite(info.nodata):
+    # 遵守需求: 如果输入 DEM nodata 是可表示的有限 Float32 且不在有效淹没频率区间 [0, 100] 内，则输出继承该 nodata；否则回退为 NaN 防冲突
+    if info.nodata is not None and np.isfinite(info.nodata) and not (0.0 <= float(info.nodata) <= 100.0):
         output_nodata = float(np.float32(info.nodata))
     else:
         output_nodata = np.nan

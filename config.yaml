@@ -1,12 +1,16 @@
 # CoastTideX 配置文件
-# 全球海岸带潮位模拟与高程基准转换系统 v1.4
+# 全球海岸带潮位模拟与高程基准转换系统 v1.5 Alpha
 
 # 数据路径配置 (支持绝对路径或相对项目根目录路径)
 paths:
   # FES2022b 原生非结构有限元网格 NetCDF 文件路径 (近岸精度最高)
   fes_ns_grid: "fes2022b/ocean_tide_non_structured/FES2022b_OceanTide_NSgrid.nc"
   
-  # FES2022b 规则外推网格目录 (备用)
+  # FES2022b 1/30° 规则网格潮位来源/外推掩膜 NetCDF 文件路径 (可选外部参考，0:Native Ocean, 1:Extrapolated Tide, 2:Land, 3:Lake)
+  # 注意：当前 CoastTideX Native LGP2 主解算流程不使用此文件参与潮位计算；此文件亦不是 Hybrid MDT 基准来源掩膜。
+  fes_extrapolation_mask_nc: "fes2022b/mask_fes2022B.nc"
+
+  # FES2022b 规则外推网格目录 (备用，当前未启用外推回退)
   fes_extrapolated_dir: "fes2022b/ocean_tide_extrapolated"
   
   # CNES-CLS22 MDT 数据路径 (全球大洋参考 GOCO06s，地中海/黑海参考 EIGEN-6C4)
@@ -21,10 +25,15 @@ paths:
   delta_n_tif: "data/geoid/delta_n_goco06s_minus_egm2008.tif"
 
   # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (可选外部补充，Delta N = N_EIGEN6C4 - N_EGM2008)
-  delta_n_eigen6c4_egm2008_tif: "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
+  # 留空时为未配置状态；地中海与黑海 EGM2008/WGS84 严格转换需要额外 EIGEN-6C4 ΔN 数据。
+  delta_n_eigen6c4_egm2008_tif: ""
 
-  # CNES-CLS22 Hybrid MDT 权威来源与基准参考掩膜栅格 (可选外部补充，0:UNKNOWN, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK), 255:NoData)
-  hybrid_mdt_source_mask: "data/geoid/hybrid_mdt_source_mask.tif"
+  # 可选 Hybrid MDT 参考基准来源分类栅格 (GeoTIFF，0:UNKNOWN, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK), 255:NoData)。
+  # 当前项目不内置该文件。
+  # 留空时 DatumTransformer 使用地中海/黑海多边形 fallback，
+  # 并在近似来源判断区域输出 QC_DATUM_SOURCE_APPROX。
+  # 注意：这不是 FES2022b/mask_fes2022B.nc。
+  hybrid_mdt_source_mask: ""
 
 # 潮位计算配置
 tide:

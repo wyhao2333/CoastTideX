@@ -382,10 +382,10 @@ class DatumTransformer:
         self._synthetic_fixtures = None
 
     def _init_source_mask(self, strict: bool = False):
-        """加载 CNES-CLS22 Hybrid MDT 权威来源掩膜 GeoTIFF (若配置)"""
+        """加载 CNES-CLS22 Hybrid MDT 可选来源掩膜 GeoTIFF (若配置)"""
         if self._source_mask_data is None and self.source_mask_path:
             if not os.path.exists(self.source_mask_path):
-                msg = f"未找到权威 Hybrid MDT 来源掩膜文件: {self.source_mask_path}。将自动回退为空间多边形近似判定。"
+                msg = f"未找到可选 Hybrid MDT 来源掩膜文件: {self.source_mask_path}。将自动回退为空间多边形近似判定。"
                 if strict:
                     raise DatumDataError(msg)
                 return

@@ -419,3 +419,17 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
    > Kvas, A., et al. (2021). GOCO06s - a satellite-only global gravity field model. *International Centre for Global Earth Models (ICGEM)*, GFZ Potsdam. (DOI: `10.5880/ICGEM.2021.002`)
 4. **EGM2008 Geoid**:
    > Pavlis, N. K., Holmes, S. A., Kenyon, S. C., & Factor, J. K. (2012). The development and evaluation of the Earth Gravitational Model 2008 (EGM2008). *Journal of Geophysical Research: Solid Earth*, 117(B4).
+
+---
+
+## 👨‍💻 Author & Developer
+
+* **王宇豪 (Yuhao Wang)**
+  * Role: Lead Architect & System Developer of CoastTideX
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
+

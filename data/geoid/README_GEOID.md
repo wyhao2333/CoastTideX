@@ -1,4 +1,4 @@
-# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.4)
+# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.5 Alpha)
 
 本目录包含 CoastTideX 系统用于高精度潮位垂直基准转换的核心空间栅格数据与大地测量学定义。
 
@@ -11,7 +11,8 @@
 | `us_nga_egm08_25.tif` | 全球 EGM2008 大地水准面起伏 $N_{\text{EGM2008}}$ | 2.5' 全球网格 (4321×8640) | **76.86 MB** | EPSG:4979 (WGS84 3D) | 美国国家地理空间情报局 (NGA) EGM2008 (d/o 2190) |
 | `delta_n_goco06s_minus_egm2008.tif` | 全球大洋 GOCO06s 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.66 MB** | EPSG:4326 (WGS84 2D) | ICGEM (GFZ Potsdam), GOCO06s (d/o 300) - EGM2008 (d/o 2190) |
 | `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (地中海/黑海非MSL必选，可由脚本本地生成，为保持轻量不强行入 Git 库) |
-| `hybrid_mdt_source_mask.tif` | [v1.4可选] 官方 Hybrid MDT 来源分类权威掩膜 (1=GOCO06s, 2=Med EIGEN-6C4, 3=Black Sea EIGEN-6C4, 0=未知, 255=NoData) | 0.05°~0.25° 网格 | 视配置而定 | EPSG:4326 或投影 CRS | 派生自官方 CNES-CLS22 MDT 空间定义，未配置时系统平滑退化至精细多边形判别 (QC_DATUM_SOURCE_APPROX) |
+| `hybrid_mdt_source_mask.tif` | [可选外部数据，当前未内置] Hybrid MDT 来源分类掩膜 (1=GOCO06s, 2=Med EIGEN-6C4, 3=Black Sea EIGEN-6C4, 0=未知, 255=NoData) | 视外部配置而定 | 视外部配置而定 | EPSG:4326 或投影 CRS | 仅用于判定 CNES-CLS22 MDT 参考重力场基准；当前未内置，系统默认采用精细闭合多边形判别并输出 `QC_DATUM_SOURCE_APPROX`。注意：此文件绝非 FES2022b 的 1/30° 规则潮位外推掩膜。 |
+| `fes2022b/mask_fes2022B.nc` | [FES外部参考，位于 fes2022b 目录] FES2022b 1/30° 规则网格潮位来源/外推掩膜 (0=Native Ocean, 1=Extrapolated Tide, 2=Land, 3=Lake) | 1/30° (5401×10800) | 55.6 MB | EPSG:4326 | 仅用于标明 FES 规则经纬度网格的插值溯源与陆地边界；绝不是 MDT 掩膜，亦不参与大地水准面基准选择。当前 Native LGP2 主解算流程不使用此文件。 |
 
 ---
 
