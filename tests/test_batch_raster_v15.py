@@ -193,12 +193,17 @@ class TestBatchRasterV15(unittest.TestCase):
     # 3. Tide Cache 大小预估函数测试 (Cache Size Estimator)
     # -------------------------------------------------------------
     def test_estimate_tide_cache_size(self):
-        """验证控制节点数组内存与原始数据量估算公式"""
+        """验证控制节点数组内存与原始数据量估算公式 (默认按常驻双数组 8 字节/样本/节点)"""
         est = estimate_tide_cache_size(node_count=100, time_samples=17568)
-        expected_bytes = 100 * 17568 * 4
+        expected_bytes = 100 * 17568 * 8
         self.assertEqual(est["raw_bytes"], expected_bytes)
         self.assertAlmostEqual(est["raw_mb"], expected_bytes / (1024 * 1024), places=2)
         self.assertIn("MB", est["formatted_size"])
+        self.assertEqual(est["resident_array_count"], 2)
+
+        # 单数组显式测试
+        est_single = estimate_tide_cache_size(node_count=100, time_samples=17568, resident_array_count=1)
+        self.assertEqual(est_single["raw_bytes"], 100 * 17568 * 4)
 
     # -------------------------------------------------------------
     # 4. Tide Cache 序列化与读写还原测试 (Tide Cache Round-trip)
@@ -358,8 +363,7 @@ class TestBatchRasterV15(unittest.TestCase):
             self.assertEqual(out_src.crs, orig_crs)
             self.assertEqual(out_src.transform, orig_transform)
             self.assertEqual(out_src.width, orig_width)
-            self.assertEqual(out_src.height, orig_height)
-            self.assertTrue(np.isnan(out_src.nodata), '淹没频率栅格按规范必须为 Float32, nodata=NaN')
+            self.assertEqual(out_src.nodata, orig_nodata)
 
     # -------------------------------------------------------------
     # 7. 狭长沙滩目标感知自适应细分测试 (Narrow Beach Tests)
@@ -527,10 +531,16 @@ class TestBatchRasterV15(unittest.TestCase):
         initial_calls = pred.call_count
         self.assertGreater(initial_calls, 0)
 
-        # 将 tile_1 手工设为 DONE (模拟上次已完全完成)
+        # 为 tile_1 生成合法的 Frequency 与 QC (模拟上次已完全完成)
+        from core.tide_cache import calculate_inundation_from_tide_cache
+        calculate_inundation_from_tide_cache(
+            dem_path=f1,
+            cache_path=os.path.join(out_dir, "tile_1_tide.nc"),
+            output_path=os.path.join(out_dir, "tile_1_inundation.tif"),
+            qc_output_path=os.path.join(out_dir, "tile_1_inundation_qc.tif")
+        )
         manifest = BatchManifest(out_dir)
         manifest.load()
-        Path(os.path.join(out_dir, "tile_1_inundation.tif")).touch()
         manifest.upsert(f1, status=STATUS_DONE)
         manifest.save()
 

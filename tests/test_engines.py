@@ -778,7 +778,8 @@ class TestCoastTideX(unittest.TestCase):
 
             with rasterio.open(out_inund) as src:
                 res_data = src.read(1)
-                self.assertTrue(np.isnan(res_data[:, 25:35]).all(), "中间陆地/屏障带像元必须保持 NaN 阻断传播")
+                is_barrier_nodata = np.isnan(res_data[:, 25:35]) if (src.nodata is None or np.isnan(src.nodata)) else np.isclose(res_data[:, 25:35], src.nodata)
+                self.assertTrue(is_barrier_nodata.all(), "中间陆地/屏障带像元必须保持 NoData 阻断传播")
                 self.assertTrue(np.isfinite(res_data[:, 5:15]).all())
                 self.assertTrue(np.isfinite(res_data[:, 45:55]).all())
 
@@ -949,7 +950,8 @@ class TestCoastTideX(unittest.TestCase):
             self.assertEqual(inund_summary.valid_pixels, 50)
             with rasterio.open(out_inund) as src:
                 arr = src.read(1)
-                finite_count = int(np.count_nonzero(~np.isnan(arr)))
+                valid_mask = ~np.isnan(arr) if (src.nodata is None or np.isnan(src.nodata)) else (~np.isnan(arr) & ~np.isclose(arr, src.nodata))
+                finite_count = int(np.count_nonzero(valid_mask))
                 self.assertEqual(finite_count, 50)
 
     # 40. Test K: 验证无头/CI环境直接导入 GUI 模块与取消信号线程安全性

@@ -109,6 +109,8 @@ class RasterInfo:
     dtype: str
     unit_name: str = "metre"
     unit_factor: float = 1.0
+    file_size_bytes: int = 0
+    mtime_ns: int = 0
 
     @property
     def formatted_resolution(self) -> str:
@@ -373,6 +375,12 @@ def stream_inundation_frequency_interpolation(
             for by in range(by0, by1 + 1):
                 spatial_buckets[(bx, by)].append(cell)
 
+    # 遵守原始需求 (Requirement 20): 如果输入 DEM nodata 是可表示的有限 Float32，则输出继承该 nodata；否则为 NaN
+    if info.nodata is not None and np.isfinite(info.nodata):
+        output_nodata = float(np.float32(info.nodata))
+    else:
+        output_nodata = np.nan
+
     out_profile = {
         'driver': 'GTiff',
         'height': info.height,
@@ -381,7 +389,7 @@ def stream_inundation_frequency_interpolation(
         'dtype': rasterio.float32,
         'crs': rasterio.crs.CRS.from_user_input(info.crs),
         'transform': info.transform,
-        'nodata': np.nan,
+        'nodata': output_nodata,
         'compress': 'deflate',
         'predictor': 2,
     }
@@ -421,7 +429,7 @@ def stream_inundation_frequency_interpolation(
                     else:
                         valid_dem_mask = np.isfinite(dem_chunk)
 
-                    inund_chunk = np.full(dem_chunk.shape, np.nan, dtype=np.float32)
+                    inund_chunk = np.full(dem_chunk.shape, output_nodata, dtype=np.float32)
                     qc_chunk = np.full(dem_chunk.shape, QC_NODATA, dtype=np.uint16)
 
                     n_chunk_valid = int(np.count_nonzero(valid_dem_mask))
@@ -720,6 +728,15 @@ class RasterTideEngine:
                         valid_mask = np.isfinite(chunk)
                     valid_px += int(np.count_nonzero(valid_mask))
 
+        fsize = 0
+        mtime = 0
+        try:
+            st = os.stat(resolved_path)
+            fsize = st.st_size
+            mtime = st.st_mtime_ns
+        except Exception:
+            pass
+
         return RasterInfo(
             path=resolved_path,
             crs=crs_str,
@@ -734,7 +751,9 @@ class RasterTideEngine:
             total_pixel_count=total_px,
             dtype=dtype_str,
             unit_name=unit_name,
-            unit_factor=unit_factor
+            unit_factor=unit_factor,
+            file_size_bytes=fsize,
+            mtime_ns=mtime
         )
 
     def iter_raster_windows(
@@ -1142,7 +1161,10 @@ class RasterTideEngine:
         else:
             t_start_str = str(start_time)
             t_end_str = str(end_time)
-            inclusive_mode = 'both'
+            if t_start_str.endswith("-01-01 00:00:00") and t_end_str.endswith("-01-01 00:00:00") and int(t_end_str[:4]) > int(t_start_str[:4]):
+                inclusive_mode = 'left'  # 严格全年度保持半开区间
+            else:
+                inclusive_mode = 'both'  # 自定义区间默认双闭区间 (如单日/单月测试)
 
         time_idx = pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode, tz="UTC")
         n_time_samples = len(time_idx)
@@ -1592,12 +1614,15 @@ class RasterTideEngine:
                 "end_time": t_end_str,
                 "freq": freq,
                 "source_tz": source_tz,
+                "inclusive": inclusive_mode,
                 "constituents": constituents,
                 "dem_datum": dem_datum,
                 "initial_control_spacing_m": initial_control_spacing_m,
                 "min_control_spacing_m": min_control_spacing_m,
                 "inundation_error_tolerance_pct": inundation_error_tolerance_pct,
-                "target_mode": target_mode
+                "target_mode": target_mode,
+                "topology_max_resolution_m": self.topology_max_resolution_m,
+                "topology_valid_fraction_threshold": self.topology_valid_fraction_threshold
             }
             write_tide_cache(
                 cache_path=export_tide_cache_path,
@@ -1662,14 +1687,17 @@ class RasterTideEngine:
             'CONTROL_NODE_BATCH_SIZE': str(self.control_node_batch_size),
             'FES_PREDICT_CALLS': str(predictor_call_count[0]),
             'FES_CONTROL_NODES_EVALUATED': str(evaluated_node_count[0]),
+            'TOPOLOGY_SOURCE': 'target_mask_derived',
             'TOPOLOGY_RESOLUTION_M': str(self.topology_max_resolution_m),
+            'TOPOLOGY_VALID_FRACTION_THRESHOLD': str(self.topology_valid_fraction_threshold),
             'TOPOLOGY_COMPONENT_COUNT': str(num_features),
             'INPUT_VALID_PIXELS': str(input_valid_count),
             'TOTAL_PIXELS': str(info.total_pixel_count),
             'MAX_IN_MEMORY_CONTROL_NODES': str(self.max_in_memory_control_nodes),
             'RESIDENT_CONTROL_NODES': str(final_nodes_count),
+            'RESIDENT_TIMESERIES_ARRAYS_PER_NODE': '2',
             'TIME_SAMPLES_PER_NODE': str(n_time_samples),
-            'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=4):.2f}",
+            'ESTIMATED_CONTROL_ARRAY_MEMORY_MB': f"{estimate_control_node_memory(final_nodes_count, n_time_samples, dtype_bytes=8):.2f}",
             'TARGET_MODE': str(target_mode),
             'QC_ENCODING': 'UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached'
         }

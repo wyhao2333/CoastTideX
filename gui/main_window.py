@@ -4,6 +4,7 @@ CoastTideX 桌面主窗口 (Main Window)
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 import dateutil.tz
@@ -25,7 +26,7 @@ from PyQt6.QtWidgets import (
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
     QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
-    QCheckBox, QDoubleSpinBox
+    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor
 import threading
@@ -302,6 +303,36 @@ class RasterTideWorker(QThread):
 
 
 
+class BatchScanWorker(QThread):
+    """后台轻量扫描 GeoTIFF 头信息工作线程，严禁阻塞 UI 主线程"""
+    finished = pyqtSignal(list, dict)  # (discovered_list, scan_spec)
+    error = pyqtSignal(str)
+
+    def __init__(self, in_dir: str, out_dir: str, recursive: bool):
+        super().__init__()
+        self.in_dir = in_dir
+        self.out_dir = out_dir
+        self.recursive = recursive
+
+    def run(self):
+        try:
+            from core.batch_raster_engine import BatchRasterEngine
+            res = BatchRasterEngine.discover_rasters(
+                input_folder=self.in_dir,
+                recursive=self.recursive,
+                output_folder=self.out_dir
+            )
+            spec = {
+                "in_dir": self.in_dir,
+                "out_dir": self.out_dir,
+                "recursive": self.recursive,
+                "scan_time": time.time() if "time" in globals() else 0.0
+            }
+            self.finished.emit(res, spec)
+        except Exception as ex:
+            self.error.emit(str(ex))
+
+
 class BatchRasterWorker(QThread):
     """批量潮间带栅格解算后台工作线程 (v1.5)"""
     progress = pyqtSignal(int, int, str, str, dict)
@@ -347,7 +378,8 @@ class BatchRasterWorker(QThread):
                 recursive=self.params.get('recursive', False),
                 existing_policy=self.params.get('existing_policy', 'resume'),
                 progress_callback=p_cb,
-                cancel_event=self.cancel_event
+                cancel_event=self.cancel_event,
+                discovered_files=self.params.get('discovered_files')
             )
             if self._is_cancelled:
                 self.cancelled.emit()
@@ -1832,7 +1864,9 @@ class MainWindow(QMainWindow):
         vbox_input.addWidget(self.chk_batch_recursive)
 
         self.btn_scan_batch = QPushButton("🔍 扫描文件夹 (Scan GeoTIFFs)")
-        self.btn_scan_batch.setStyleSheet("background-color: #2b5b84; color: white; font-weight: bold; padding: 6px;")
+        self.btn_scan_batch.setObjectName("btn_batch_scan")
+        self.btn_scan_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scan_batch.setToolTip("扫描并预览当前目录中将参与批量解算的 GeoTIFF；不会开始潮位计算，只读取文件路径与 GeoTIFF 头信息。")
         self.btn_scan_batch.clicked.connect(self._on_scan_batch_rasters)
         vbox_input.addWidget(self.btn_scan_batch)
 
@@ -1845,6 +1879,10 @@ class MainWindow(QMainWindow):
         h_out.addWidget(self.txt_batch_out_dir)
         h_out.addWidget(self.btn_browse_batch_out)
         vbox_input.addLayout(h_out)
+
+        self.txt_batch_in_dir.textChanged.connect(self._invalidate_batch_scan)
+        self.txt_batch_out_dir.textChanged.connect(self._invalidate_batch_scan)
+        self.chk_batch_recursive.toggled.connect(self._invalidate_batch_scan)
 
         panel_layout.addWidget(grp_input)
 
@@ -1899,8 +1937,8 @@ class MainWindow(QMainWindow):
         h_step = QHBoxLayout()
         h_step.addWidget(QLabel("采样间隔 (步长):"))
         self.cmb_batch_step = QComboBox()
-        self.cmb_batch_step.addItems(["30min (推荐)", "1h", "15min", "10min", "2h"])
-        self.cmb_batch_step.currentIndexChanged.connect(self._update_batch_expected_samples)
+        self.cmb_batch_step.addItems(["30min (推荐)", "1h", "15min", "10min", "2h", "Custom... (自定义)"])
+        self.cmb_batch_step.currentIndexChanged.connect(self._on_batch_step_changed)
         h_step.addWidget(self.cmb_batch_step)
         vbox_time.addLayout(h_step)
 
@@ -1983,12 +2021,15 @@ class MainWindow(QMainWindow):
 
         h_btns = QHBoxLayout()
         self.btn_start_batch = QPushButton("🚀 开始批量解算")
-        self.btn_start_batch.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; padding: 8px;")
+        self.btn_start_batch.setObjectName("btn_batch_start")
+        self.btn_start_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start_batch.setEnabled(False)  # 严格依赖 Fresh Scan 启用
         self.btn_start_batch.clicked.connect(self._on_start_batch)
 
         self.btn_cancel_batch = QPushButton("⏹️ 取消")
+        self.btn_cancel_batch.setObjectName("btn_batch_cancel")
+        self.btn_cancel_batch.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel_batch.setEnabled(False)
-        self.btn_cancel_batch.setStyleSheet("background-color: #c62828; color: white; font-weight: bold; padding: 8px;")
         self.btn_cancel_batch.clicked.connect(self._on_cancel_batch)
 
         h_btns.addWidget(self.btn_start_batch)
@@ -2026,7 +2067,7 @@ class MainWindow(QMainWindow):
         self.table_batch_rasters = QTableWidget()
         self.table_batch_rasters.setColumnCount(8)
         self.table_batch_rasters.setHorizontalHeaderLabels([
-            "文件名", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出"
+            "相对路径 / Relative Path", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出"
         ])
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
@@ -2043,7 +2084,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(grp_right, stretch=1)
 
         self.batch_worker = None
+        self.scan_worker = None
+        self.scan_fresh = False
+        self.scan_spec = {}
         self.discovered_batch_files = []
+        self._batch_row_by_relative_path = {}
 
     def _on_batch_time_mode_changed(self):
         mode = self.combo_batch_time_mode.currentData()
@@ -2085,9 +2130,58 @@ class MainWindow(QMainWindow):
                 "color: #00796B; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #80CBC4;"
             )
 
+    def _get_effective_batch_output_dir(self) -> str:
+        """获取当前有效的输出目录（用户指定优先，默认回退至 <input>/CoastTideX_output）"""
+        out_text = self.txt_batch_out_dir.text().strip()
+        if out_text:
+            return out_text
+        in_text = self.txt_batch_in_dir.text().strip()
+        if in_text:
+            return os.path.join(in_text, "CoastTideX_output")
+        return ""
+
+    def _get_batch_frequency(self) -> str:
+        """获取当前配置的采样时间步长"""
+        step_data = self.cmb_batch_step.currentData()
+        if step_data:
+            return str(step_data)
+        txt = self.cmb_batch_step.currentText()
+        if "Custom" in txt and "(" in txt and ")" in txt:
+            # 如 "Custom (45min)"
+            inner = txt.split("(")[1].split(")")[0].strip()
+            if inner:
+                return inner
+        return txt.split()[0]
+
+    def _on_batch_step_changed(self):
+        txt = self.cmb_batch_step.currentText()
+        if "Custom" in txt:
+            val, ok = QInputDialog.getText(
+                self,
+                "自定义采样步长 (Custom Step)",
+                "请输入固定时间步长 (支持正整数分钟或小时，如 5min, 20min, 45min, 90min, 3h):",
+                text="45min"
+            )
+            if ok and val.strip():
+                val_clean = val.strip().lower()
+                m = re.match(r"^(\d+)\s*(min|h|m)$", val_clean)
+                if not m or int(m.group(1)) <= 0:
+                    QMessageBox.warning(self, "格式错误", "仅支持正整数分钟或小时步长 (例如: 20min, 45min, 3h)。")
+                    self.cmb_batch_step.setCurrentIndex(0)
+                    return
+                unit = "min" if m.group(2) in ("min", "m") else "h"
+                freq_str = f"{m.group(1)}{unit}"
+                idx = self.cmb_batch_step.currentIndex()
+                self.cmb_batch_step.setItemText(idx, f"Custom ({freq_str})")
+                self.cmb_batch_step.setItemData(idx, freq_str)
+            else:
+                self.cmb_batch_step.setCurrentIndex(0)
+                return
+
+        self._update_batch_expected_samples()
+
     def _update_batch_expected_samples(self):
-        step_text = self.cmb_batch_step.currentText()
-        freq = step_text.split()[0]
+        freq = self._get_batch_frequency()
         time_mode = self.combo_batch_time_mode.currentData() if hasattr(self, 'combo_batch_time_mode') else 'year'
 
         try:
@@ -2095,30 +2189,39 @@ class MainWindow(QMainWindow):
                 yr = self.spn_batch_year.value()
                 t_start = f"{yr:04d}-01-01 00:00:00"
                 t_end = f"{yr+1:04d}-01-01 00:00:00"
-                inc = 'left'
                 desc = f"{yr} 全年"
             else:
                 t_start = self.time_batch_start.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
                 t_end = self.time_batch_end.dateTime().toPyDateTime().strftime("%Y-%m-%d %H:%M:%S")
-                inc = 'both'
                 desc = f"{t_start} 至 {t_end}"
 
-            dr = pd.date_range(t_start, t_end, freq=freq, inclusive=inc, tz="UTC")
-            n = len(dr)
-            raw_kb = (n * 4) / 1024.0
-            raw_100_mb = (n * 4 * 100) / (1024.0 * 1024.0)
+            from core.utils import build_time_index
+            t_idx, _, _ = build_time_index(t_start, t_end, freq=freq, inclusive='left', source_tz='UTC')
+            n = len(t_idx)
+            raw_kb = (n * 8) / 1024.0
+            raw_100_mb = (n * 8 * 100) / (1024.0 * 1024.0)
             self.lbl_batch_samples.setText(
-                f"预期采样步数: {n:,} 步 ({desc} @ {freq} | 单节点时序 ~{raw_kb:.1f} KB, 100节点 ~{raw_100_mb:.1f} MB)"
+                f"预期采样步数: {n:,} 步 ({desc} @ {freq}, [start,end) | 双数组常驻 ~{raw_kb:.1f} KB/节点, 100节点 ~{raw_100_mb:.1f} MB)"
             )
         except Exception:
             self.lbl_batch_samples.setText(f"采样步长: {freq}")
+
+    def _invalidate_batch_scan(self):
+        """当输入目录、输出目录或递归选项更改时，使现有扫描快照立即失效"""
+        self.scan_fresh = False
+        self.discovered_batch_files = []
+        self._batch_row_by_relative_path = {}
+        self.table_batch_rasters.setRowCount(0)
+        self.btn_start_batch.setEnabled(False)
+        self.lbl_batch_status.setText("⚠️ 目录或扫描配置已改变，请点击“扫描文件夹”构建/刷新任务队列。")
+        self.lbl_batch_counts.setText("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
+        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
 
     def _on_browse_batch_input(self):
         d = QFileDialog.getExistingDirectory(self, "选择输入 GeoTIFF 目录")
         if d:
             self.txt_batch_in_dir.setText(d)
-            if not self.txt_batch_out_dir.text().strip():
-                self.txt_batch_out_dir.setText(os.path.join(d, "CoastTideX_output"))
+            # 保持输出目录输入框为空，由统一 helper 动态回退至 <input>/CoastTideX_output
 
     def _on_browse_batch_output(self):
         d = QFileDialog.getExistingDirectory(self, "选择输出目录")
@@ -2131,33 +2234,84 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先选择有效的输入文件夹！")
             return
 
-        out_dir = self.txt_batch_out_dir.text().strip() or os.path.join(in_dir, "CoastTideX_output")
+        out_dir = self._get_effective_batch_output_dir()
         recursive = self.chk_batch_recursive.isChecked()
 
-        from core.batch_raster_engine import BatchRasterEngine
-        try:
-            self.discovered_batch_files = BatchRasterEngine.discover_rasters(
-                input_folder=in_dir,
-                recursive=recursive,
-                output_folder=out_dir
-            )
-        except Exception as e:
-            QMessageBox.critical(self, "扫描错误", f"扫描目录失败: {str(e)}")
-            return
+        self.btn_scan_batch.setEnabled(False)
+        self.btn_scan_batch.setText("⏳ 正在扫描...")
+        self.lbl_batch_status.setText("正在后台读取 GeoTIFF 头信息，请稍候...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
 
-        self.table_batch_rasters.setRowCount(len(self.discovered_batch_files))
-        for r_idx, meta in enumerate(self.discovered_batch_files):
-            self.table_batch_rasters.setItem(r_idx, 0, QTableWidgetItem(meta["filename"]))
+        self.scan_worker = BatchScanWorker(in_dir, out_dir, recursive)
+        self.scan_worker.finished.connect(self._on_scan_finished)
+        self.scan_worker.error.connect(self._on_scan_error)
+        self.scan_worker.start()
+
+    def _on_scan_finished(self, discovered_list, spec=None):
+        QApplication.restoreOverrideCursor()
+        self.btn_scan_batch.setEnabled(True)
+        self.btn_scan_batch.setText("🔄 重新扫描 / 刷新队列 (Refresh Queue)")
+
+        self.discovered_batch_files = discovered_list
+        self.scan_spec = spec
+        self.scan_fresh = True
+        self._batch_row_by_relative_path = {}
+
+        self.table_batch_rasters.setRowCount(len(discovered_list))
+        valid_count = 0
+        invalid_count = 0
+
+        for r_idx, meta in enumerate(discovered_list):
+            rel_p = meta.get("relative_path", meta.get("filename", ""))
+            self._batch_row_by_relative_path[rel_p] = r_idx
+
+            item_path = QTableWidgetItem(rel_p)
+            item_path.setToolTip(meta.get("input_path", ""))
+            self.table_batch_rasters.setItem(r_idx, 0, item_path)
             self.table_batch_rasters.setItem(r_idx, 1, QTableWidgetItem(f"{meta['file_size_mb']:.1f} MB"))
             self.table_batch_rasters.setItem(r_idx, 2, QTableWidgetItem(f"{meta['width']}×{meta['height']}"))
             self.table_batch_rasters.setItem(r_idx, 3, QTableWidgetItem(str(meta['crs'])[:20]))
             self.table_batch_rasters.setItem(r_idx, 4, QTableWidgetItem(f"{meta['resolution'][0]:.4f}"))
-            self.table_batch_rasters.setItem(r_idx, 5, QTableWidgetItem("就绪 (Ready)"))
+
+            if meta.get("valid", False):
+                valid_count += 1
+                status_item = QTableWidgetItem("就绪 (Ready)")
+            else:
+                invalid_count += 1
+                status_item = QTableWidgetItem("无效 (Invalid)")
+                status_item.setForeground(QColor("#ef4444"))
+                status_item.setToolTip(f"格式错误: {meta.get('error', '未知错误')}")
+
+            self.table_batch_rasters.setItem(r_idx, 5, status_item)
             self.table_batch_rasters.setItem(r_idx, 6, QTableWidgetItem("-"))
             self.table_batch_rasters.setItem(r_idx, 7, QTableWidgetItem("-"))
 
-        self.lbl_batch_status.setText(f"扫描完成: 发现 {len(self.discovered_batch_files)} 个待解算 GeoTIFF 影像。")
-        self.lbl_batch_counts.setText(f"总文件: {len(self.discovered_batch_files)} | 完成: 0 | 失败: 0 | 跳过: 0")
+        self.lbl_batch_status.setText(f"扫描完成: 发现 {len(discovered_list)} 个 GeoTIFF (有效 {valid_count}, 无效 {invalid_count})。")
+        self.lbl_batch_counts.setText(f"总文件: {len(discovered_list)} | 完成: 0 | 失败: 0 | 跳过: 0")
+        self.btn_start_batch.setEnabled(valid_count > 0)
+
+    def _on_scan_error(self, err_msg):
+        QApplication.restoreOverrideCursor()
+        self.btn_scan_batch.setEnabled(True)
+        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self._invalidate_batch_scan()
+        QMessageBox.critical(self, "扫描错误", f"后台扫描目录失败: {err_msg}")
+
+    def _set_batch_controls_running(self, is_running: bool):
+        """批量任务运行期间锁定配置控件，防止用户误修改"""
+        self.txt_batch_in_dir.setEnabled(not is_running)
+        self.btn_browse_batch_in.setEnabled(not is_running)
+        self.txt_batch_out_dir.setEnabled(not is_running)
+        self.btn_browse_batch_out.setEnabled(not is_running)
+        self.chk_batch_recursive.setEnabled(not is_running)
+        self.btn_scan_batch.setEnabled(not is_running)
+        self.grp_batch_time.setEnabled(not is_running)
+        self.grp_batch_sci.setEnabled(not is_running)
+        self.cmb_batch_job_mode.setEnabled(not is_running)
+        self.cmb_batch_existing_policy.setEnabled(not is_running)
+
+        self.btn_start_batch.setEnabled(not is_running)
+        self.btn_cancel_batch.setEnabled(is_running)
 
     def _on_start_batch(self):
         in_dir = self.txt_batch_in_dir.text().strip()
@@ -2165,16 +2319,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "警告", "请先选择有效的输入文件夹！")
             return
 
-        if not self.discovered_batch_files:
-            self._on_scan_batch_rasters()
-            if not self.discovered_batch_files:
-                QMessageBox.information(self, "提示", "未在该目录下发现任何有效的 GeoTIFF 影像！")
-                return
+        if not self.scan_fresh or not self.discovered_batch_files:
+            QMessageBox.warning(self, "警告", "当前任务队列尚未扫描或已失效，请先点击“扫描文件夹”构建/刷新任务队列！")
+            return
 
-        out_dir = self.txt_batch_out_dir.text().strip() or os.path.join(in_dir, "CoastTideX_output")
+        out_dir = self._get_effective_batch_output_dir()
         job_mode = self.cmb_batch_job_mode.currentData()
-
-        step_raw = self.cmb_batch_step.currentText().split()[0]
+        step_raw = self._get_batch_frequency()
         dem_datum = self.cmb_batch_datum.currentText().split()[0].lower()
         const_raw = self.cmb_batch_const.currentText().split()[0]
         target_mode = self.cmb_batch_target_mode.currentText().split()[0]
@@ -2202,12 +2353,11 @@ class MainWindow(QMainWindow):
             "constituents": const_raw,
             "target_mode": target_mode,
             "existing_policy": existing_policy,
-            "recursive": self.chk_batch_recursive.isChecked()
+            "recursive": self.chk_batch_recursive.isChecked(),
+            "discovered_files": self.discovered_batch_files  # 使用 GUI 显式扫描快照，禁止第二次全盘扫描
         }
 
-        self.btn_start_batch.setEnabled(False)
-        self.btn_scan_batch.setEnabled(False)
-        self.btn_cancel_batch.setEnabled(True)
+        self._set_batch_controls_running(True)
         self.bar_batch_overall.setValue(0)
         self.bar_batch_tile.setValue(0)
 
@@ -2218,31 +2368,43 @@ class MainWindow(QMainWindow):
         self.batch_worker.cancelled.connect(self._on_batch_cancelled)
         self.batch_worker.start()
 
-    def _on_batch_progress(self, overall_pct, tile_pct, filename, msg, counts):
+    def _on_batch_progress(self, overall_pct, tile_pct, rel_path, msg, counts):
         self.bar_batch_overall.setValue(overall_pct)
         self.bar_batch_tile.setValue(tile_pct)
-        if filename:
-            self.lbl_batch_status.setText(f"[{filename}] {msg}")
+        if rel_path:
+            self.lbl_batch_status.setText(f"[{rel_path}] {msg}")
         else:
             self.lbl_batch_status.setText(msg)
+        c_done = counts.get('completed', counts.get('succeeded', 0))
         self.lbl_batch_counts.setText(
-            f"总文件: {counts['total']} | 完成: {counts['completed']} | 失败: {counts['failed']} | 跳过: {counts['skipped']}"
+            f"总文件: {counts.get('total', 0)} | 完成: {c_done} | 失败: {counts.get('failed', 0)} | 跳过: {counts.get('skipped', 0)}"
         )
 
-        # 更新表格中对应行的状态
-        if filename:
-            for r_idx in range(self.table_batch_rasters.rowCount()):
-                item = self.table_batch_rasters.item(r_idx, 0)
-                if item and item.text() == filename:
-                    status_item = self.table_batch_rasters.item(r_idx, 5)
-                    if status_item:
-                        status_item.setText(msg[:25])
-                    break
+        # 基于 relative_path O(1) 字典查找更新表格对应行
+        if rel_path and rel_path in self._batch_row_by_relative_path:
+            r_idx = self._batch_row_by_relative_path[rel_path]
+            status_item = self.table_batch_rasters.item(r_idx, 5)
+            if status_item:
+                status_item.setText(msg[:25])
+
+            cache_item = self.table_batch_rasters.item(r_idx, 6)
+            inund_item = self.table_batch_rasters.item(r_idx, 7)
+            if "Stage 1" in msg or "Tide Cache" in msg:
+                if cache_item:
+                    cache_item.setText("COMPUTING")
+            elif "Stage 2" in msg:
+                if cache_item:
+                    cache_item.setText("READY")
+                if inund_item:
+                    inund_item.setText("COMPUTING")
+            elif "完成" in msg:
+                if cache_item and cache_item.text() == "-":
+                    cache_item.setText("READY")
+                if inund_item:
+                    inund_item.setText("DONE")
 
     def _on_batch_finished(self, res):
-        self.btn_start_batch.setEnabled(True)
-        self.btn_scan_batch.setEnabled(True)
-        self.btn_cancel_batch.setEnabled(False)
+        self._set_batch_controls_running(False)
         self.bar_batch_overall.setValue(100)
         self.bar_batch_tile.setValue(100)
         self.lbl_batch_status.setText("批量解算任务全部完成！")
@@ -2259,16 +2421,12 @@ class MainWindow(QMainWindow):
         )
 
     def _on_batch_error(self, err_msg):
-        self.btn_start_batch.setEnabled(True)
-        self.btn_scan_batch.setEnabled(True)
-        self.btn_cancel_batch.setEnabled(False)
+        self._set_batch_controls_running(False)
         self.lbl_batch_status.setText("批量任务发生异常中断！")
         QMessageBox.critical(self, "批量任务错误", err_msg)
 
     def _on_batch_cancelled(self):
-        self.btn_start_batch.setEnabled(True)
-        self.btn_scan_batch.setEnabled(True)
-        self.btn_cancel_batch.setEnabled(False)
+        self._set_batch_controls_running(False)
         self.lbl_batch_status.setText("批量任务已被用户取消。")
         QMessageBox.warning(self, "任务取消", "批量解算已被用户终止。已完成的瓦片与 Tide Cache 已安全保留。")
 
@@ -2279,7 +2437,7 @@ class MainWindow(QMainWindow):
             self.batch_worker.cancel()
 
     def _on_open_batch_output_folder(self):
-        out_dir = self.txt_batch_out_dir.text().strip()
+        out_dir = self._get_effective_batch_output_dir()
         if out_dir and os.path.exists(out_dir):
             import subprocess
             subprocess.Popen(f'explorer "{os.path.abspath(out_dir)}"')

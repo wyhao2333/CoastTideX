@@ -24,7 +24,7 @@ from .raster_engine import (
 )
 from .tide_cache import (
     write_tide_cache, read_tide_cache, is_cache_complete,
-    calculate_inundation_from_tide_cache, estimate_tide_cache_size,
+    calculate_inundation_from_tide_cache, estimate_tide_cache_size, build_expected_cache_spec, validate_tide_cache_compatibility,
     inspect_tide_cache_metadata, validate_tide_cache_compatibility,
     TideCacheCompatibilityError
 )
@@ -35,6 +35,11 @@ JOB_MODE_TIDE_AND_INUNDATION = "tide-inundation"            # 先生成 Tide Cac
 JOB_MODE_INUNDATION_FROM_CACHE = "inundation-from-cache"    # 从已有 Tide Cache 直接解算淹没频率 (零 FES 调用)
 
 # 现有输出处理策略 (ExistingOutputPolicy)
+class ScanSnapshotStaleError(ValueError):
+    """扫描快照已失效 (文件已被移动、删除或修改) 异常"""
+    pass
+
+
 class ExistingOutputPolicy(str, Enum):
     RESUME = "resume"                      # 断点恢复: 完整产物安全跳过，未完工瓦片接续
     ERROR_IF_EXISTS = "error_if_exists"    # 冲突报错: 目标产物已存在时显式报错拒绝覆写
@@ -130,8 +135,13 @@ class BatchManifest:
             except Exception:
                 self.records = OrderedDict()
 
+    def get_entry(self, input_path: str) -> Optional[Dict[str, Any]]:
+        if not self.records and self.json_path.exists():
+            self.load()
+        return self.records.get(input_path)
+
     def get_status(self, input_path: str) -> Optional[str]:
-        item = self.records.get(input_path)
+        item = self.get_entry(input_path)
         return item.get("status") if item else None
 
     def upsert(self, input_path: str, **kwargs) -> None:
@@ -163,6 +173,36 @@ class BatchManifest:
                 row = {k: it.get(k, "") for k in self.FIELDS}
                 writer.writerow(row)
         os.replace(tmp_csv, self.csv_path)
+
+
+def _verify_raster_artifacts(
+    dem_info,
+    frequency_path: str,
+    qc_path: str,
+    expected_cache_sig: Optional[str] = None
+) -> bool:
+    """验证已有淹没频率和 QC 栅格产物的尺寸、坐标系与签名一致性"""
+    if not os.path.exists(frequency_path) or not os.path.exists(qc_path):
+        return False
+    try:
+        with rasterio.open(frequency_path) as src_f:
+            if src_f.width != dem_info.width or src_f.height != dem_info.height:
+                return False
+            if str(src_f.crs) != str(dem_info.crs):
+                return False
+            if expected_cache_sig:
+                tags = src_f.tags()
+                sig = tags.get("CACHE_SIGNATURE", "")
+                if sig and sig != expected_cache_sig:
+                    return False
+        with rasterio.open(qc_path) as src_qc:
+            if src_qc.width != dem_info.width or src_qc.height != dem_info.height:
+                return False
+            if str(src_qc.crs) != str(dem_info.crs):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 class BatchRasterEngine:
@@ -236,11 +276,18 @@ class BatchRasterEngine:
             rel_path = str(f.relative_to(in_p))
             size_mb = f.stat().st_size / (1024.0 * 1024.0)
 
+            st = f.stat()
+            size_bytes = st.st_size
+            mtime_ns = st.st_mtime_ns
+            size_mb = size_bytes / (1024.0 * 1024.0)
+
             # 轻量读取头文件元数据 (不读像元)
             meta: Dict[str, Any] = {
                 "input_path": str(f.resolve()),
                 "relative_path": rel_path,
                 "filename": f.name,
+                "file_size_bytes": size_bytes,
+                "mtime_ns": mtime_ns,
                 "file_size_mb": round(size_mb, 2),
                 "width": 0,
                 "height": 0,
@@ -262,8 +309,18 @@ class BatchRasterEngine:
                     meta["resolution"] = src.res
                     meta["nodata"] = float(src.nodata) if src.nodata is not None else None
                     meta["dtype"] = str(src.dtypes[0])
-                    meta["valid"] = True
+
+                    # 严格校验：必须具有有效 CRS、尺寸大于 0 且通道数大于 0
+                    if src.crs is None or not str(src.crs).strip() or str(src.crs).lower() == "unknown":
+                        meta["valid"] = False
+                        meta["error"] = "缺少坐标参考系 (CRS is None or Unknown)"
+                    elif src.width <= 0 or src.height <= 0 or src.count < 1:
+                        meta["valid"] = False
+                        meta["error"] = f"无效的影像网格尺寸 ({src.width}x{src.height}, count={src.count})"
+                    else:
+                        meta["valid"] = True
             except Exception as ex:
+                meta["valid"] = False
                 meta["error"] = str(ex)
 
             results.append(meta)
@@ -292,7 +349,9 @@ class BatchRasterEngine:
         resume: Optional[bool] = None,
         overwrite: Optional[bool] = None,
         progress_callback: Optional[Callable[[int, int, str, str, Dict[str, int]], None]] = None,
-        cancel_event = None
+        cancel_event = None,
+        discovered_files: Optional[List[Dict[str, Any]]] = None,
+        inclusive: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         顺序执行批量潮间带栅格解算任务 (max_parallel_tiles = 1)。
@@ -326,7 +385,30 @@ class BatchRasterEngine:
         if policy in (ExistingOutputPolicy.RESUME, ExistingOutputPolicy.ERROR_IF_EXISTS):
             manifest.load()
 
-        discovered = self.discover_rasters(input_folder, recursive=recursive, output_folder=str(out_p))
+        if discovered_files is None:
+            # 命令行或自动化脚本调用：自动执行一次完整扫描
+            discovered = self.discover_rasters(input_folder, recursive=recursive, output_folder=str(out_p))
+        else:
+            # GUI 或上层显式传入扫描快照：严密校验快照未发生失效并直接复用
+            discovered = []
+            in_resolved = in_p.resolve()
+            for item in discovered_files:
+                item_copy = dict(item)
+                p = Path(item_copy["input_path"])
+                if not p.exists():
+                    raise ScanSnapshotStaleError(f"扫描快照中的影像文件已不存在: {p}，请重新扫描！")
+                try:
+                    p.resolve().relative_to(in_resolved)
+                except ValueError:
+                    raise ScanSnapshotStaleError(f"扫描快照中的文件不属于输入目录: {p}，请重新扫描！")
+                st = p.stat()
+                if "file_size_bytes" in item_copy and item_copy["file_size_bytes"] is not None:
+                    if st.st_size != item_copy["file_size_bytes"]:
+                        raise ScanSnapshotStaleError(f"扫描快照中文件大小已发生变化: {p}，请重新扫描！")
+                if "mtime_ns" in item_copy and item_copy["mtime_ns"] is not None:
+                    if st.st_mtime_ns != item_copy["mtime_ns"]:
+                        raise ScanSnapshotStaleError(f"扫描快照中文件修改时间已发生变化: {p}，请重新扫描！")
+                discovered.append(item_copy)
         total_files = len(discovered)
 
         summary_counts = {
@@ -392,6 +474,46 @@ class BatchRasterEngine:
 
             prev_status = manifest.get_status(input_path)
 
+            # 构建本任务对应的预期缓存规格 (Expected Spec)
+            dem_info = self.raster_engine.inspect_raster(input_path, compute_valid_count=False)
+            st_val = start_time if start_time is not None else f"{year:04d}-01-01 00:00:00"
+            et_val = end_time if end_time is not None else f"{year+1:04d}-01-01 00:00:00"
+
+            eff_init_sp = initial_control_spacing_m if initial_control_spacing_m is not None else getattr(self.raster_engine, 'initial_control_spacing_m', 4000.0)
+            eff_min_sp = min_control_spacing_m if min_control_spacing_m is not None else getattr(self.raster_engine, 'min_control_spacing_m', 500.0)
+            eff_tol = inundation_error_tolerance_pct if inundation_error_tolerance_pct is not None else getattr(self.raster_engine, 'inundation_error_tolerance_pct', 1.0)
+
+            if inclusive is not None:
+                eff_inclusive = inclusive
+            elif start_time is None or end_time is None:
+                eff_inclusive = "left"
+            else:
+                st_s = str(start_time)
+                et_s = str(end_time)
+                if st_s.endswith("-01-01 00:00:00") and et_s.endswith("-01-01 00:00:00") and int(et_s[:4]) > int(st_s[:4]):
+                    eff_inclusive = "left"
+                else:
+                    eff_inclusive = "both"
+
+            expected_spec = build_expected_cache_spec(
+                info=dem_info,
+                start_time=st_val,
+                end_time=et_val,
+                freq=freq,
+                dem_datum=dem_datum,
+                constituents=constituents,
+                target_mode=target_mode,
+                initial_control_spacing_m=eff_init_sp,
+                min_control_spacing_m=eff_min_sp,
+                inundation_error_tolerance_pct=eff_tol,
+                topology_max_resolution_m=self.raster_engine.topology_max_resolution_m,
+                topology_valid_fraction_threshold=self.raster_engine.topology_valid_fraction_threshold,
+                fes_model="FES2022b",
+                fes_source_type="native_lgp2",
+                source_tz="UTC",
+                inclusive=eff_inclusive
+            )
+
             # ---------------- ERROR_IF_EXISTS 策略防线 ----------------
             if policy == ExistingOutputPolicy.ERROR_IF_EXISTS:
                 conflict_files = []
@@ -411,23 +533,38 @@ class BatchRasterEngine:
                     summary_counts["failed"] += 1
                     continue
 
-            # ---------------- RESUME 策略断点跳过检查 ----------------
+            # ---------------- RESUME 策略深层兼容性与断点跳过检查 ----------------
+            cache_ok = False
+            if os.path.exists(tide_cache_path):
+                if is_cache_complete(tide_cache_path):
+                    c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, expected_spec)
+                    if c_compat:
+                        cache_ok = True
+                    elif policy == ExistingOutputPolicy.RESUME:
+                        # 严谨科学防御: 缓存属于不同参数集时严禁错误复用或静默跳过！
+                        err_msg = f"Existing cache belongs to another parameter set: {'; '.join(c_reasons)}. Use OVERWRITE to rebuild."
+                        manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
+                        manifest.save()
+                        summary_counts["failed"] += 1
+                        continue
+
             if policy == ExistingOutputPolicy.RESUME:
                 if job_mode == JOB_MODE_TIDE_ONLY:
-                    if is_cache_complete(tide_cache_path):
-                        # 维持 DONE 状态，标记本轮 run_action 为 SKIPPED_EXISTING
+                    if cache_ok:
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
+
                 elif job_mode == JOB_MODE_TIDE_AND_INUNDATION:
-                    if os.path.exists(frequency_path) and (prev_status == STATUS_DONE or (os.path.exists(qc_path) and is_cache_complete(tide_cache_path))):
+                    if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
+
                 elif job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
-                    if os.path.exists(frequency_path) and (prev_status == STATUS_DONE or os.path.exists(qc_path)):
+                    if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
@@ -464,20 +601,20 @@ class BatchRasterEngine:
                 need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION])
                 cache_already_ready = (
                     policy == ExistingOutputPolicy.RESUME and
-                    is_cache_complete(tide_cache_path)
+                    cache_ok
                 )
 
                 if need_tide and not cache_already_ready:
                     manifest.upsert(input_path, status=STATUS_TIDE_RUNNING, run_action="TIDE_RUNNING")
                     manifest.save()
                     if progress_callback:
-                        progress_callback(overall_pct, 10, filename, "Stage 1: 控制网格 FES 解算与 Tide Cache 生成...", summary_counts)
+                        progress_callback(overall_pct, 10, str(rel_file_path), "Stage 1: 控制网格 FES 解算与 Tide Cache 生成...", summary_counts)
 
                     t_tide_start = time.time()
 
                     def _tile_prog(pct_val, msg_val):
                         if progress_callback:
-                            progress_callback(overall_pct, int(pct_val * 0.5), filename, f"Stage 1: {msg_val}", summary_counts)
+                            progress_callback(overall_pct, int(pct_val * 0.5), str(rel_file_path), f"Stage 1: {msg_val}", summary_counts)
 
                     # 执行自适应四叉树控制网格解算并导出 Tide Cache
                     grid_data = self.raster_engine.build_tide_control_grid(
@@ -490,13 +627,14 @@ class BatchRasterEngine:
                         dem_datum=dem_datum,
                         constituents=constituents,
                         target_mode=target_mode,
-                        initial_control_spacing_m=initial_control_spacing_m,
-                        min_control_spacing_m=min_control_spacing_m,
-                        inundation_error_tolerance_pct=inundation_error_tolerance_pct,
+                        initial_control_spacing_m=eff_init_sp,
+                        min_control_spacing_m=eff_min_sp,
+                        inundation_error_tolerance_pct=eff_tol,
                         strict=strict,
                         progress_callback=_tile_prog,
                         cancel_event=cancel_event,
-                        allow_overwrite=(policy == ExistingOutputPolicy.OVERWRITE)
+                        inclusive=eff_inclusive,
+                        allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME))
                     )
 
                     elapsed_tide = time.time() - t_tide_start
@@ -526,7 +664,7 @@ class BatchRasterEngine:
                 manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
                 manifest.save()
                 if progress_callback:
-                    progress_callback(overall_pct, 60, filename, "Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
+                    progress_callback(overall_pct, 60, str(rel_file_path), "Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
 
                 t_freq_start = time.time()
 
@@ -540,7 +678,7 @@ class BatchRasterEngine:
                     output_path=frequency_path,
                     qc_output_path=qc_path,
                     block_size=block_size,
-                    allow_overwrite=(policy == ExistingOutputPolicy.OVERWRITE),
+                    allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
                     progress_callback=_freq_prog,
                     cancel_event=cancel_event
                 )
@@ -580,5 +718,6 @@ class BatchRasterEngine:
             "output_folder": str(out_p),
             "manifest_json": str(manifest.json_path),
             "manifest_csv": str(manifest.csv_path),
-            "counts": summary_counts
+            "counts": summary_counts,
+            **summary_counts
         }

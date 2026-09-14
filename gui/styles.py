@@ -63,6 +63,61 @@ QPushButton#btn_success:hover {
     background-color: #10b981;
 }
 
+/* 批量任务专用按钮样式 (Batch Queue & Execution Buttons) */
+QPushButton#btn_batch_scan {
+    background-color: #2b5b84;
+    color: #ffffff;
+    font-weight: bold;
+    padding: 7px 14px;
+    border-radius: 6px;
+}
+QPushButton#btn_batch_scan:hover {
+    background-color: #3b7bb5;
+}
+QPushButton#btn_batch_scan:pressed {
+    background-color: #1e3f5d;
+}
+QPushButton#btn_batch_scan:disabled {
+    background-color: #475569;
+    color: #94a3b8;
+}
+
+QPushButton#btn_batch_start {
+    background-color: #2e7d32;
+    color: #ffffff;
+    font-weight: bold;
+    padding: 8px 16px;
+    border-radius: 6px;
+}
+QPushButton#btn_batch_start:hover {
+    background-color: #388e3c;
+}
+QPushButton#btn_batch_start:pressed {
+    background-color: #1b5e20;
+}
+QPushButton#btn_batch_start:disabled {
+    background-color: #475569;
+    color: #94a3b8;
+}
+
+QPushButton#btn_batch_cancel {
+    background-color: #c62828;
+    color: #ffffff;
+    font-weight: bold;
+    padding: 8px 16px;
+    border-radius: 6px;
+}
+QPushButton#btn_batch_cancel:hover {
+    background-color: #d32f2f;
+}
+QPushButton#btn_batch_cancel:pressed {
+    background-color: #b71c1c;
+}
+QPushButton#btn_batch_cancel:disabled {
+    background-color: #475569;
+    color: #94a3b8;
+}
+
 /* 输入框与下拉框 */
 QLineEdit, QDateTimeEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background-color: #0f172a;

@@ -47,11 +47,17 @@ class TideCacheCompatibilityError(ValueError):
     pass
 
 
-def estimate_tide_cache_size(node_count: int, time_samples: int) -> Dict[str, Any]:
+def estimate_tide_cache_size(
+    node_count: int,
+    time_samples: int,
+    resident_array_count: int = 2
+) -> Dict[str, Any]:
     """
-    估算 Tide Cache 控制节点潮位数组原始内存与未压缩数据量 (Raw Array Estimate)。
+    估算 Tide Cache 控制节点潮位数组峰值驻留内存 (Raw MSL + Sorted Water Levels).
+    按 float32 (4 字节) × resident_array_count (默认 2，即 8 字节/样本/节点) 计算。
     """
-    raw_bytes = int(node_count) * int(time_samples) * 4  # float32 = 4 bytes
+    bytes_per_sample_per_node = 4 * int(resident_array_count)
+    raw_bytes = int(node_count) * int(time_samples) * bytes_per_sample_per_node
     raw_mb = raw_bytes / (1024.0 * 1024.0)
 
     if raw_mb < 1.0:
@@ -64,10 +70,12 @@ def estimate_tide_cache_size(node_count: int, time_samples: int) -> Dict[str, An
     return {
         "node_count": int(node_count),
         "time_samples": int(time_samples),
+        "resident_array_count": int(resident_array_count),
+        "bytes_per_sample_per_node": bytes_per_sample_per_node,
         "raw_bytes": raw_bytes,
         "raw_mb": raw_mb,
         "formatted_size": fmt,
-        "note": "此估算为 float32 密集矩阵未压缩原始大小，实际 NetCDF 采用 zlib 压缩后通常为该数值的 20%~50%"
+        "note": f"包含控制网格常驻 {resident_array_count} 个时序数组 (raw MSL + sorted water levels = {bytes_per_sample_per_node} 字节/样本/节点) 峰值内存"
     }
 
 
@@ -91,7 +99,7 @@ def generate_tide_cache_signature(
     end_time: str = "",
     freq: str = "",
     source_tz: str = "UTC",
-    inclusive: str = "both",
+    inclusive: str = "left",
     time_samples: int = 0,
     dem_datum: str = "egm2008",
     constituents: str = "all",
@@ -101,7 +109,8 @@ def generate_tide_cache_signature(
     inundation_error_tolerance_pct: float = 1.0,
     fes_model: str = "FES2022b",
     fes_source_type: str = "native_lgp2",
-    topology_max_resolution_m: float = 200.0,
+    topology_max_resolution_m: float = 100.0,
+    topology_valid_fraction_threshold: float = 0.5,
     source_width: Optional[int] = None,
     source_height: Optional[int] = None,
     source_crs: Optional[str] = None,
@@ -109,12 +118,17 @@ def generate_tide_cache_signature(
     source_bounds = None,
     source_resolution = None,
     source_nodata = None,
+    source_file_size_bytes: Optional[int] = None,
+    source_mtime_ns: Optional[int] = None,
     **kwargs
 ) -> Tuple[str, str]:
     """
     生成确定性的 Tide Cache 兼容性规范签名 (SHA256)。
-    支持通过 RasterInfo 对象或直接通过字典关键字参数生成。
+    包含源数据几何、文件身份 (大小/mtime)、时间区间、FES模型、垂直基准及自适应网格/拓扑参数。
     """
+    fsize_val = source_file_size_bytes
+    mtime_val = source_mtime_ns
+
     if info is not None:
         w_val = int(info.width)
         h_val = int(info.height)
@@ -122,6 +136,17 @@ def generate_tide_cache_signature(
         t_vals = [round(float(v), 8) for v in list(info.transform)[:6]]
         b_vals = [round(float(v), 5) for v in info.bounds]
         nodata_val = float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else None
+        if fsize_val is None:
+            fsize_val = getattr(info, "file_size_bytes", None)
+        if mtime_val is None:
+            mtime_val = getattr(info, "mtime_ns", None)
+        if fsize_val is None and getattr(info, "path", None) and os.path.exists(info.path):
+            try:
+                st = os.stat(info.path)
+                fsize_val = st.st_size
+                mtime_val = st.st_mtime_ns
+            except Exception:
+                pass
     else:
         w_val = int(source_width or 0)
         h_val = int(source_height or 0)
@@ -139,7 +164,9 @@ def generate_tide_cache_signature(
             "crs": c_val,
             "transform": t_vals,
             "bounds": b_vals,
-            "nodata": nodata_val
+            "nodata": nodata_val,
+            "file_size_bytes": int(fsize_val) if fsize_val is not None else None,
+            "mtime_ns": int(mtime_val) if mtime_val is not None else None
         },
         "time": {
             "start_time": str(start_time),
@@ -162,7 +189,8 @@ def generate_tide_cache_signature(
             "initial_control_spacing_m": round(float(initial_control_spacing_m), 2),
             "min_control_spacing_m": round(float(min_control_spacing_m), 2),
             "inundation_error_tolerance_pct": round(float(inundation_error_tolerance_pct), 3),
-            "topology_max_resolution_m": round(float(topology_max_resolution_m), 2)
+            "topology_max_resolution_m": round(float(topology_max_resolution_m), 2),
+            "topology_valid_fraction_threshold": round(float(topology_valid_fraction_threshold), 4)
         },
         "cache": {
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -173,6 +201,97 @@ def generate_tide_cache_signature(
     json_str = json.dumps(canonical_dict, sort_keys=True, separators=(',', ':'))
     sig = hashlib.sha256(json_str.encode("utf-8")).hexdigest()
     return sig, json_str
+
+
+def build_expected_cache_spec(
+    info: RasterInfo,
+    start_time: str,
+    end_time: str,
+    freq: str,
+    dem_datum: str = "egm2008",
+    constituents: str = "all",
+    target_mode: str = "intertidal",
+    initial_control_spacing_m: float = 4000.0,
+    min_control_spacing_m: float = 500.0,
+    inundation_error_tolerance_pct: float = 1.0,
+    topology_max_resolution_m: float = 100.0,
+    topology_valid_fraction_threshold: float = 0.5,
+    fes_model: str = "FES2022b",
+    fes_source_type: str = "native_lgp2",
+    source_tz: str = "UTC",
+    inclusive: str = "left",
+    time_samples: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    构建当前批量任务所预期的 Tide Cache 完整规格字典 (Expected Cache Spec)，
+    用于 Resume 断点恢复时进行严格一致性校验。
+    """
+    if time_samples is None or time_samples <= 0:
+        dr = pd.date_range(start_time, end_time, freq=freq, inclusive=inclusive, tz=source_tz)
+        calc_samples = len(dr)
+    else:
+        calc_samples = int(time_samples)
+
+    fsize = getattr(info, "file_size_bytes", None)
+    mtime = getattr(info, "mtime_ns", None)
+    if (fsize is None or mtime is None) and getattr(info, "path", None) and os.path.exists(info.path):
+        try:
+            st = os.stat(info.path)
+            fsize = st.st_size
+            mtime = st.st_mtime_ns
+        except Exception:
+            pass
+
+    sig_hex, _ = generate_tide_cache_signature(
+        info=info,
+        start_time=start_time,
+        end_time=end_time,
+        freq=freq,
+        source_tz=source_tz,
+        inclusive=inclusive,
+        time_samples=calc_samples,
+        dem_datum=dem_datum,
+        constituents=constituents,
+        target_mode=target_mode,
+        initial_control_spacing_m=initial_control_spacing_m,
+        min_control_spacing_m=min_control_spacing_m,
+        inundation_error_tolerance_pct=inundation_error_tolerance_pct,
+        fes_model=fes_model,
+        fes_source_type=fes_source_type,
+        topology_max_resolution_m=topology_max_resolution_m,
+        topology_valid_fraction_threshold=topology_valid_fraction_threshold,
+        source_file_size_bytes=fsize,
+        source_mtime_ns=mtime
+    )
+
+    return {
+        "width": int(info.width),
+        "height": int(info.height),
+        "crs": str(info.crs),
+        "transform": list(info.transform)[:6],
+        "bounds": list(info.bounds)[:4],
+        "nodata": float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else None,
+        "file_size_bytes": fsize,
+        "mtime_ns": mtime,
+        "start_time": start_time,
+        "end_time": end_time,
+        "freq": freq,
+        "inclusive": inclusive,
+        "time_samples": calc_samples,
+        "source_tz": source_tz,
+        "fes_model": fes_model,
+        "fes_source_type": fes_source_type,
+        "constituents": str(constituents).lower(),
+        "dem_datum": str(dem_datum).lower(),
+        "target_mode": str(target_mode).lower(),
+        "initial_control_spacing_m": float(initial_control_spacing_m),
+        "min_control_spacing_m": float(min_control_spacing_m),
+        "inundation_error_tolerance_pct": float(inundation_error_tolerance_pct),
+        "topology_max_resolution_m": float(topology_max_resolution_m),
+        "topology_valid_fraction_threshold": float(topology_valid_fraction_threshold),
+        "signature": sig_hex,
+        "schema_version": CACHE_SCHEMA_VERSION
+    }
 
 
 def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
@@ -288,6 +407,38 @@ def validate_tide_cache_compatibility(
         if exp_freq and c_freq and exp_freq != c_freq:
             reasons.append(f"采样步长不匹配: Cache 为 '{c_freq}'，当前请求为 '{exp_freq}'")
 
+    if "start_time" in expected_spec and expected_spec["start_time"]:
+        exp_st = str(expected_spec["start_time"]).strip()
+        c_st = str(attrs.get("TIME_START", "")).strip()
+        if exp_st and c_st and exp_st != c_st:
+            reasons.append(f"起始时间不匹配: Cache 为 '{c_st}'，当前请求为 '{exp_st}'")
+
+    if "end_time" in expected_spec and expected_spec["end_time"]:
+        exp_et = str(expected_spec["end_time"]).strip()
+        c_et = str(attrs.get("TIME_END", "")).strip()
+        if exp_et and c_et and exp_et != c_et:
+            reasons.append(f"终止时间不匹配: Cache 为 '{c_et}'，当前请求为 '{exp_et}'")
+
+    if "inclusive" in expected_spec and expected_spec["inclusive"]:
+        exp_inc = str(expected_spec["inclusive"]).strip().lower()
+        c_inc = str(attrs.get("TIME_INCLUSIVE", "left")).strip().lower()
+        if exp_inc and c_inc and exp_inc != c_inc:
+            reasons.append(f"时间闭合模式不匹配: Cache 为 '{c_inc}'，当前请求为 '{exp_inc}'")
+
+    # 6. 源文件身份检查 (Size & MTime)
+    if "file_size_bytes" in expected_spec and expected_spec["file_size_bytes"] is not None:
+        exp_size = int(expected_spec["file_size_bytes"])
+        c_size = int(attrs.get("SOURCE_FILE_SIZE_BYTES", 0))
+        if c_size > 0 and c_size != exp_size:
+            reasons.append(f"源 DEM 文件大小已改变: Cache 记录 {c_size} 字节，当前磁盘文件为 {exp_size} 字节")
+
+    if "mtime_ns" in expected_spec and expected_spec["mtime_ns"] is not None:
+        exp_mtime = int(expected_spec["mtime_ns"])
+        c_mtime = int(attrs.get("SOURCE_MTIME_NS", 0))
+        if c_mtime > 0 and c_mtime != exp_mtime:
+            reasons.append(f"源 DEM 文件修改时间已更新: Cache 记录 {c_mtime}，当前磁盘文件为 {exp_mtime}")
+
+    # 7. 算法与拓扑参数校验 (Topology & Algorithm)
     if "target_mode" in expected_spec:
         exp_mode = str(expected_spec["target_mode"]).strip().lower()
         c_mode = str(attrs.get("TARGET_MODE", "")).strip().lower()
@@ -300,7 +451,43 @@ def validate_tide_cache_compatibility(
         if exp_const and c_const and exp_const != c_const:
             reasons.append(f"分潮集合不匹配: Cache 为 '{c_const}'，当前请求为 '{exp_const}'")
 
-    # 6. 签名自校验与篡改防御 (Tamper-evidence Verification)
+    if "initial_control_spacing_m" in expected_spec:
+        exp_init_sp = float(expected_spec["initial_control_spacing_m"])
+        c_init_sp = float(attrs.get("INITIAL_CONTROL_SPACING_M", 0.0))
+        if c_init_sp > 0 and abs(c_init_sp - exp_init_sp) > 1.0:
+            reasons.append(f"初始控制网格间距不匹配: Cache 为 {c_init_sp}m，当前请求为 {exp_init_sp}m")
+
+    if "min_control_spacing_m" in expected_spec:
+        exp_min_sp = float(expected_spec["min_control_spacing_m"])
+        c_min_sp = float(attrs.get("MIN_CONTROL_SPACING_M", 0.0))
+        if c_min_sp > 0 and abs(c_min_sp - exp_min_sp) > 1.0:
+            reasons.append(f"最小控制网格间距不匹配: Cache 为 {c_min_sp}m，当前请求为 {exp_min_sp}m")
+
+    if "inundation_error_tolerance_pct" in expected_spec:
+        exp_tol = float(expected_spec["inundation_error_tolerance_pct"])
+        c_tol = float(attrs.get("ERROR_TOLERANCE_PCT", 0.0))
+        if c_tol > 0 and abs(c_tol - exp_tol) > 1e-3:
+            reasons.append(f"淹没频率容错阈值不匹配: Cache 为 {c_tol}%，当前请求为 {exp_tol}%")
+
+    if "topology_max_resolution_m" in expected_spec:
+        exp_top = float(expected_spec["topology_max_resolution_m"])
+        if "TOPOLOGY_RESOLUTION_M" not in attrs:
+            reasons.append("Tide Cache 缺少 TOPOLOGY_RESOLUTION_M 属性，属于旧版缓存，必须重新生成")
+        else:
+            c_top = float(attrs["TOPOLOGY_RESOLUTION_M"])
+            if abs(c_top - exp_top) > 1e-3:
+                reasons.append(f"拓扑物理分辨率不匹配: Cache 为 {c_top}m，当前请求为 {exp_top}m")
+
+    if "topology_valid_fraction_threshold" in expected_spec:
+        exp_frac = float(expected_spec["topology_valid_fraction_threshold"])
+        if "TOPOLOGY_VALID_FRACTION_THRESHOLD" not in attrs:
+            reasons.append("Tide Cache 缺少 TOPOLOGY_VALID_FRACTION_THRESHOLD 属性，属于旧版缓存，必须重新生成")
+        else:
+            c_frac = float(attrs["TOPOLOGY_VALID_FRACTION_THRESHOLD"])
+            if abs(c_frac - exp_frac) > 1e-4:
+                reasons.append(f"拓扑连通有效比例阈值不匹配: Cache 为 {c_frac}，当前请求为 {exp_frac}")
+
+    # 8. 签名自校验与篡改防御 (Tamper-evidence Verification)
     stored_sig = str(attrs.get("CACHE_SIGNATURE", "")).strip()
     if stored_sig:
         try:
@@ -313,21 +500,24 @@ def validate_tide_cache_compatibility(
                 source_bounds=json.loads(attrs.get("SOURCE_BOUNDS", "[]")) if isinstance(attrs.get("SOURCE_BOUNDS"), str) else attrs.get("SOURCE_BOUNDS", []),
                 source_resolution=json.loads(attrs.get("SOURCE_RESOLUTION", "[]")) if isinstance(attrs.get("SOURCE_RESOLUTION"), str) else attrs.get("SOURCE_RESOLUTION", []),
                 source_nodata=float(attrs.get("SOURCE_NODATA")) if attrs.get("SOURCE_NODATA") is not None and str(attrs.get("SOURCE_NODATA")).lower() != "nan" else np.nan,
+                source_file_size_bytes=int(attrs.get("SOURCE_FILE_SIZE_BYTES", 0)) if "SOURCE_FILE_SIZE_BYTES" in attrs else None,
+                source_mtime_ns=int(attrs.get("SOURCE_MTIME_NS", 0)) if "SOURCE_MTIME_NS" in attrs else None,
                 start_time=attrs.get("TIME_START", ""),
                 end_time=attrs.get("TIME_END", ""),
                 freq=attrs.get("TIME_STEP", ""),
                 source_tz=attrs.get("TIMEZONE", "UTC"),
-                inclusive=attrs.get("TIME_INCLUSIVE", "both"),
+                inclusive=attrs.get("TIME_INCLUSIVE", "left"),
                 time_samples=int(attrs.get("TIME_SAMPLES", info["time_samples"])),
-                fes_model=attrs.get("TIDE_MODEL", "FES2022b"),
-                fes_source_type=attrs.get("FES_SOURCE_TYPE", "native_mesh"),
+                fes_model=attrs.get("TIDE_MODEL", attrs.get("FES_MODEL", "FES2022b")),
+                fes_source_type=attrs.get("FES_SOURCE_TYPE", "native_lgp2"),
                 constituents=attrs.get("CONSTITUENTS", "all"),
                 dem_datum=attrs.get("DEM_DATUM", "egm2008"),
                 target_mode=attrs.get("TARGET_MODE", "intertidal"),
                 initial_control_spacing_m=float(attrs.get("INITIAL_CONTROL_SPACING_M", 4000.0)),
                 min_control_spacing_m=float(attrs.get("MIN_CONTROL_SPACING_M", 500.0)),
                 inundation_error_tolerance_pct=float(attrs.get("ERROR_TOLERANCE_PCT", 1.0)),
-                topology_max_resolution_m=float(attrs.get("TOPOLOGY_RESOLUTION_M", 200.0))
+                topology_max_resolution_m=float(attrs.get("TOPOLOGY_RESOLUTION_M", 100.0)),
+                topology_valid_fraction_threshold=float(attrs.get("TOPOLOGY_VALID_FRACTION_THRESHOLD", 0.5))
             )
             if stored_sig != expected_c_sig:
                 reasons.append(f"Tide Cache 元数据已被篡改或损坏 (签名不一致: {stored_sig[:12]}... != {expected_c_sig[:12]}...)")
@@ -381,6 +571,19 @@ def write_tide_cache(
     num_times = len(time_index)
     num_cells = len(leaf_cells)
 
+    top_res = float(metadata.get("topology_max_resolution_m", 100.0))
+    top_frac = float(metadata.get("topology_valid_fraction_threshold", 0.5))
+
+    fsize_val = getattr(info, "file_size_bytes", None)
+    mtime_val = getattr(info, "mtime_ns", None)
+    if (fsize_val is None or mtime_val is None) and getattr(info, "path", None) and os.path.exists(info.path):
+        try:
+            st = os.stat(info.path)
+            fsize_val = st.st_size
+            mtime_val = st.st_mtime_ns
+        except Exception:
+            pass
+
     # 计算兼容性签名 (Signature)
     sig_hex, sig_payload = generate_tide_cache_signature(
         info=info,
@@ -398,10 +601,14 @@ def write_tide_cache(
         inundation_error_tolerance_pct=float(metadata.get("inundation_error_tolerance_pct", 1.0)),
         fes_model="FES2022b",
         fes_source_type="native_lgp2",
-        topology_max_resolution_m=float(metadata.get("topology_max_resolution_m", 200.0))
+        topology_max_resolution_m=top_res,
+        topology_valid_fraction_threshold=top_frac,
+        source_file_size_bytes=fsize_val,
+        source_mtime_ns=mtime_val
     )
 
     time_epochs = (time_index.astype("int64") // 10**9).to_numpy(dtype=np.float64)
+    est_mem = estimate_tide_cache_size(num_nodes, num_times, resident_array_count=2)
 
     try:
         with netCDF4.Dataset(tmp_cache_path, mode="w", format="NETCDF4") as ds:
@@ -424,6 +631,8 @@ def write_tide_cache(
             ds.setncattr("SOURCE_TRANSFORM", json.dumps([round(float(v), 8) for v in list(info.transform)[:6]]))
             ds.setncattr("SOURCE_BOUNDS", json.dumps([round(float(v), 5) for v in info.bounds]))
             ds.setncattr("SOURCE_NODATA", float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else np.nan)
+            ds.setncattr("SOURCE_FILE_SIZE_BYTES", int(fsize_val) if fsize_val is not None else 0)
+            ds.setncattr("SOURCE_MTIME_NS", int(mtime_val) if mtime_val is not None else 0)
             ds.setncattr("TIME_START", str(metadata.get("start_time", time_index[0].isoformat())))
             ds.setncattr("TIME_END", str(metadata.get("end_time", time_index[-1].isoformat())))
             ds.setncattr("TIME_STEP", str(metadata.get("freq", "30min")))
@@ -438,6 +647,11 @@ def write_tide_cache(
             ds.setncattr("MIN_CONTROL_SPACING_M", float(metadata.get("min_control_spacing_m", 500.0)))
             ds.setncattr("ERROR_TOLERANCE_PCT", float(metadata.get("inundation_error_tolerance_pct", 1.0)))
             ds.setncattr("TARGET_MODE", str(metadata.get("target_mode", "intertidal")))
+            ds.setncattr("TOPOLOGY_RESOLUTION_M", float(top_res))
+            ds.setncattr("TOPOLOGY_VALID_FRACTION_THRESHOLD", float(top_frac))
+            ds.setncattr("TOPOLOGY_SOURCE", "target_mask_derived")
+            ds.setncattr("RESIDENT_TIMESERIES_ARRAYS_PER_NODE", 2)
+            ds.setncattr("ESTIMATED_CONTROL_ARRAY_MEMORY_MB", float(est_mem["raw_mb"]))
             ds.setncattr("CONTROL_NODE_COUNT", int(num_nodes))
             ds.setncattr("ACTIVE_CONTROL_NODE_COUNT", int(sum(1 for n in all_nodes if n.valid)))
             ds.setncattr("LEAF_CELL_COUNT", int(num_cells))
@@ -448,103 +662,83 @@ def write_tide_cache(
             var_time.calendar = "proleptic_gregorian"
             var_time[:] = time_epochs
 
-            var_node_x = ds.createVariable("node_x", "f8", ("node",))
-            var_node_y = ds.createVariable("node_y", "f8", ("node",))
-            var_node_lon = ds.createVariable("node_lon", "f8", ("node",))
-            var_node_lat = ds.createVariable("node_lat", "f8", ("node",))
-            var_node_valid = ds.createVariable("node_valid", "i1", ("node",))
-            var_static_offset = ds.createVariable("static_offset_m", "f4", ("node",))
-            var_comp_id = ds.createVariable("component_id", "i4", ("node",))
-            var_node_qc = ds.createVariable("node_qc", "i4", ("node",))
+            var_node_x = ds.createVariable("node_x", "f8", ("node",), zlib=True)
+            var_node_y = ds.createVariable("node_y", "f8", ("node",), zlib=True)
+            var_node_lon = ds.createVariable("node_lon", "f8", ("node",), zlib=True)
+            var_node_lat = ds.createVariable("node_lat", "f8", ("node",), zlib=True)
+            var_node_val = ds.createVariable("node_valid", "u1", ("node",), zlib=True)
+            var_offset = ds.createVariable("static_offset_m", "f4", ("node",), zlib=True)
+            var_comp = ds.createVariable("component_id", "i4", ("node",), zlib=True)
+            var_qc = ds.createVariable("node_qc", "u4", ("node",), zlib=True)
 
             node_x_arr = np.array([n.x for n in all_nodes], dtype=np.float64)
             node_y_arr = np.array([n.y for n in all_nodes], dtype=np.float64)
             node_lon_arr = np.array([n.lon for n in all_nodes], dtype=np.float64)
             node_lat_arr = np.array([n.lat for n in all_nodes], dtype=np.float64)
-            node_val_arr = np.array([1 if n.valid else 0 for n in all_nodes], dtype=np.int8)
+            node_val_arr = np.array([1 if n.valid else 0 for n in all_nodes], dtype=np.uint8)
             node_off_arr = np.array([n.static_offset_m for n in all_nodes], dtype=np.float32)
-            node_cid_arr = np.array([n.component_id for n in all_nodes], dtype=np.int32)
-            node_qc_arr = np.array([n.qc_bitmask for n in all_nodes], dtype=np.int32)
+            node_comp_arr = np.array([n.component_id for n in all_nodes], dtype=np.int32)
+            node_qc_arr = np.array([n.qc_bitmask for n in all_nodes], dtype=np.uint32)
 
             var_node_x[:] = node_x_arr
             var_node_y[:] = node_y_arr
             var_node_lon[:] = node_lon_arr
             var_node_lat[:] = node_lat_arr
-            var_node_valid[:] = node_val_arr
-            var_static_offset[:] = node_off_arr
-            var_comp_id[:] = node_cid_arr
-            var_node_qc[:] = node_qc_arr
+            var_node_val[:] = node_val_arr
+            var_offset[:] = node_off_arr
+            var_comp[:] = node_comp_arr
+            var_qc[:] = node_qc_arr
 
-            chunk_nodes = min(500, max(1, num_nodes))
-            chunk_times = min(1000, max(1, num_times))
             var_tide = ds.createVariable(
                 "tide_msl_m", "f4", ("node", "time"),
-                chunksizes=(chunk_nodes, chunk_times),
                 zlib=True, complevel=4, shuffle=True,
-                fill_value=np.nan
+                chunksizes=(min(128, num_nodes), min(512, num_times))
             )
-            var_tide.units = "metres"
-            var_tide.long_name = "Tide elevation relative to Mean Sea Level (MSL)"
+            var_tide.units = "meters"
+            var_tide.long_name = "raw astronomical tide relative to MSL"
 
-            tide_block = np.full((chunk_nodes, num_times), np.nan, dtype=np.float32)
-            block_fill = 0
-            block_start_idx = 0
-
-            for idx, node in enumerate(all_nodes):
+            # 流式逐节点写入时序矩阵
+            for i, n in enumerate(all_nodes):
                 if cancel_event is not None and cancel_event.is_set():
                     raise RasterCalculationCancelled("用户取消了 Tide Cache 写入。")
-
-                if getattr(node, "tide_msl_raw", None) is not None and len(node.tide_msl_raw) == num_times:
-                    tide_block[block_fill, :] = node.tide_msl_raw
-                elif node.valid and len(node.water_levels_sorted) == num_times:
-                    tide_block[block_fill, :] = (node.water_levels_sorted - node.static_offset_m)
+                if n.valid and n.tide_msl_raw is not None and len(n.tide_msl_raw) == num_times:
+                    var_tide[i, :] = n.tide_msl_raw
                 else:
-                    tide_block[block_fill, :] = np.nan
+                    var_tide[i, :] = np.full(num_times, np.nan, dtype=np.float32)
 
-                block_fill += 1
+            var_cell_bounds = ds.createVariable("cell_bounds", "f8", ("cell", "bounds_dim"), zlib=True)
+            var_cell_nodes = ds.createVariable("cell_node_indices", "i4", ("cell", "corners_dim"), zlib=True)
+            var_cell_lvl = ds.createVariable("cell_level", "i2", ("cell",), zlib=True)
+            var_cell_qc = ds.createVariable("cell_qc", "u4", ("cell",), zlib=True)
+            var_cell_err = ds.createVariable("cell_max_error", "f4", ("cell",), zlib=True)
 
-                if block_fill == chunk_nodes or idx == num_nodes - 1:
-                    var_tide[block_start_idx:block_start_idx + block_fill, :] = tide_block[:block_fill, :]
-                    block_start_idx = idx + 1
-                    block_fill = 0
+            cell_bounds_arr = np.empty((num_cells, 4), dtype=np.float64)
+            cell_nodes_arr = np.empty((num_cells, 4), dtype=np.int32)
+            cell_lvl_arr = np.empty(num_cells, dtype=np.int16)
+            cell_qc_arr = np.empty(num_cells, dtype=np.uint32)
+            cell_err_arr = np.empty(num_cells, dtype=np.float32)
 
-            var_cell_bounds = ds.createVariable("cell_bounds", "f8", ("cell", "bounds_dim"))
-            var_cell_bounds.description = "Bounding box: [x_min, y_min, x_max, y_max]"
+            for c_idx, cell in enumerate(leaf_cells):
+                cell_bounds_arr[c_idx, :] = [cell.x_min, cell.y_min, cell.x_max, cell.y_max]
+                cell_nodes_arr[c_idx, :] = [
+                    node_id_map[cell.node_a.node_id],
+                    node_id_map[cell.node_b.node_id],
+                    node_id_map[cell.node_c.node_id],
+                    node_id_map[cell.node_d.node_id]
+                ]
+                cell_lvl_arr[c_idx] = cell.level
+                qc_mask = 0
+                if cell.qc_min_spacing_reached:
+                    qc_mask |= QC_BIT_MIN_SPACING_REACHED
+                if cell.qc_max_refinement_reached:
+                    qc_mask |= QC_BIT_MAX_REFINEMENT_REACHED
+                if cell.qc_validity_boundary:
+                    qc_mask |= QC_BIT_FES_VALIDITY_BOUNDARY
+                cell_qc_arr[c_idx] = qc_mask
+                cell_err_arr[c_idx] = cell.max_error_pct
 
-            var_cell_nodes = ds.createVariable("cell_node_indices", "i4", ("cell", "corners_dim"))
-            var_cell_nodes.description = "Corner node indices: [node_a, node_b, node_c, node_d]"
-
-            var_cell_lvl = ds.createVariable("cell_level", "i4", ("cell",))
-            var_cell_qc = ds.createVariable("cell_qc", "i4", ("cell",))
-            var_cell_err = ds.createVariable("cell_max_error", "f4", ("cell",))
-
-            cell_bounds_mat = np.zeros((num_cells, 4), dtype=np.float64)
-            cell_nodes_mat = np.zeros((num_cells, 4), dtype=np.int32)
-            cell_lvl_arr = np.zeros(num_cells, dtype=np.int32)
-            cell_qc_arr = np.zeros(num_cells, dtype=np.int32)
-            cell_err_arr = np.zeros(num_cells, dtype=np.float32)
-
-            for c_i, cell in enumerate(leaf_cells):
-                cell_bounds_mat[c_i] = [cell.x_min, cell.y_min, cell.x_max, cell.y_max]
-                na_idx = node_id_map.get(cell.node_a.node_id, 0)
-                nb_idx = node_id_map.get(cell.node_b.node_id, 0)
-                nc_idx = node_id_map.get(cell.node_c.node_id, 0)
-                nd_idx = node_id_map.get(cell.node_d.node_id, 0)
-                cell_nodes_mat[c_i] = [na_idx, nb_idx, nc_idx, nd_idx]
-                cell_lvl_arr[c_i] = cell.level
-                cell_err_arr[c_i] = getattr(cell, "max_error_pct", 0.0)
-
-                c_qc = 0
-                if getattr(cell, "qc_min_spacing_reached", False):
-                    c_qc |= QC_BIT_MIN_SPACING_REACHED
-                if getattr(cell, "qc_max_refinement_reached", False):
-                    c_qc |= QC_BIT_MAX_REFINEMENT_REACHED
-                if getattr(cell, "qc_validity_boundary", False):
-                    c_qc |= QC_BIT_FES_VALIDITY_BOUNDARY
-                cell_qc_arr[c_i] = c_qc
-
-            var_cell_bounds[:] = cell_bounds_mat
-            var_cell_nodes[:] = cell_nodes_mat
+            var_cell_bounds[:] = cell_bounds_arr
+            var_cell_nodes[:] = cell_nodes_arr
             var_cell_lvl[:] = cell_lvl_arr
             var_cell_qc[:] = cell_qc_arr
             var_cell_err[:] = cell_err_arr
@@ -563,10 +757,13 @@ def write_tide_cache(
         raise
 
 
-def read_tide_cache(cache_path: str) -> Dict[str, Any]:
+def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size: Optional[int] = None) -> Dict[str, Any]:
     """
     读取 Tide Cache NetCDF 文件并重建自适应控制节点与叶单元拓扑。
+    采用按节点分块流式读取 (Node-chunk reading) 策略，严禁一次性加载完整 tide_msl_m 矩阵。
     """
+    if chunk_node_size is not None:
+        node_chunk_size = chunk_node_size
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
 
@@ -589,38 +786,46 @@ def read_tide_cache(cache_path: str) -> Dict[str, Any]:
         num_nodes = len(node_x)
         nodes: List[ControlNode] = []
 
-        tide_mat = ds.variables["tide_msl_m"][:]  # (node, time)
+        var_tide = ds.variables["tide_msl_m"]
 
-        for i in range(num_nodes):
-            is_valid = bool(node_val[i])
-            off_m = float(static_offset[i])
+        # 采用 node-chunking 分块逐批读取并排序，避免海量节点时内存翻倍
+        chunk_size = max(1, int(node_chunk_size))
+        for c_start in range(0, num_nodes, chunk_size):
+            c_end = min(num_nodes, c_start + chunk_size)
+            chunk_tide_raw = var_tide[c_start:c_end, :]  # 仅读取当前 chunk
 
-            if is_valid:
-                raw_t = np.array(tide_mat[i], dtype=np.float32)
-                valid_t = raw_t[np.isfinite(raw_t)]
-                if len(valid_t) > 0:
-                    w_sorted = valid_t + off_m
-                    w_sorted.sort()
+            for local_idx, i in enumerate(range(c_start, c_end)):
+                is_valid = bool(node_val[i])
+                off_m = float(static_offset[i])
+
+                if is_valid:
+                    raw_t = np.array(chunk_tide_raw[local_idx], dtype=np.float32)
+                    valid_t = raw_t[np.isfinite(raw_t)]
+                    if len(valid_t) > 0:
+                        w_sorted = valid_t + off_m
+                        w_sorted.sort()
+                    else:
+                        w_sorted = np.array([], dtype=np.float32)
+                        is_valid = False
                 else:
                     w_sorted = np.array([], dtype=np.float32)
-                    is_valid = False
-            else:
-                w_sorted = np.array([], dtype=np.float32)
 
-            node = ControlNode(
-                node_id=i,
-                x=float(node_x[i]),
-                y=float(node_y[i]),
-                lon=float(node_lon[i]),
-                lat=float(node_lat[i]),
-                water_levels_sorted=w_sorted,
-                valid=is_valid,
-                static_offset_m=off_m,
-                component_id=int(comp_id[i]),
-                qc_bitmask=int(node_qc[i]),
-                qc_code=int(node_qc[i])
-            )
-            nodes.append(node)
+                node = ControlNode(
+                    node_id=i,
+                    x=float(node_x[i]),
+                    y=float(node_y[i]),
+                    lon=float(node_lon[i]),
+                    lat=float(node_lat[i]),
+                    water_levels_sorted=w_sorted,
+                    valid=is_valid,
+                    static_offset_m=off_m,
+                    component_id=int(comp_id[i]),
+                    qc_bitmask=int(node_qc[i]),
+                    qc_code=int(node_qc[i])
+                )
+                nodes.append(node)
+
+            del chunk_tide_raw
 
         cell_bounds = ds.variables["cell_bounds"][:]
         cell_nodes = ds.variables["cell_node_indices"][:]
@@ -681,22 +886,32 @@ def calculate_inundation_from_tide_cache(
     cancel_event = None
 ) -> RasterResultSummary:
     """
-    【Stage 2 核心解算器】基于已有 Tide Cache NetCDF 与原始 DEM 解算潜在天文潮淹没频率 GeoTIFF。
+    基于预先生成的 Tide Cache (*_tide.nc) 与输入 DEM 解算淹没频率 GeoTIFF (Stage 2)。
+    严格从 Tide Cache 读取 TOPOLOGY_RESOLUTION_M 与 TOPOLOGY_VALID_FRACTION_THRESHOLD，
+    确保与 Stage 1 控制网格构建逻辑完全一致。
     """
     t_start = time.time()
-    if progress_callback:
-        progress_callback(0, f"正在验证 Tide Cache 兼容性: {os.path.basename(cache_path)}...")
+    if cancel_event is not None and cancel_event.is_set():
+        raise RasterCalculationCancelled("用户取消了 Stage 2 淹没频率解算。")
+
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
+    if not os.path.exists(dem_path):
+        raise FileNotFoundError(f"未找到指定的输入 DEM 文件: {dem_path}")
 
     from .raster_engine import RasterTideEngine
-    tmp_engine = RasterTideEngine()
-    info = tmp_engine.inspect_raster(dem_path, compute_valid_count=False)
+    engine = RasterTideEngine()
+    info = engine.inspect_raster(dem_path, compute_valid_count=True)
 
     expected_spec = {
         "width": info.width,
         "height": info.height,
         "crs": info.crs,
-        "transform": list(info.transform)[:6]
+        "transform": info.transform,
+        "bounds": info.bounds,
+        "nodata": info.nodata
     }
+
     compatible, reasons = validate_tide_cache_compatibility(cache_path, expected_spec)
     if not compatible:
         raise TideCacheCompatibilityError(
@@ -718,11 +933,18 @@ def calculate_inundation_from_tide_cache(
     if block_size is None:
         block_size = 512
 
-    top_res_m = float(meta.get("TOPOLOGY_RESOLUTION_M", 200.0))
+    if "TOPOLOGY_RESOLUTION_M" not in meta or "TOPOLOGY_VALID_FRACTION_THRESHOLD" not in meta:
+        raise TideCacheCompatibilityError(
+            "Tide Cache 缺少必要拓扑参数元数据 (TOPOLOGY_RESOLUTION_M / TOPOLOGY_VALID_FRACTION_THRESHOLD)，属于旧版缓存或不兼容，必须重新生成 (Rebuild)。"
+        )
+
+    top_res_m = float(meta["TOPOLOGY_RESOLUTION_M"])
+    top_frac = float(meta["TOPOLOGY_VALID_FRACTION_THRESHOLD"])
+
     labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, _, input_valid_count = build_support_topology(
         info=info,
         topology_max_resolution_m=top_res_m,
-        topology_valid_fraction_threshold=0.20,
+        topology_valid_fraction_threshold=top_frac,
         block_size=block_size,
         cancel_event=cancel_event
     )
@@ -739,6 +961,9 @@ def calculate_inundation_from_tide_cache(
         "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
         "STAGE": "Stage 2 (Zero FES calls)",
         "TOPOLOGY_GUARD": "valid_mask_topology_aware",
+        "TOPOLOGY_SOURCE": "target_mask_derived",
+        "TOPOLOGY_RESOLUTION_M": str(top_res_m),
+        "TOPOLOGY_VALID_FRACTION_THRESHOLD": str(top_frac),
         "QC_ENCODING": "UInt16 bitmask: bit0=FES_extrapolated, bit1=spatial_fallback, bit2=insufficient_nodes, bit3=datum_invalid, bit4=datum_source_approx, bit5=min_spacing_reached, bit6=connectivity_fallback, bit7=fes_validity_boundary, bit8=max_refinement_reached"
     }
 
