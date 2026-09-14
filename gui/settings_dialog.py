@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFileDialog, QMessageBox, QGroupBox, QScrollArea, QWidget
 )
-from core.utils import load_app_config, save_app_config, resolve_project_path
+from core.utils import load_app_config, save_app_config, resolve_project_path, to_relative_project_path
 
 
 def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
@@ -175,8 +175,16 @@ class SettingsDialog(QDialog):
         # Delta-N GeoTIFF (EIGEN-6C4 - EGM2008)
         layout_dn_eigen = QHBoxLayout()
         layout_dn_eigen.addWidget(QLabel("EIGEN6C4-EGM2008 ΔN (.tif):"))
-        eigen_val = self.config['paths'].get('delta_n_eigen6c4_egm2008_tif', '')
+        raw_eigen_val = self.config['paths'].get('delta_n_eigen6c4_egm2008_tif', '')
+        if raw_eigen_val:
+            eigen_val = to_relative_project_path(raw_eigen_val)
+        else:
+            eigen_val = "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
         self.edit_delta_n_eigen = QLineEdit(eigen_val)
+        self.edit_delta_n_eigen.setToolTip(
+            "地中海与黑海严格转换到 EGM2008/WGS84 所需的 EIGEN-6C4–EGM2008 ΔN 栅格。\n"
+            "若当前文件不存在，可使用 scripts/generate_delta_n.py 生成或手动选择。"
+        )
         btn_dn_eigen = QPushButton("浏览...")
         btn_dn_eigen.setObjectName("btn_secondary")
         btn_dn_eigen.clicked.connect(self._browse_delta_n_eigen)
@@ -189,7 +197,7 @@ class SettingsDialog(QDialog):
         layout_mask.addWidget(QLabel("Hybrid MDT 来源掩膜 (.tif，可选):"))
         mask_val = self.config['paths'].get('hybrid_mdt_source_mask', '')
         self.edit_source_mask = QLineEdit(mask_val)
-        self.edit_source_mask.setToolTip("CNES-CLS22 Hybrid MDT 参考基准分类掩膜栅格 (0=UNKNOWN, 1=GOCO06s, 2=EIGEN-6C4(MED), 3=EIGEN-6C4(BLK), 255=NoData)。\n当前项目未内置。留空时系统自动采用几何多边形 Fallback。注意：这不是 FES2022b/mask_fes2022B.nc。")
+        self.edit_source_mask.setToolTip("可选增强数据；未配置属于正常状态。\n这不是 fes2022b/mask_fes2022B.nc。")
         btn_mask = QPushButton("浏览...")
         btn_mask.setObjectName("btn_secondary")
         btn_mask.clicked.connect(self._browse_source_mask)
@@ -289,9 +297,16 @@ class SettingsDialog(QDialog):
         _, res = _deep_validate_file(goco_path, 'raster')
         msg.append(f"• GOCO06s-EGM2008 ΔN: {res}")
 
-        if eigen_path:
+        if eigen_path and os.path.exists(eigen_path):
             _, res = _deep_validate_file(eigen_path, 'raster')
             msg.append(f"• EIGEN-6C4-EGM2008 ΔN: {res}")
+        elif eigen_path:
+            msg.append(
+                "• EIGEN-6C4-EGM2008 ΔN: ⚠️ 未找到 EIGEN-6C4–EGM2008 ΔN 文件。\n"
+                "  普通全球大洋 GOCO06s 区域不受影响；\n"
+                "  地中海/黑海严格 EGM2008/WGS84 转换需要该文件。\n"
+                "  可使用 scripts/generate_delta_n.py 生成，或通过“浏览”手动指定。"
+            )
         else:
             msg.append("• EIGEN-6C4-EGM2008 ΔN: ℹ️ 未配置（可选，若在地中海/黑海计算非MSL将严格报错）")
 

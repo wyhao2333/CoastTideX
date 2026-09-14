@@ -1828,7 +1828,7 @@ class MainWindow(QMainWindow):
             "<li>任务清单 (Manifest) 管理、单瓦片失败隔离与防篡改断点恢复。</li>"
             "</ul></li>"
             "</ul>"
-            "<p>作者 / 开发者：王宇豪 | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
+            "<p>作者 / 开发者：Wang Yuhao | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)
 

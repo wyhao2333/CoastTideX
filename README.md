@@ -450,7 +450,7 @@ CoastTideX/
 
 ## 👨‍💻 作者与开发者 (Author & Developer)
 
-* **王宇豪 (Yuhao Wang)**
+* **Wang Yuhao**
   * 负责：CoastTideX 系统全架构设计、核心解算引擎与算法研发
 
 ---

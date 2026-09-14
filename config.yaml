@@ -24,9 +24,9 @@ paths:
   # 兼容旧版键名
   delta_n_tif: "data/geoid/delta_n_goco06s_minus_egm2008.tif"
 
-  # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (可选外部补充，Delta N = N_EIGEN6C4 - N_EGM2008)
-  # 留空时为未配置状态；地中海与黑海 EGM2008/WGS84 严格转换需要额外 EIGEN-6C4 ΔN 数据。
-  delta_n_eigen6c4_egm2008_tif: ""
+  # 地中海与黑海 EIGEN-6C4 与 EGM2008 大地水准面差值栅格 (Delta N = N_EIGEN6C4 - N_EGM2008)
+  # 规范默认预期路径为 data/geoid/delta_n_eigen6c4_minus_egm2008.tif (当前不随仓库捆绑，可使用 scripts/generate_delta_n.py 生成或手动指定)
+  delta_n_eigen6c4_egm2008_tif: "data/geoid/delta_n_eigen6c4_minus_egm2008.tif"
 
   # 可选 Hybrid MDT 参考基准来源分类栅格 (GeoTIFF，0:UNKNOWN, 1:GOCO06s, 2:EIGEN-6C4(MED), 3:EIGEN-6C4(BLK), 255:NoData)。
   # 当前项目不内置该文件。

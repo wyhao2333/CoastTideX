@@ -424,7 +424,7 @@ A ready-to-use PyInstaller configuration is provided in `build_exe.bat`:
 
 ## 👨‍💻 Author & Developer
 
-* **王宇豪 (Yuhao Wang)**
+* **Wang Yuhao**
   * Role: Lead Architect & System Developer of CoastTideX
 
 ---

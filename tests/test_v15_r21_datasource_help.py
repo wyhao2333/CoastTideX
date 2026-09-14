@@ -166,6 +166,20 @@ class TestV15Round21DataSourceHelp(unittest.TestCase):
     def test_06_settings_dialog_optional_fields_message(self):
         """测试 6: SettingsDialog 校验未配置的可选字段时正常显示 ℹ️ 未配置（可选...）且不崩溃"""
         dlg = SettingsDialog()
+        # 验证默认值初始化为规范相对路径
+        self.assertEqual(dlg.edit_delta_n_eigen.text(), "data/geoid/delta_n_eigen6c4_minus_egm2008.tif")
+
+        # 当文件不存在时深度校验给出友好指引与预警
+        dlg.edit_delta_n_eigen.setText("data/geoid/non_existent_delta_n_eigen.tif")
+        with patch.object(QMessageBox, 'information') as mock_info:
+            dlg._validate_paths()
+            mock_info.assert_called_once()
+            called_msg = mock_info.call_args[0][2]
+            self.assertIn("未找到 EIGEN-6C4–EGM2008 ΔN 文件", called_msg)
+            self.assertIn("普通全球大洋 GOCO06s 区域不受影响", called_msg)
+            self.assertIn("scripts/generate_delta_n.py", called_msg)
+
+        # 当用户显式清空时提示未配置
         dlg.edit_fes_mask.setText("")
         dlg.edit_delta_n_eigen.setText("")
         dlg.edit_source_mask.setText("")
@@ -179,23 +193,35 @@ class TestV15Round21DataSourceHelp(unittest.TestCase):
             self.assertIn("Hybrid MDT 来源掩膜: ℹ️ 未配置（可选", called_msg)
         dlg.close()
 
+    def test_06b_settings_dialog_custom_path_preservation(self):
+        """测试 6b: 验证 SettingsDialog 保持用户自定义路径不被默认值覆盖"""
+        custom_cfg = {
+            'paths': {
+                'delta_n_eigen6c4_egm2008_tif': 'D:/my_custom_dir/custom_eigen.tif'
+            }
+        }
+        with patch('gui.settings_dialog.load_app_config', return_value=custom_cfg):
+            dlg = SettingsDialog()
+            self.assertEqual(dlg.edit_delta_n_eigen.text(), 'D:/my_custom_dir/custom_eigen.tif')
+            dlg.close()
+
     def test_07_config_yaml_defaults(self):
-        """测试 7: 验证 config.yaml 默认值已清空非内置路径并配置了 fes_extrapolation_mask_nc"""
+        """测试 7: 验证 config.yaml 默认值配置规范"""
         cfg = load_app_config()
         paths = cfg.get("paths", {})
         self.assertEqual(paths.get("hybrid_mdt_source_mask"), "")
-        self.assertEqual(paths.get("delta_n_eigen6c4_egm2008_tif"), "")
+        self.assertTrue(paths.get("delta_n_eigen6c4_egm2008_tif", "").replace("\\", "/").endswith("data/geoid/delta_n_eigen6c4_minus_egm2008.tif"))
         self.assertTrue(paths.get("fes_extrapolation_mask_nc", "").replace("\\", "/").endswith("fes2022b/mask_fes2022B.nc"))
 
         # 检查未解析的原始 yaml 文件声明
         with open("config.yaml", "r", encoding="utf-8") as f:
             raw_cfg = yaml.safe_load(f)
         self.assertEqual(raw_cfg["paths"].get("hybrid_mdt_source_mask"), "")
-        self.assertEqual(raw_cfg["paths"].get("delta_n_eigen6c4_egm2008_tif"), "")
+        self.assertEqual(raw_cfg["paths"].get("delta_n_eigen6c4_egm2008_tif"), "data/geoid/delta_n_eigen6c4_minus_egm2008.tif")
         self.assertEqual(raw_cfg["paths"].get("fes_extrapolation_mask_nc"), "fes2022b/mask_fes2022B.nc")
 
     def test_08_about_dialog_text_author_and_version(self):
-        """测试 8: 关于对话框中作者必须显示中文“王宇豪”，版本为 v1.5 Alpha，严禁 wyhao2333 出现"""
+        """测试 8: 关于对话框中作者统一为 Wang Yuhao，版本为 v1.5 Alpha，严禁非统一形式出现"""
         win = MainWindow()
         with patch.object(QMessageBox, 'about') as mock_about:
             win._show_about()
@@ -203,7 +229,9 @@ class TestV15Round21DataSourceHelp(unittest.TestCase):
             about_html = mock_about.call_args[0][2]
 
             self.assertIn("CoastTideX v1.5 Alpha", about_html)
-            self.assertIn("作者 / 开发者：王宇豪", about_html)
+            self.assertIn("作者 / 开发者：Wang Yuhao", about_html)
+            self.assertNotIn("王宇豪", about_html)
+            self.assertNotIn("王宇浩", about_html)
             self.assertNotIn("wyhao2333", about_html)
             self.assertNotIn("零误差", about_html)
             self.assertIn("可选配置 Hybrid MDT 来源分类栅格", about_html)
