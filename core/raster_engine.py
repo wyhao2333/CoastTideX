@@ -1,5 +1,5 @@
 """
-CoastTideX 空间栅格潮位与自适应控制网格淹没频率解算引擎 (Spatial Raster Tide Engine v1.4)
+CoastTideX 空间栅格潮位与自适应控制网格淹没频率解算引擎 (Spatial Raster Tide Engine v1.6)
 支持大范围 GeoTIFF 逐像元空间潮位解算与基于自适应四叉树控制网格 (Adaptive Quadtree Control Grid)
 的年度潜在天文潮淹没频率计算。
 
@@ -230,6 +230,26 @@ class QuadCell:
     qc_max_refinement_reached: bool = False
     qc_validity_boundary: bool = False
     max_error_pct: float = 0.0
+
+    @property
+    def x0(self) -> float:
+        return self.x_min
+
+    @property
+    def x1(self) -> float:
+        return self.x_max
+
+    @property
+    def y0(self) -> float:
+        return self.y_min
+
+    @property
+    def y1(self) -> float:
+        return self.y_max
+
+    @property
+    def node_indices(self) -> Tuple[int, int, int, int]:
+        return (self.node_a.node_id, self.node_b.node_id, self.node_c.node_id, self.node_d.node_id)
 
 
 @dataclass
@@ -756,6 +776,99 @@ class RasterTideEngine:
             mtime_ns=mtime
         )
 
+
+    def calculate_exposure_raster(
+        self,
+        dem_path: str,
+        output_paths = None,
+        output_dir: Optional[str] = None,
+        year: int = 2024,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        freq: str = "30min",
+        dem_datum: str = "egm2008",
+        constituents = "all",
+        source_tz: str = "UTC",
+        initial_control_spacing_m: Optional[float] = None,
+        min_control_spacing_m: Optional[float] = None,
+        inundation_error_tolerance_pct: Optional[float] = None,
+        block_size: Optional[int] = None,
+        time_chunk_size: int = 1000,
+        strict: bool = True,
+        progress_callback = None,
+        cancel_event = None,
+        inclusive: Optional[str] = None,
+        target_mode: str = "intertidal",
+        export_tide_cache_path: Optional[str] = None,
+        allow_overwrite: bool = True
+    ) -> Dict[str, Any]:
+        """
+        解算固定代表性地形条件下的潜在天文潮露出时间域 7 大空间栅格产品。
+        若提供了 export_tide_cache_path，先构建或复用 Tide Cache，再执行露出反演；
+        若未提供，生成临时 Tide Cache 供流水线流式解算。
+        """
+        import tempfile
+        from .tide_cache import calculate_exposure_from_tide_cache, is_cache_complete
+
+        need_cleanup = False
+        if not export_tide_cache_path:
+            td = tempfile.TemporaryDirectory()
+            cache_p = os.path.join(td.name, "temp_grid_tide.nc")
+            need_cleanup = True
+        else:
+            cache_p = export_tide_cache_path
+            td = None
+
+        try:
+            if not os.path.exists(cache_p) or not is_cache_complete(cache_p) or allow_overwrite:
+                def _prog_s1(p, msg):
+                    if progress_callback:
+                        progress_callback(int(p * 0.4), f"Stage 1: {msg}")
+
+                self.build_tide_control_grid(
+                    dem_path=dem_path,
+                    export_tide_cache_path=cache_p,
+                    year=year,
+                    start_time=start_time,
+                    end_time=end_time,
+                    freq=freq,
+                    dem_datum=dem_datum,
+                    constituents=constituents,
+                    source_tz=source_tz,
+                    initial_control_spacing_m=initial_control_spacing_m,
+                    min_control_spacing_m=min_control_spacing_m,
+                    inundation_error_tolerance_pct=inundation_error_tolerance_pct,
+                    strict=strict,
+                    progress_callback=_prog_s1,
+                    cancel_event=cancel_event,
+                    inclusive=inclusive,
+                    target_mode=target_mode,
+                    allow_overwrite=allow_overwrite
+                )
+
+            def _prog_s2(p, msg):
+                if progress_callback:
+                    progress_callback(40 + int(p * 0.6), f"Stage 2: {msg}")
+
+            res = calculate_exposure_from_tide_cache(
+                dem_path=dem_path,
+                cache_path=cache_p,
+                output_dir=output_dir,
+                output_paths=output_paths,
+                block_size=block_size or 512,
+                time_chunk_size=time_chunk_size,
+                allow_overwrite=allow_overwrite,
+                progress_callback=_prog_s2,
+                cancel_event=cancel_event
+            )
+            return res
+        finally:
+            if need_cleanup and td:
+                try:
+                    td.cleanup()
+                except Exception:
+                    pass
+
     def iter_raster_windows(
         self,
         width: int,
@@ -1161,10 +1274,7 @@ class RasterTideEngine:
         else:
             t_start_str = str(start_time)
             t_end_str = str(end_time)
-            if t_start_str.endswith("-01-01 00:00:00") and t_end_str.endswith("-01-01 00:00:00") and int(t_end_str[:4]) > int(t_start_str[:4]):
-                inclusive_mode = 'left'  # 严格全年度保持半开区间
-            else:
-                inclusive_mode = 'both'  # 自定义区间默认双闭区间 (如单日/单月测试)
+            inclusive_mode = 'left'  # v1.6: 全系统统一默认严格半开区间 [start, end) 杜绝端点双重统计
 
         time_idx = pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode, tz="UTC")
         n_time_samples = len(time_idx)
@@ -1609,6 +1719,30 @@ class RasterTideEngine:
         # 若指定了导出 Tide Cache 路径，在此刻将控制网格及其时序原子序列化
         if export_tide_cache_path:
             from .tide_cache import write_tide_cache
+
+            # 计算终端时刻水位 (Terminal Tide at end_time) 以支撑高精度连续露出分析 (Schema 1.2)
+            terminal_tides = None
+            try:
+                valid_nodes = [n for n in node_cache.values() if n.valid]
+                if valid_nodes:
+                    all_nodes_list = list(node_cache.values())
+                    all_lons = np.array([n.lon for n in all_nodes_list], dtype=float)
+                    all_lats = np.array([n.lat for n in all_nodes_list], dtype=float)
+                    t_mat, _, _ = predictor.predict_points_period(
+                        lons=all_lons,
+                        lats=all_lats,
+                        start_time=t_end_str,
+                        end_time=t_end_str,
+                        freq=freq,
+                        inclusive="both",
+                        constituents=constituents,
+                        source_tz=source_tz,
+                        max_fes_evaluate_points=self.max_fes_evaluate_points
+                    )
+                    terminal_tides = t_mat[:, 0].astype(np.float32)
+            except Exception as e:
+                warnings.warn(f"无法预计算终端时刻潮位采样: {e}")
+
             cache_meta = {
                 "start_time": t_start_str,
                 "end_time": t_end_str,
@@ -1632,7 +1766,8 @@ class RasterTideEngine:
                 time_index=time_idx,
                 metadata=cache_meta,
                 allow_overwrite=allow_overwrite,
-                cancel_event=cancel_event
+                cancel_event=cancel_event,
+                tide_msl_terminal=terminal_tides
             )
             # 导出 Cache 完成后立即解引用所有控制节点的 raw MSL 数组，常驻内存仅保留 water_levels_sorted
             for n in node_cache.values():

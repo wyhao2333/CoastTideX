@@ -33,6 +33,9 @@ from .tide_cache import (
 JOB_MODE_TIDE_ONLY = "tide"                                 # 仅解算控制节点潮位并生成 Tide Cache (*_tide.nc)
 JOB_MODE_TIDE_AND_INUNDATION = "tide-inundation"            # 先生成 Tide Cache，再解算淹没频率 (默认完整两阶段流程)
 JOB_MODE_INUNDATION_FROM_CACHE = "inundation-from-cache"    # 从已有 Tide Cache 直接解算淹没频率 (零 FES 调用)
+JOB_MODE_EXPOSURE_FROM_CACHE = "exposure-from-cache"        # 从已有 Tide Cache 直接解算潜在天文潮露出时间域产品 (零 FES 调用)
+JOB_MODE_TIDE_AND_EXPOSURE = "tide-exposure"                # 先生成 Tide Cache，再解算潜在天文潮露出时间域产品
+JOB_MODE_ALL = "all"                                        # 全要素产品包: Tide Cache + 淹没频率 + 潜在天文潮露出时间域产品
 
 # 现有输出处理策略 (ExistingOutputPolicy)
 class ScanSnapshotStaleError(ValueError):
@@ -84,6 +87,7 @@ STATUS_VALIDATING = "VALIDATING"
 STATUS_TIDE_RUNNING = "TIDE_RUNNING"
 STATUS_TIDE_READY = "TIDE_READY"
 STATUS_FREQUENCY_RUNNING = "FREQUENCY_RUNNING"
+STATUS_EXPOSURE_RUNNING = "EXPOSURE_RUNNING"
 STATUS_DONE = "DONE"
 STATUS_FAILED = "FAILED"
 STATUS_CANCELLED = "CANCELLED"
@@ -116,6 +120,7 @@ class BatchManifest:
         "control_node_count",
         "elapsed_tide_seconds",
         "elapsed_frequency_seconds",
+        "elapsed_exposure_seconds",
         "error_message"
     ]
 
@@ -173,6 +178,34 @@ class BatchManifest:
                 row = {k: it.get(k, "") for k in self.FIELDS}
                 writer.writerow(row)
         os.replace(tmp_csv, self.csv_path)
+
+
+def _verify_exposure_artifacts(dem_info, exp_paths) -> bool:
+    """验证已有潜在天文潮露出栅格产物的尺寸、坐标系、仿射变换与数据类型完整性"""
+    paths = [
+        exp_paths.exposure_fraction_path,
+        exp_paths.exposure_duration_h_path,
+        exp_paths.exposure_max_continuous_h_path,
+        exp_paths.exposure_mean_event_h_path,
+        exp_paths.exposure_event_count_path,
+        exp_paths.exposure_valid_time_fraction_path,
+        exp_paths.exposure_qc_path
+    ]
+    for p in paths:
+        if not os.path.exists(p):
+            return False
+    try:
+        with rasterio.open(exp_paths.exposure_duration_h_path) as src_dur:
+            if src_dur.width != dem_info.width or src_dur.height != dem_info.height:
+                return False
+            if str(src_dur.crs) != str(dem_info.crs):
+                return False
+        with rasterio.open(exp_paths.exposure_qc_path) as src_qc:
+            if src_qc.dtypes[0] != 'uint16':
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _verify_raster_artifacts(
@@ -265,6 +298,8 @@ class BatchRasterEngine:
                 name_lower.endswith("_inundation.tiff") or
                 name_lower.endswith("_inundation_qc.tif") or
                 name_lower.endswith("_inundation_qc.tiff") or
+                "_exposure_" in name_lower or
+                name_lower.endswith("_exposure.tif") or
                 name_lower.endswith("_qc.tif") or
                 name_lower.endswith("_qc.tiff") or
                 name_lower.endswith("_tide.nc") or
@@ -451,9 +486,22 @@ class BatchRasterEngine:
             tile_out_dir.mkdir(parents=True, exist_ok=True)
             stem = rel_file_path.stem
 
+            from .exposure_engine import ExposureProductPaths
+            from .tide_cache import calculate_exposure_from_tide_cache
+
             tide_cache_path = str(tile_out_dir / f"{stem}_tide.nc")
             frequency_path = str(tile_out_dir / f"{stem}_inundation.tif")
             qc_path = str(tile_out_dir / f"{stem}_inundation_qc.tif")
+
+            exp_paths = ExposureProductPaths(
+                exposure_fraction_path=str(tile_out_dir / f"{stem}_exposure_fraction.tif"),
+                exposure_duration_h_path=str(tile_out_dir / f"{stem}_exposure_duration_h.tif"),
+                exposure_max_continuous_h_path=str(tile_out_dir / f"{stem}_exposure_max_continuous_h.tif"),
+                exposure_mean_event_h_path=str(tile_out_dir / f"{stem}_exposure_mean_event_h.tif"),
+                exposure_event_count_path=str(tile_out_dir / f"{stem}_exposure_event_count.tif"),
+                exposure_valid_time_fraction_path=str(tile_out_dir / f"{stem}_exposure_valid_time_fraction.tif"),
+                exposure_qc_path=str(tile_out_dir / f"{stem}_exposure_qc.tif")
+            )
 
             manifest.upsert(
                 input_path,
@@ -498,10 +546,7 @@ class BatchRasterEngine:
             else:
                 st_s = str(start_time)
                 et_s = str(end_time)
-                if st_s.endswith("-01-01 00:00:00") and et_s.endswith("-01-01 00:00:00") and int(et_s[:4]) > int(st_s[:4]):
-                    eff_inclusive = "left"
-                else:
-                    eff_inclusive = "both"
+                eff_inclusive = "left"  # v1.6 统一默认半开区间 [start, end)
 
             expected_spec = build_expected_cache_spec(
                 info=dem_info,
@@ -528,11 +573,15 @@ class BatchRasterEngine:
                 if job_mode in (JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION):
                     if os.path.exists(tide_cache_path):
                         conflict_files.append(tide_cache_path)
-                if job_mode in (JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE):
+                if job_mode in (JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL):
                     if os.path.exists(frequency_path):
                         conflict_files.append(frequency_path)
                     if os.path.exists(qc_path):
                         conflict_files.append(qc_path)
+                if job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL, "exposure"):
+                    for ep in [exp_paths.exposure_fraction_path, exp_paths.exposure_duration_h_path, exp_paths.exposure_qc_path]:
+                        if os.path.exists(ep):
+                            conflict_files.append(ep)
 
                 if conflict_files:
                     err_msg = f"ExistingOutputError: 目标输出产物已存在且当前策略为 error_if_exists: {', '.join(conflict_files)}"
@@ -578,8 +627,31 @@ class BatchRasterEngine:
                         summary_counts["skipped"] += 1
                         continue
 
-            # ---------------- JOB_MODE_INUNDATION_FROM_CACHE 前置检查 ----------------
-            if job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
+                elif job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, "exposure"):
+                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
+
+                elif job_mode == JOB_MODE_EXPOSURE_FROM_CACHE:
+                    if _verify_exposure_artifacts(dem_info, exp_paths):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
+
+                elif job_mode == JOB_MODE_ALL:
+                    if (cache_ok and
+                        _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]) and
+                        _verify_exposure_artifacts(dem_info, exp_paths)):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
+
+            # ---------------- FROM_CACHE 模式前置检查 ----------------
+            if job_mode in (JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_EXPOSURE_FROM_CACHE):
                 if not os.path.exists(tide_cache_path):
                     manifest.upsert(
                         input_path,
@@ -606,7 +678,7 @@ class BatchRasterEngine:
             # 执行单文件处理 (带单瓦片失败隔离)
             try:
                 # ---------------- Stage 1: Tide Calculation & Tide Cache ----------------
-                need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION])
+                need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_ALL])
                 cache_already_ready = (
                     policy == ExistingOutputPolicy.RESUME and
                     cache_ok
@@ -667,37 +739,68 @@ class BatchRasterEngine:
                     summary_counts["completed"] += 1
                     continue
 
-                # ---------------- Stage 2: Inundation Frequency Calculation ----------------
-                # 注意: 在 JOB_MODE_INUNDATION_FROM_CACHE 下，tide_cache_path 严格为只读输入，绝不修改
-                manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
-                manifest.save()
-                if progress_callback:
-                    progress_callback(overall_pct, 60, str(rel_file_path), "Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
-
-                t_freq_start = time.time()
-
-                def _freq_prog(pct_val, msg_val):
+                # ---------------- Stage 2a: Inundation Frequency Calculation ----------------
+                need_freq = (job_mode in [JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL])
+                elapsed_freq = 0.0
+                valid_pixels_cnt = 0
+                if need_freq:
+                    manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
+                    manifest.save()
                     if progress_callback:
-                        progress_callback(overall_pct, 50 + int(pct_val * 0.5), filename, f"Stage 2: {msg_val}", summary_counts)
+                        progress_callback(overall_pct, 55, str(rel_file_path), "Stage 2a: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
 
-                freq_summary = calculate_inundation_from_tide_cache(
-                    dem_path=input_path,
-                    cache_path=tide_cache_path,
-                    output_path=frequency_path,
-                    qc_output_path=qc_path,
-                    block_size=block_size,
-                    allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
-                    progress_callback=_freq_prog,
-                    cancel_event=cancel_event
-                )
+                    t_freq_start = time.time()
 
-                elapsed_freq = time.time() - t_freq_start
+                    def _freq_prog(pct_val, msg_val):
+                        if progress_callback:
+                            progress_callback(overall_pct, 50 + int(pct_val * 0.25), filename, f"Stage 2a: {msg_val}", summary_counts)
+
+                    freq_summary = calculate_inundation_from_tide_cache(
+                        dem_path=input_path,
+                        cache_path=tide_cache_path,
+                        output_path=frequency_path,
+                        qc_output_path=qc_path,
+                        block_size=block_size,
+                        allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
+                        progress_callback=_freq_prog,
+                        cancel_event=cancel_event
+                    )
+                    elapsed_freq = time.time() - t_freq_start
+                    valid_pixels_cnt = freq_summary.input_valid_pixels
+
+                # ---------------- Stage 2b: Exposure Duration Calculation ----------------
+                need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL, "exposure"])
+                elapsed_exp = 0.0
+                if need_exp:
+                    manifest.upsert(input_path, status=STATUS_EXPOSURE_RUNNING, run_action="EXPOSURE_RUNNING")
+                    manifest.save()
+                    if progress_callback:
+                        progress_callback(overall_pct, 75, str(rel_file_path), "Stage 2b: 基于 Tide Cache 解算潜在天文潮露出时间域产品...", summary_counts)
+
+                    t_exp_start = time.time()
+
+                    def _exp_prog(pct_val, msg_val):
+                        if progress_callback:
+                            progress_callback(overall_pct, 75 + int(pct_val * 0.25), filename, f"Stage 2b: {msg_val}", summary_counts)
+
+                    exp_res = calculate_exposure_from_tide_cache(
+                        dem_path=input_path,
+                        cache_path=tide_cache_path,
+                        output_paths=exp_paths,
+                        block_size=block_size or 512,
+                        allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
+                        progress_callback=_exp_prog,
+                        cancel_event=cancel_event
+                    )
+                    elapsed_exp = time.time() - t_exp_start
+
                 manifest.upsert(
                     input_path,
                     status=STATUS_DONE,
                     run_action="PROCESSED",
-                    valid_pixel_count=freq_summary.input_valid_pixels,
-                    elapsed_frequency_seconds=round(elapsed_freq, 2),
+                    valid_pixel_count=valid_pixels_cnt,
+                    elapsed_frequency_seconds=round(elapsed_freq, 2) if need_freq else None,
+                    elapsed_exposure_seconds=round(elapsed_exp, 2) if need_exp else None,
                     error_message=""
                 )
                 manifest.save()

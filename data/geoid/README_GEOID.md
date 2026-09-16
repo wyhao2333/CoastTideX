@@ -1,4 +1,4 @@
-# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.5 Alpha)
+# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.6)
 
 本目录包含 CoastTideX 系统用于高精度潮位垂直基准转换的核心空间栅格数据与大地测量学定义。
 

@@ -396,7 +396,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX v1.5 Alpha - 全球海岸带潮位模拟与高程基准转换系统")
+        self.setWindowTitle("CoastTideX v1.6 - 全球海岸带潮位模拟与高程基准转换系统")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -463,7 +463,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.4")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.6")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -833,6 +833,7 @@ class MainWindow(QMainWindow):
         self.combo_raster_mode = QComboBox()
         self.combo_raster_mode.addItem("🌊 单时刻空间潮位 / 水面高程 (Snapshot Raster Mode)", "snapshot")
         self.combo_raster_mode.addItem("📊 潜在天文潮淹没频率 (Annual / Period Inundation Frequency)", "inundation")
+        self.combo_raster_mode.addItem("⏳ 潜在天文潮露出时间域分析 (Exposure Duration & Events)", "exposure")
         self.combo_raster_mode.currentIndexChanged.connect(self._on_raster_mode_changed)
         layout_mode.addWidget(self.combo_raster_mode, 0, 1)
 
@@ -1802,9 +1803,9 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.5 Alpha</h3>"
+            "<h3>CoastTideX v1.6</h3>"
             "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (Functional Prototype)</b></p>"
-            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
+            "<p>致力于为海洋工程、海岸带遥感、大地测量与潮滩生态演变建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
             "<li><b>四大多元基准体系</b>: "
@@ -1816,19 +1817,20 @@ class MainWindow(QMainWindow):
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>v1.4 空间栅格解算引擎</b>: "
+            "<li><b>v1.6 潜在天文潮露出时间域分析引擎</b>: "
             "<ul>"
-            "<li>支持 GeoTIFF 空间单时刻潮位计算与高分辨率 DEM 潜在天文潮淹没频率解算；</li>"
-            "<li>自适应潮位控制网格与经验互补分布 (CCDF)，流式分块 I/O 内存安全保护。</li>"
+            "<li>固定代表性地形条件下的潜在天文潮露出时长 (Exposure Duration)、最长连续露出、平均事件时长、发生频次与有效时间覆盖率等 7 大独立 GeoTIFF 空间栅格产物；</li>"
+            "<li>高精度时间跨界线性插值 (Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
+            "<li>全系统严格遵循半开区间 [start, end) 时间采样语义，彻底消除末端双重统计。</li>"
             "</ul></li>"
-            "<li><b>v1.5 Alpha 批量潮间带栅格引擎与 Tide Cache</b>: "
+            "<li><b>批量潮间带栅格引擎与 Tide Cache (Schema 1.2)</b>: "
             "<ul>"
             "<li>文件夹级自动化发现与轻量扫描，单瓦片顺序推进 (max_parallel_tiles = 1)；</li>"
-            "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率；</li>"
-            "<li>任务清单 (Manifest) 管理、单瓦片失败隔离与防篡改断点恢复。</li>"
+            "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率与潜在露出时长；</li>"
+            "<li>全要素规范兼容性签名 (SHA-256)、单瓦片失败隔离与防篡改断点恢复。</li>"
             "</ul></li>"
             "</ul>"
-            "<p>作者 / 开发者：Wang Yuhao | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
+            "<p>作者 / 开发者：<b>王宇浩</b> (Yuhao Wang) | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)
 
@@ -1997,6 +1999,9 @@ class MainWindow(QMainWindow):
         self.cmb_batch_job_mode.addItem("1. 完整流程: Tide Cache + 潜在淹没频率 (默认)", "tide-inundation")
         self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (生成 *_tide.nc)", "tide")
         self.cmb_batch_job_mode.addItem("3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)", "inundation-from-cache")
+        self.cmb_batch_job_mode.addItem("4. 完整流程: Tide Cache + 潜在露出分析 (tide-exposure)", "tide-exposure")
+        self.cmb_batch_job_mode.addItem("5. 基于已有 Tide Cache 解算潜在露出 (零 FES 开销)", "exposure-from-cache")
+        self.cmb_batch_job_mode.addItem("6. 全要素产物包 (Tide Cache + 淹没频率 + 潜在露出)", "all")
         self.cmb_batch_job_mode.currentIndexChanged.connect(self._on_batch_job_mode_changed)
         h_jm.addWidget(self.cmb_batch_job_mode)
         vbox_job.addLayout(h_jm)

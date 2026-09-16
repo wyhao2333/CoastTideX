@@ -32,8 +32,8 @@ from .raster_engine import (
 )
 from .utils import compute_inundation_frequency
 
-COASTTIDEX_VERSION = "1.5-alpha"
-CACHE_SCHEMA_VERSION = "1.1"
+COASTTIDEX_VERSION = "1.6"
+CACHE_SCHEMA_VERSION = "1.2"
 CACHE_SIGNATURE_ALGORITHM = "sha256"
 
 
@@ -311,6 +311,9 @@ def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
         is_complete = str(attrs.get("CACHE_COMPLETE", "false")).lower() == "true"
         signature = str(attrs.get("CACHE_SIGNATURE", ""))
 
+        has_term = ("tide_msl_terminal_m" in ds.variables) or (str(attrs.get("HAS_TERMINAL_TIDE", "false")).lower() == "true")
+        schema_v = str(attrs.get("CACHE_SCHEMA_VERSION", "1.1"))
+
         return {
             "metadata": attrs,
             "num_nodes": num_nodes,
@@ -318,7 +321,9 @@ def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
             "time_samples": time_samples,
             "is_complete": is_complete,
             "signature": signature,
-            "cache_path": str(cache_path)
+            "cache_path": str(cache_path),
+            "has_terminal_tide": has_term,
+            "schema_version": schema_v
         }
 
 
@@ -541,7 +546,8 @@ def write_tide_cache(
     time_index: pd.DatetimeIndex,
     metadata: Dict[str, Any],
     allow_overwrite: bool = True,
-    cancel_event = None
+    cancel_event = None,
+    tide_msl_terminal: Optional[np.ndarray] = None
 ) -> str:
     """
     将自适应控制网格及其节点潮位时序原子级写入 NetCDF4 Tide Cache (*_tide.nc)。
@@ -706,6 +712,15 @@ def write_tide_cache(
                 else:
                     var_tide[i, :] = np.full(num_times, np.nan, dtype=np.float32)
 
+            if tide_msl_terminal is not None:
+                var_term = ds.createVariable("tide_msl_terminal_m", "f4", ("node",), zlib=True)
+                var_term.units = "meters"
+                var_term.long_name = "raw astronomical tide relative to MSL at end time"
+                var_term[:] = np.asarray(tide_msl_terminal, dtype=np.float32)
+                ds.setncattr("HAS_TERMINAL_TIDE", "true")
+            else:
+                ds.setncattr("HAS_TERMINAL_TIDE", "false")
+
             var_cell_bounds = ds.createVariable("cell_bounds", "f8", ("cell", "bounds_dim"), zlib=True)
             var_cell_nodes = ds.createVariable("cell_node_indices", "i4", ("cell", "corners_dim"), zlib=True)
             var_cell_lvl = ds.createVariable("cell_level", "i2", ("cell",), zlib=True)
@@ -757,7 +772,7 @@ def write_tide_cache(
         raise
 
 
-def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size: Optional[int] = None) -> Dict[str, Any]:
+def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size: Optional[int] = None, load_raw_tide: bool = False) -> Dict[str, Any]:
     """
     读取 Tide Cache NetCDF 文件并重建自适应控制节点与叶单元拓扑。
     采用按节点分块流式读取 (Node-chunk reading) 策略，严禁一次性加载完整 tide_msl_m 矩阵。
@@ -821,8 +836,11 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
                     static_offset_m=off_m,
                     component_id=int(comp_id[i]),
                     qc_bitmask=int(node_qc[i]),
-                    qc_code=int(node_qc[i])
+                    qc_code=int(node_qc[i]),
+                    tide_msl_raw=raw_t if (is_valid and load_raw_tide) else None
                 )
+                if is_valid and load_raw_tide:
+                    node.water_levels_msl = raw_t
                 nodes.append(node)
 
             del chunk_tide_raw
@@ -864,6 +882,10 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
         time_epochs = ds.variables["time"][:]
         time_index = pd.to_datetime(time_epochs, unit="s", utc=True)
 
+        terminal_tide = None
+        if "tide_msl_terminal_m" in ds.variables:
+            terminal_tide = np.array(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32)
+
         return {
             "metadata": attrs,
             "nodes": nodes,
@@ -871,7 +893,8 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
             "time_index": time_index,
             "num_nodes": num_nodes,
             "num_cells": num_cells,
-            "time_samples": len(time_epochs)
+            "time_samples": len(time_epochs),
+            "terminal_tide": terminal_tide
         }
 
 
@@ -994,3 +1017,121 @@ def calculate_inundation_from_tide_cache(
         progress_callback(100, f"Stage 2 淹没频率解算完毕 (耗时 {time.time() - t_start:.2f}s)！")
 
     return summary
+
+
+def calculate_exposure_from_tide_cache(
+    dem_path: str,
+    cache_path: str,
+    output_dir: Optional[str] = None,
+    output_paths = None,
+    base_name: Optional[str] = None,
+    block_size: int = 512,
+    time_chunk_size: int = 1000,
+    allow_overwrite: bool = True,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_event = None
+) -> Dict[str, Any]:
+    """
+    基于预先生成的 Tide Cache (*_tide.nc, Schema 1.2) 与输入 DEM 解算潜在天文潮露出时间域栅格产品 (零 FES 重复调用)。
+    生成 7 大独立 GeoTIFF 科学产品。
+    """
+    t_start = time.time()
+    if cancel_event is not None and cancel_event.is_set():
+        raise RasterCalculationCancelled("用户取消了潜在露出栅格解算。")
+
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
+    if not os.path.exists(dem_path):
+        raise FileNotFoundError(f"未找到指定的输入 DEM 文件: {dem_path}")
+
+    from .raster_engine import RasterTideEngine
+    engine = RasterTideEngine()
+    info = engine.inspect_raster(dem_path, compute_valid_count=True)
+
+    expected_spec = {
+        "width": info.width,
+        "height": info.height,
+        "crs": info.crs,
+        "transform": info.transform,
+        "bounds": info.bounds,
+        "nodata": info.nodata
+    }
+
+    compatible, reasons = validate_tide_cache_compatibility(cache_path, expected_spec)
+    if not compatible:
+        raise TideCacheCompatibilityError(
+            f"Tide Cache 与目标 DEM 不兼容，无法执行露出分析解算: {'; '.join(reasons)}"
+        )
+
+    if progress_callback:
+        progress_callback(5, "Tide Cache 兼容性通过，正在加载控制网格与时序...")
+
+    cache_data = read_tide_cache(cache_path, load_raw_tide=True)
+    leaf_cells: List[QuadCell] = cache_data["leaf_cells"]
+    nodes: List[ControlNode] = cache_data["nodes"]
+    meta: Dict[str, Any] = cache_data["metadata"]
+    time_idx: pd.DatetimeIndex = cache_data["time_index"]
+    terminal_tide: Optional[np.ndarray] = cache_data.get("terminal_tide")
+
+    # 准备产物路径
+    from .exposure_engine import ExposureProductPaths, stream_exposure_metrics_interpolation
+    if output_paths is None:
+        if output_dir is None:
+            output_dir = os.path.dirname(os.path.abspath(cache_path))
+        os.makedirs(output_dir, exist_ok=True)
+        if base_name is None:
+            raw_base = os.path.splitext(os.path.basename(dem_path))[0]
+            if raw_base.endswith("_tide"):
+                raw_base = raw_base[:-5]
+            base_name = raw_base
+
+        output_paths = ExposureProductPaths(
+            exposure_fraction_path=os.path.join(output_dir, f"{base_name}_exposure_fraction.tif"),
+            exposure_duration_h_path=os.path.join(output_dir, f"{base_name}_exposure_duration_h.tif"),
+            exposure_max_continuous_h_path=os.path.join(output_dir, f"{base_name}_exposure_max_continuous_h.tif"),
+            exposure_mean_event_h_path=os.path.join(output_dir, f"{base_name}_exposure_mean_event_h.tif"),
+            exposure_event_count_path=os.path.join(output_dir, f"{base_name}_exposure_event_count.tif"),
+            exposure_valid_time_fraction_path=os.path.join(output_dir, f"{base_name}_exposure_valid_time_fraction.tif"),
+            exposure_qc_path=os.path.join(output_dir, f"{base_name}_exposure_qc.tif"),
+        )
+
+    # 检查输出文件冲突
+    if not allow_overwrite:
+        for p in [
+            output_paths.exposure_fraction_path,
+            output_paths.exposure_duration_h_path,
+            output_paths.exposure_max_continuous_h_path,
+            output_paths.exposure_mean_event_h_path,
+            output_paths.exposure_event_count_path,
+            output_paths.exposure_valid_time_fraction_path,
+            output_paths.exposure_qc_path
+        ]:
+            if os.path.exists(p):
+                raise ExistingOutputError(f"目标输出产物已存在且不允许覆盖: {p}")
+
+    # 计算终端时刻时间戳 (秒)
+    term_ts_sec = None
+    if terminal_tide is not None:
+        end_t_str = str(meta.get("TIME_END", ""))
+        if end_t_str:
+            term_ts_sec = float(pd.Timestamp(end_t_str).timestamp())
+
+    def _exp_prog(pct_val, msg_val):
+        if progress_callback:
+            progress_callback(10 + int(pct_val * 0.9), msg_val)
+
+    res = stream_exposure_metrics_interpolation(
+        dem_path=dem_path,
+        output_paths=output_paths,
+        cells=leaf_cells,
+        nodes=nodes,
+        time_series_utc=np.asarray(time_idx),
+        target_datum=str(meta.get("DEM_DATUM", "egm2008")),
+        time_chunk_size=time_chunk_size,
+        block_size=block_size,
+        terminal_node_tides=terminal_tide,
+        terminal_timestamp_sec=term_ts_sec,
+        progress_callback=_exp_prog,
+        cancel_event=cancel_event
+    )
+    return res

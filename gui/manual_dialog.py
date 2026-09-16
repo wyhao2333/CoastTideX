@@ -35,7 +35,7 @@ MANUAL_HTML = """
 </head>
 <body>
 
-<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.5 Alpha)</h1>
+<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.6)</h1>
 
 <div class="callout-info">
 <b>CoastTideX</b> 是专为海洋工程、海岸带遥感、大地测量基准统一与水下水文模拟研发的高精度潮位解算与垂直基准转换桌面系统。
@@ -118,9 +118,9 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
 </ul>
 
 
-<h2>四、 批量潮间带栅格解算与持久化 Tide Cache (v1.5 Alpha 新增)</h2>
+<h2>四、 批量潮间带栅格解算与持久化 Tide Cache (v1.6 新增)</h2>
 <p>
-针对狭长沙滩、沿海潮滩与潮间带的高分辨率 (10m/30m) DEM 批量处理需求，CoastTideX v1.5 Alpha 引入了<b>批量潮间带栅格引擎 (BatchRasterEngine)</b> 与<b>持久化 NetCDF Tide Cache</b>：
+针对狭长沙滩、沿海潮滩与潮间带的高分辨率 (10m/30m) DEM 批量处理需求，CoastTideX v1.6 引入了<b>批量潮间带栅格引擎 (BatchRasterEngine)</b> 与<b>持久化 NetCDF Tide Cache</b>：
 </p>
 <ul>
     <li><b>高分辨率地形与平缓潮位场解耦机制</b>：
@@ -149,7 +149,7 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
         批量运行中单个瓦片若遇到损坏、非法投影或读取异常，系统自动捕获并在 <code>batch_manifest.json</code> 与 CSV 清单中标记 <code>FAILED</code>，严密隔离故障并立即继续执行后续瓦片，杜绝整批任务因单个异常文件半途废弃。
     </li>
     <li><b>FES2022b 本地数据包与近岸外推边界</b>：
-        经本地完整数据包审查 (<code>docs/FES2022B_LOCAL_AUDIT_V1_5.md</code>)，FES2022b 外推分潮数据为压缩 <code>.nc.xz</code> 格式，且掩膜具有四分类物理含义。v1.5 Alpha 阶段近岸外推回退机制保持<b>禁用与未集成</b>状态，原生 FES 具备完整的有效控制网格拓扑支撑。
+        经本地完整数据包审查 (<code>docs/FES2022B_LOCAL_AUDIT_V1_5.md</code>)，FES2022b 外推分潮数据为压缩 <code>.nc.xz</code> 格式，且掩膜具有四分类物理含义。v1.6 阶段近岸外推回退机制保持<b>禁用与未集成</b>状态，原生 FES 具备完整的有效控制网格拓扑支撑。
     </li>
 </ul>
 
@@ -192,7 +192,7 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
     <li>解算完成后弹出结果摘要卡片，包含有效像元数、极值统计与耗时统计。</li>
 </ol>
 
-<h3>4. 批量潮间带栅格解算 (v1.5 Alpha 新增)</h3>
+<h3>4. 批量潮间带栅格解算 (v1.6 新增)</h3>
 <ol>
     <li>切换至“批量潮间带栅格解算”选项卡；</li>
     <li>选择包含待解算沙滩/潮滩 DEM 的输入文件夹（系统自动快速扫描并展示文件列表）；</li>
@@ -205,7 +205,7 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
 
 
 <h2>七、 版本重要更新日志 (Changelog)</h2>
-<h3>v1.5 Alpha (2026-09)</h3>
+<h3>v1.6 (2026-09)</h3>
 <ul>
     <li><b>[新增] 批量潮间带栅格解算引擎 (BatchRasterEngine)</b>：支持文件夹级全自动化扫描、过滤与确定性排序，以单瓦片顺序推进 (max_parallel_tiles = 1) 模式执行高分辨率沙滩/潮滩 DEM 批量解算；</li>
     <li><b>[新增] 持久化 NetCDF4 Tide Cache (*_tide.nc)</b>：实现 Stage 1 (Tide Cache) 与 Stage 2 (Inundation Frequency) 严格二阶段分离，Stage 2 解算硬性保证零 FES 调用；</li>
@@ -239,7 +239,55 @@ CoastTideX v1.4 正式引入空间栅格潮位引擎验证版本 (<code>RasterTi
     <li><b>[泛化] Delta N 栅格生成工具强化</b>：泛化支持任意参考与目标大地水准面差值计算，增加空间一致性校验与有效格网点检查。</li>
 </ul>
 
-<h2>八、 科学引用与致谢</h2>
+<h2>八、 潮滩/沙滩潜在天文潮露出时间域分析 (v1.6 Exposure Engine)</h2>
+<p>
+CoastTideX v1.6 全新引入了面向海岸带潮滩、沙滩生态与遥感潮汐校正的时间域连续分析引擎。
+</p>
+<div class="callout-warn">
+<b>科学严谨性声明 / Terminology Boundary:</b><br>
+本产品严格命名为<b>“固定代表性地形条件下的潜在天文潮露出时长” (Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain)</b>。<br>
+本引擎基于代表性地形高程 z 与纯天文潮位序列 H(t) 进行严密几何跨界求交与事件积分。
+<b>严禁混淆为“沙滩干燥时长 (Beach Drying Time)”或“二维浅水动力学退水过程 (2D Hydrodynamic Flooding/Drying)”</b>，因为实际沙滩干燥与退水滞后受沉积物孔隙渗流、波浪爬高增水、地下水位与气象风暴潮多物理场耦合制约。
+</div>
+
+<h3>1. 科学状态判定与严格边界条件</h3>
+<ul>
+    <li><b>淹没状态 (Inundated):</b> <code>H(t) > z</code></li>
+    <li><b>露出状态 (Exposed):</b> <code>H(t) &le; z</code></li>
+    <li><b>等高边界归属:</b> 当瞬时潮位恰好等于地形高程 (<code>H(t) == z</code>) 时，严格归属于<b>露出状态 (Exposed)</b>，杜绝边界歧义。</li>
+</ul>
+
+<h3>2. 7 大独立空间栅格产品体系</h3>
+<table>
+    <tr><th>产品后缀</th><th>数据类型</th><th>物理单位</th><th>科学含义</th></tr>
+    <tr><td><code>*_exposure_fraction.tif</code></td><td>Float32</td><td>%</td><td>累计露出时间比例 (相对时段内有效时间)</td></tr>
+    <tr><td><code>*_exposure_duration_h.tif</code></td><td>Float32</td><td>hours</td><td>累计有效潜在露出时长 (小时)</td></tr>
+    <tr><td><code>*_exposure_max_continuous_h.tif</code></td><td>Float32</td><td>hours</td><td>单次最长连续潜在露出时长 (小时)</td></tr>
+    <tr><td><code>*_exposure_mean_event_h.tif</code></td><td>Float32</td><td>hours</td><td>平均单次露出事件时长 (小时)</td></tr>
+    <tr><td><code>*_exposure_event_count.tif</code></td><td>UInt32</td><td>次 (count)</td><td>露出事件完整发生频次</td></tr>
+    <tr><td><code>*_exposure_valid_time_fraction.tif</code></td><td>Float32</td><td>%</td><td>有效时序数据覆盖比例 (%)</td></tr>
+    <tr><td><code>*_exposure_qc.tif</code></td><td>UInt16</td><td>bitmask</td><td>露出分析质量控制位掩膜 (0=最优)</td></tr>
+</table>
+
+<h3>3. 时间采样语义统一与半开区间 [start, end)</h3>
+<p>
+CoastTideX 全系统科学产品全面统一时间采样语义为严格<b>半开区间 <code>[start, end)</code> (inclusive="left")</b>。
+在整年预测 (如 2024-01-01 至 2025-01-01) 下，步长 30min 严格生成 17,568 个等权重样本点，消除跨年重复统计。
+同时，Tide Cache 升级至 <b>Schema 1.2</b>，引入终端采样 <code>tide_msl_terminal_m</code> (对应 <code>t_end</code>)，支撑末端区间的无截断高精度线性跨界插值。
+</p>
+
+<h2>九、 外部科学数据依赖关系指引</h2>
+<table>
+    <tr><th>数据名称</th><th>相对路径</th><th>存储属性</th><th>用途说明</th></tr>
+    <tr><td><b>EGM2008 2.5' 大地水准面</b></td><td><code>data/geoid/us_nga_egm08_25.tif</code></td><td><span style="color:#10b981;">仓储自带 (Bundled)</span></td><td>全球 WGS84 椭球高与 EGM2008 正高严密转换网格</td></tr>
+    <tr><td><b>ΔN (GOCO06s - EGM2008)</b></td><td><code>data/geoid/delta_n_goco06s_minus_egm2008.tif</code></td><td><span style="color:#10b981;">仓储自带 (Bundled)</span></td><td>全球大洋大尺度重力场水准面改正栅格</td></tr>
+    <tr><td><b>FES2022b 非结构网格</b></td><td><code>fes2022b/ocean_tide_non_structured/...</code></td><td><span style="color:#f59e0b;">外部必须 (Mandatory)</span></td><td>LGP2 原生非结构网格，提供最高精度潮位调和常数</td></tr>
+    <tr><td><b>CNES-CLS22 MDT</b></td><td><code>mdt_cls22/...</code></td><td><span style="color:#f59e0b;">外部必须 (Mandatory)</span></td><td>全球平均动态地形，连接 MSL 与大地水准面基准</td></tr>
+    <tr><td><b>ΔN (EIGEN-6C4 - EGM2008)</b></td><td><code>data/geoid/delta_n_eigen6c4_minus_egm2008.tif</code></td><td><span style="color:#38bdf8;">预处理重现 (Ignored)</span></td><td>地中海与黑海专用改正，可由预处理脚本自动生成</td></tr>
+    <tr><td><b>Hybrid MDT 来源掩膜</b></td><td><code>config.yaml -> paths.hybrid_mdt_source_mask</code></td><td><span style="color:#94a3b8;">外部可选 (Optional)</span></td><td>留空时系统启用多边形地理边界自动判定并输出 QC 预警</td></tr>
+</table>
+
+<h2>十、 科学引用与致谢</h2>
 <ul>
     <li><b>FES2022b:</b> CNES, LEGOS, NOVELTIS & CLS (DOI: 10.24400/527896/a01-2024.004)</li>
     <li><b>CNES-CLS22 MDT:</b> CLS & CNES (DOI: 10.24400/527896/a01-2023.003)</li>

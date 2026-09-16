@@ -1,5 +1,5 @@
 # CoastTideX 配置文件
-# 全球海岸带潮位模拟与高程基准转换系统 v1.5 Alpha
+# 全球海岸带潮位模拟与高程基准转换系统 v1.6
 
 # 数据路径配置 (支持绝对路径或相对项目根目录路径)
 paths:
@@ -89,4 +89,9 @@ gui:
   default_lat: 31.0
   default_location_name: "长江口 (Changjiang Estuary)"
 
-
+# 潜在天文潮露出时间域分析配置 (Exposure Engine v1.6)
+exposure:
+  # 时间维分块流式累加批次步数 (解耦像元数与时步数)
+  time_chunk_size: 1000
+  # 统一严格遵循半开区间 [start, end)
+  strict_half_open: true
