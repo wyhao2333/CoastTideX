@@ -24,7 +24,7 @@ except ImportError:
     FESTidePredictor = None
     HAS_PYFES = False
 
-__version__ = "1.5.0-alpha"
+__version__ = "1.6.0-beta"
 
 __all__ = [
     '__version__',

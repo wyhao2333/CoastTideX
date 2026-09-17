@@ -1,5 +1,5 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface v1.4)
+CoastTideX 命令行工具 (Command-Line Interface v1.6)
 用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算与淹没频率分析。
 
 使用示例:
@@ -44,7 +44,7 @@ from core.utils import export_dataframe
 
 
 def main(args_list: Optional[List[str]] = None):
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.4")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.6")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
 
@@ -81,7 +81,7 @@ def main(args_list: Optional[List[str]] = None):
 
     # 3.1 栅格单时刻快照
     p_snap = raster_subparsers.add_parser("snapshot", help="单时刻空间潮位 / 水面高程 GeoTIFF 解算")
-    p_snap.add_argument("--input", "-i", type=str, required=True, help="输入 GeoTIFF 路径")
+    p_snap.add_argument("--input", "-i", "--dem", type=str, required=True, help="输入 GeoTIFF / DEM 路径")
     p_snap.add_argument("--output", "-o", type=str, required=True, help="输出 GeoTIFF 路径")
     p_snap.add_argument("--time", type=str, required=True, help="解算时刻 (如 '2024-06-15 12:00:00')")
     p_snap.add_argument("--datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="目标垂直基准 (默认: egm2008)")
@@ -134,7 +134,7 @@ def main(args_list: Optional[List[str]] = None):
     p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.5)")
     p_batch_raster.add_argument("--input-folder", "-i", type=str, required=True, help="输入 GeoTIFF 文件夹路径")
     p_batch_raster.add_argument("--output-folder", "-o", type=str, default=None, help="输出文件夹路径 (默认: <input_folder>/CoastTideX_output)")
-    p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache", "tide-exposure", "exposure-from-cache", "exposure", "all"], help="解算模式 (默认: tide-inundation)")
+    p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache", "tide-exposure", "exposure-from-cache", "all"], help="解算模式 (默认: tide-inundation)")
     p_batch_raster.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
     p_batch_raster.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_batch_raster.add_argument("--end", type=str, default=None, help="自定义结束时间")

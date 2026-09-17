@@ -1728,18 +1728,40 @@ class RasterTideEngine:
                     all_nodes_list = list(node_cache.values())
                     all_lons = np.array([n.lon for n in all_nodes_list], dtype=float)
                     all_lats = np.array([n.lat for n in all_nodes_list], dtype=float)
-                    t_mat, _, _ = predictor.predict_points_period(
-                        lons=all_lons,
-                        lats=all_lats,
-                        start_time=t_end_str,
-                        end_time=t_end_str,
-                        freq=freq,
-                        inclusive="both",
-                        constituents=constituents,
-                        source_tz=source_tz,
-                        max_fes_evaluate_points=self.max_fes_evaluate_points
-                    )
-                    terminal_tides = t_mat[:, 0].astype(np.float32)
+                    if hasattr(predictor, "predict_points_at_time"):
+                        t_vals, _ = predictor.predict_points_at_time(
+                            lons=all_lons,
+                            lats=all_lats,
+                            timestamp=t_end_str,
+                            constituents=constituents,
+                            source_tz=source_tz
+                        )
+                        terminal_tides = t_vals.astype(np.float32)
+                    elif hasattr(predictor, "predict_spatial_snapshot"):
+                        t_vals, _ = predictor.predict_spatial_snapshot(
+                            lons=all_lons,
+                            lats=all_lats,
+                            timestamp=t_end_str,
+                            constituents=constituents,
+                            source_tz=source_tz
+                        )
+                        terminal_tides = t_vals.astype(np.float32)
+                    else:
+                        # 兼容旧版 mock predictor: 使用严格半开区间 [t_end, t_end + freq) 取第 0 点 (t_end 处真实水位)
+                        dt_offset = pd.to_timedelta(pd.tseries.frequencies.to_offset(freq).nanos, unit='ns')
+                        t_end_next = (pd.Timestamp(t_end_str) + dt_offset).isoformat()
+                        t_mat, _, _ = predictor.predict_points_period(
+                            lons=all_lons,
+                            lats=all_lats,
+                            start_time=t_end_str,
+                            end_time=t_end_next,
+                            freq=freq,
+                            inclusive="left",
+                            constituents=constituents,
+                            source_tz=source_tz,
+                            max_fes_evaluate_points=self.max_fes_evaluate_points
+                        )
+                        terminal_tides = t_mat[:, 0].astype(np.float32)
             except Exception as e:
                 warnings.warn(f"无法预计算终端时刻潮位采样: {e}")
 

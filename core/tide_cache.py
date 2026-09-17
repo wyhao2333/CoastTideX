@@ -111,6 +111,7 @@ def generate_tide_cache_signature(
     fes_source_type: str = "native_lgp2",
     topology_max_resolution_m: float = 100.0,
     topology_valid_fraction_threshold: float = 0.5,
+    schema_version: str = CACHE_SCHEMA_VERSION,
     source_width: Optional[int] = None,
     source_height: Optional[int] = None,
     source_crs: Optional[str] = None,
@@ -193,7 +194,7 @@ def generate_tide_cache_signature(
             "topology_valid_fraction_threshold": round(float(topology_valid_fraction_threshold), 4)
         },
         "cache": {
-            "schema_version": CACHE_SCHEMA_VERSION,
+            "schema_version": str(schema_version),
             "signature_algorithm": CACHE_SIGNATURE_ALGORITHM
         }
     }
@@ -494,6 +495,7 @@ def validate_tide_cache_compatibility(
 
     # 8. 签名自校验与篡改防御 (Tamper-evidence Verification)
     stored_sig = str(attrs.get("CACHE_SIGNATURE", "")).strip()
+    cache_schema = str(attrs.get("CACHE_SCHEMA_VERSION", attrs.get("schema_version", "1.1"))).strip()
     if stored_sig:
         try:
             expected_c_sig, _ = generate_tide_cache_signature(
@@ -522,7 +524,8 @@ def validate_tide_cache_compatibility(
                 min_control_spacing_m=float(attrs.get("MIN_CONTROL_SPACING_M", 500.0)),
                 inundation_error_tolerance_pct=float(attrs.get("ERROR_TOLERANCE_PCT", 1.0)),
                 topology_max_resolution_m=float(attrs.get("TOPOLOGY_RESOLUTION_M", 100.0)),
-                topology_valid_fraction_threshold=float(attrs.get("TOPOLOGY_VALID_FRACTION_THRESHOLD", 0.5))
+                topology_valid_fraction_threshold=float(attrs.get("TOPOLOGY_VALID_FRACTION_THRESHOLD", 0.5)),
+                schema_version=cache_schema
             )
             if stored_sig != expected_c_sig:
                 reasons.append(f"Tide Cache 元数据已被篡改或损坏 (签名不一致: {stored_sig[:12]}... != {expected_c_sig[:12]}...)")
@@ -533,7 +536,43 @@ def validate_tide_cache_compatibility(
         exp_sig = str(expected_spec["signature"]).strip()
         c_sig = info["signature"].strip()
         if exp_sig and c_sig and exp_sig != c_sig:
-            reasons.append(f"全要素规范签名不匹配: Cache 为 '{c_sig[:16]}...'，当前规格为 '{exp_sig[:16]}...'")
+            # 向下兼容验证: 若 Cache 为 Schema 1.1，基于 1.1 重构规范签名进行对比
+            is_valid_backward = False
+            if cache_schema == "1.1":
+                try:
+                    exp_sig_11, _ = generate_tide_cache_signature(
+                        source_width=int(expected_spec.get("width", 0)),
+                        source_height=int(expected_spec.get("height", 0)),
+                        source_crs=str(expected_spec.get("crs", "")),
+                        source_transform=expected_spec.get("transform", []),
+                        source_bounds=expected_spec.get("bounds", []),
+                        source_nodata=expected_spec.get("nodata"),
+                        source_file_size_bytes=expected_spec.get("file_size_bytes"),
+                        source_mtime_ns=expected_spec.get("mtime_ns"),
+                        start_time=expected_spec.get("start_time", ""),
+                        end_time=expected_spec.get("end_time", ""),
+                        freq=expected_spec.get("freq", ""),
+                        source_tz=expected_spec.get("source_tz", "UTC"),
+                        inclusive=expected_spec.get("inclusive", "left"),
+                        time_samples=int(expected_spec.get("time_samples", 0)),
+                        fes_model=expected_spec.get("fes_model", "FES2022b"),
+                        fes_source_type=expected_spec.get("fes_source_type", "native_lgp2"),
+                        constituents=expected_spec.get("constituents", "all"),
+                        dem_datum=expected_spec.get("dem_datum", "egm2008"),
+                        target_mode=expected_spec.get("target_mode", "intertidal"),
+                        initial_control_spacing_m=float(expected_spec.get("initial_control_spacing_m", 4000.0)),
+                        min_control_spacing_m=float(expected_spec.get("min_control_spacing_m", 500.0)),
+                        inundation_error_tolerance_pct=float(expected_spec.get("inundation_error_tolerance_pct", 1.0)),
+                        topology_max_resolution_m=float(expected_spec.get("topology_max_resolution_m", 100.0)),
+                        topology_valid_fraction_threshold=float(expected_spec.get("topology_valid_fraction_threshold", 0.5)),
+                        schema_version="1.1"
+                    )
+                    if c_sig == exp_sig_11:
+                        is_valid_backward = True
+                except Exception:
+                    pass
+            if not is_valid_backward:
+                reasons.append(f"全要素规范签名不匹配: Cache 为 '{c_sig[:16]}...'，当前规格为 '{exp_sig[:16]}...'")
 
     return len(reasons) == 0, reasons
 
@@ -547,7 +586,8 @@ def write_tide_cache(
     metadata: Dict[str, Any],
     allow_overwrite: bool = True,
     cancel_event = None,
-    tide_msl_terminal: Optional[np.ndarray] = None
+    tide_msl_terminal: Optional[np.ndarray] = None,
+    schema_version: str = CACHE_SCHEMA_VERSION
 ) -> str:
     """
     将自适应控制网格及其节点潮位时序原子级写入 NetCDF4 Tide Cache (*_tide.nc)。
@@ -610,7 +650,8 @@ def write_tide_cache(
         topology_max_resolution_m=top_res,
         topology_valid_fraction_threshold=top_frac,
         source_file_size_bytes=fsize_val,
-        source_mtime_ns=mtime_val
+        source_mtime_ns=mtime_val,
+        schema_version=schema_version
     )
 
     time_epochs = (time_index.astype("int64") // 10**9).to_numpy(dtype=np.float64)
@@ -625,7 +666,7 @@ def write_tide_cache(
             ds.createDimension("corners_dim", 4)
 
             ds.setncattr("COASTTIDEX_VERSION", COASTTIDEX_VERSION)
-            ds.setncattr("CACHE_SCHEMA_VERSION", CACHE_SCHEMA_VERSION)
+            ds.setncattr("CACHE_SCHEMA_VERSION", str(schema_version))
             ds.setncattr("CACHE_SIGNATURE", sig_hex)
             ds.setncattr("CACHE_SIGNATURE_ALGORITHM", CACHE_SIGNATURE_ALGORITHM)
             ds.setncattr("CACHE_SIGNATURE_PAYLOAD", sig_payload)
@@ -1116,9 +1157,30 @@ def calculate_exposure_from_tide_cache(
         if end_t_str:
             term_ts_sec = float(pd.Timestamp(end_t_str).timestamp())
 
+    from .raster_engine import build_support_topology
+    top_res_m = float(meta.get("TOPOLOGY_RESOLUTION_M", 100.0))
+    top_frac = float(meta.get("TOPOLOGY_VALID_FRACTION_THRESHOLD", 0.5))
+
+    labeled_coarse, num_features, downsample_factor, h_coarse, w_coarse, _, input_valid_count = build_support_topology(
+        info=info,
+        topology_max_resolution_m=top_res_m,
+        topology_valid_fraction_threshold=top_frac,
+        block_size=block_size,
+        cancel_event=cancel_event
+    )
+
     def _exp_prog(pct_val, msg_val):
         if progress_callback:
             progress_callback(10 + int(pct_val * 0.9), msg_val)
+
+    meta_tags = {
+        "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
+        "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.2")),
+        "TOPOLOGY_RESOLUTION_M": str(top_res_m),
+        "TOPOLOGY_VALID_FRACTION_THRESHOLD": str(top_frac),
+        "TOPOLOGY_GUARD": "valid_mask_topology_aware",
+        "STAGE": "Stage 2b (Zero FES calls)"
+    }
 
     res = stream_exposure_metrics_interpolation(
         dem_path=dem_path,
@@ -1131,6 +1193,12 @@ def calculate_exposure_from_tide_cache(
         block_size=block_size,
         terminal_node_tides=terminal_tide,
         terminal_timestamp_sec=term_ts_sec,
+        labeled_coarse=labeled_coarse,
+        downsample_factor=downsample_factor,
+        h_coarse=h_coarse,
+        w_coarse=w_coarse,
+        metadata_tags=meta_tags,
+        allow_overwrite=allow_overwrite,
         progress_callback=_exp_prog,
         cancel_event=cancel_event
     )

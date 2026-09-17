@@ -651,17 +651,40 @@ class FESTidePredictor:
             flags = np.zeros(n_pts, dtype=np.int8)
             for cur_bbox in bboxes:
                 in_box = (lons_norm >= cur_bbox[0] - 1e-6) & (lons_norm <= cur_bbox[2] + 1e-6)
-                if np.any(in_box):
-                    cur_model = self._get_model(cur_bbox, const_list)
-                    s_sub, l_sub, f_sub = pyfes.evaluate_tide(
-                        cur_model, times_arr[in_box], lons_norm[in_box], lats_arr[in_box]
-                    )
-                    sp[in_box] = s_sub
-                    lp[in_box] = l_sub
-                    flags[in_box] = f_sub
+                if not np.any(in_box):
+                    continue
+                model = self._get_model(cur_bbox, const_list)
+                sub_sp, sub_lp, sub_flags = pyfes.evaluate_tide(
+                    model, times_arr[in_box], lons_norm[in_box], lats_arr[in_box]
+                )
+                sp[in_box] = sub_sp
+                lp[in_box] = sub_lp
+                flags[in_box] = sub_flags
 
-        tide_total_m = ((sp + lp) / 100.0).astype(np.float32)
-        return tide_total_m, flags
+        tot_m = (sp + lp) / 100.0
+        return tot_m.astype(np.float32), flags.astype(np.int8)
+
+    def predict_points_at_time(
+        self,
+        lons: float | np.ndarray | list,
+        lats: float | np.ndarray | list,
+        timestamp: str | pd.Timestamp,
+        constituents: str | list = None,
+        source_tz: str = 'UTC',
+        buffer_deg: float = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        单时刻多控制点潮位预测标准公共 API (用于终端时刻 H(t_end) 采样与空间单时刻反演)。
+        Single-timestamp multi-point tidal prediction public API.
+        """
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
 
 class SyntheticTidePredictor:
@@ -750,6 +773,24 @@ class SyntheticTidePredictor:
         tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
         flags = np.where(np.isfinite(tide_m), 1, 0).astype(np.int8)
         return tide_m, flags
+
+    def predict_points_at_time(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
     def predict_points_period(
         self,
@@ -925,5 +966,41 @@ class TwoBasinSyntheticPredictor(SyntheticTidePredictor):
         flag_mat = np.where(np.isfinite(tide_mat), 1, 0).astype(np.int8)
         return tide_mat.astype(np.float32), utc_idx, flag_mat
 
+    def predict_spatial_snapshot(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        _, dates_np = convert_time_to_utc(timestamp, source_tz=source_tz)
+        t_sec = dates_np[0].astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
+        flags = np.where(np.isfinite(tide_m), 1, 0).astype(np.int8)
+        return tide_m, flags
+
+    def predict_points_at_time(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
 
+DisconnectedBarrierPredictor = TwoBasinSyntheticPredictor

@@ -180,32 +180,50 @@ class BatchManifest:
         os.replace(tmp_csv, self.csv_path)
 
 
-def _verify_exposure_artifacts(dem_info, exp_paths) -> bool:
-    """验证已有潜在天文潮露出栅格产物的尺寸、坐标系、仿射变换与数据类型完整性"""
-    paths = [
-        exp_paths.exposure_fraction_path,
-        exp_paths.exposure_duration_h_path,
-        exp_paths.exposure_max_continuous_h_path,
-        exp_paths.exposure_mean_event_h_path,
-        exp_paths.exposure_event_count_path,
-        exp_paths.exposure_valid_time_fraction_path,
-        exp_paths.exposure_qc_path
+def _verify_exposure_artifacts(
+    dem_info,
+    exp_paths,
+    expected_cache_sig: Optional[str] = None
+) -> bool:
+    """验证已有潜在天文潮露出栅格全部 7 大产物的尺寸、坐标系、仿射变换、数据类型、NoData 与缓存签名一致性"""
+    product_specs = [
+        (exp_paths.exposure_fraction_path, 'float32', True, None),
+        (exp_paths.exposure_duration_h_path, 'float32', True, None),
+        (exp_paths.exposure_max_continuous_h_path, 'float32', True, None),
+        (exp_paths.exposure_mean_event_h_path, 'float32', True, None),
+        (exp_paths.exposure_event_count_path, 'uint32', False, 4294967295),
+        (exp_paths.exposure_valid_time_fraction_path, 'float32', True, None),
+        (exp_paths.exposure_qc_path, 'uint16', False, 65535)
     ]
-    for p in paths:
+    for p, expected_dtype, is_float, expected_nodata in product_specs:
         if not os.path.exists(p):
             return False
-    try:
-        with rasterio.open(exp_paths.exposure_duration_h_path) as src_dur:
-            if src_dur.width != dem_info.width or src_dur.height != dem_info.height:
-                return False
-            if str(src_dur.crs) != str(dem_info.crs):
-                return False
-        with rasterio.open(exp_paths.exposure_qc_path) as src_qc:
-            if src_qc.dtypes[0] != 'uint16':
-                return False
-        return True
-    except Exception:
-        return False
+        try:
+            with rasterio.open(p) as src:
+                if src.width != dem_info.width or src.height != dem_info.height:
+                    return False
+                if str(src.crs) != str(dem_info.crs):
+                    return False
+                if not np.allclose(src.transform, dem_info.transform, atol=1e-5):
+                    return False
+                if src.dtypes[0] != expected_dtype:
+                    return False
+                if is_float:
+                    if src.nodata is None:
+                        return False
+                    if not (np.isnan(src.nodata) or np.isclose(src.nodata, -9999.0, atol=1e-3)):
+                        return False
+                else:
+                    if src.nodata != expected_nodata:
+                        return False
+                if expected_cache_sig:
+                    tags = src.tags()
+                    sig = tags.get("CACHE_SIGNATURE", "")
+                    if not sig or sig != expected_cache_sig:
+                        return False
+        except Exception:
+            return False
+    return True
 
 
 def _verify_raster_artifacts(
@@ -317,8 +335,6 @@ class BatchRasterEngine:
         results: List[Dict[str, Any]] = []
         for f in candidates:
             rel_path = str(f.relative_to(in_p))
-            size_mb = f.stat().st_size / (1024.0 * 1024.0)
-
             st = f.stat()
             size_bytes = st.st_size
             mtime_ns = st.st_mtime_ns
@@ -408,12 +424,21 @@ class BatchRasterEngine:
             6. 递归同名文件子路径镜像输出 (Subdirectory Path Mirroring)；
             7. 任务取消安全保护: 取消时仅清理当前瓦片的临时文件，已完成瓦片完好无损。
         """
-        # 归一化策略
+        # 归一化策略与任务模式
         policy = normalize_existing_output_policy(
             existing_policy=existing_policy,
             resume=resume,
             overwrite=overwrite
         )
+        # 统一规范化历史别名
+        if job_mode in ("exposure", "tide_exposure", "tide-exposure"):
+            job_mode = JOB_MODE_TIDE_AND_EXPOSURE
+        elif job_mode in ("exposure_duration", "exposure-from-cache", "exposure_from_cache"):
+            job_mode = JOB_MODE_EXPOSURE_FROM_CACHE
+        elif job_mode in ("tide_inundation", "tide-inundation", "inundation"):
+            job_mode = JOB_MODE_TIDE_AND_INUNDATION
+        elif job_mode in ("inundation_from_cache", "inundation-from-cache"):
+            job_mode = JOB_MODE_INUNDATION_FROM_CACHE
 
         in_p = Path(input_folder)
         if not in_p.exists():
@@ -578,7 +603,7 @@ class BatchRasterEngine:
                         conflict_files.append(frequency_path)
                     if os.path.exists(qc_path):
                         conflict_files.append(qc_path)
-                if job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL, "exposure"):
+                if job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL):
                     for ep in [exp_paths.exposure_fraction_path, exp_paths.exposure_duration_h_path, exp_paths.exposure_qc_path]:
                         if os.path.exists(ep):
                             conflict_files.append(ep)
@@ -627,15 +652,15 @@ class BatchRasterEngine:
                         summary_counts["skipped"] += 1
                         continue
 
-                elif job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, "exposure"):
-                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths):
+                elif job_mode == JOB_MODE_TIDE_AND_EXPOSURE:
+                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_EXPOSURE_FROM_CACHE:
-                    if _verify_exposure_artifacts(dem_info, exp_paths):
+                    if _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
@@ -644,7 +669,7 @@ class BatchRasterEngine:
                 elif job_mode == JOB_MODE_ALL:
                     if (cache_ok and
                         _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]) and
-                        _verify_exposure_artifacts(dem_info, exp_paths)):
+                        _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"])):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
                         manifest.save()
                         summary_counts["skipped"] += 1
@@ -769,7 +794,7 @@ class BatchRasterEngine:
                     valid_pixels_cnt = freq_summary.input_valid_pixels
 
                 # ---------------- Stage 2b: Exposure Duration Calculation ----------------
-                need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL, "exposure"])
+                need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL])
                 elapsed_exp = 0.0
                 if need_exp:
                     manifest.upsert(input_path, status=STATUS_EXPOSURE_RUNNING, run_action="EXPOSURE_RUNNING")
