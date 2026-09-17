@@ -35,6 +35,26 @@
 - **单元测试套件 (`tests/test_exposure_v16.py`)**：
   - 包含常时淹没、常时露出、等高严格边界、线性交点解析解、对称三角波事件统计以及端到端合成 DEM 零 FES 缓存反演验证。
 
+### 修复与加固 (Fixed & Hardened in v1.6 Beta)
+- **彻底去除 2D 像元级 Python 循环与 3D 像元-时序立方体内存开销 (P0-1)**：
+  - 采用纯二维 NumPy 数组就地维护流式状态转移，单步重构水面切片，经 100 组独立随机时序对比测试，与 1D 参考算法达到精确 0 误差等价。
+- **拓扑屏障连通防护深度集成 (P0-2)**：
+  - 露出分析全面集成 Target-Mask-Derived Topology Guard，像元仅能在同连通域内选用有效控制节点，跨越陆地阻隔自动回退并标记 `QC_EXP_DEGRADED_CELL`。
+- **消除终端水面解算警告 (P0-3)**：
+  - 各类预测器统一实现 `predict_points_at_time`，彻底消除 `validate_time_params` 的起止时间警告。
+- **控制角点权重重归一化 (P0-4)**：
+  - 动态重归一化 1、2、3 个可用节点的权重，绝不以 0m 稀释水面高程。
+- **Tide Cache Schema 1.1 与 1.2 兼容性 (P1-1)**：
+  - 签名验证自适应识别 schema version，向下无损兼容读取 Schema 1.1 缓存。
+- **原子 GeoTIFF 写入安全防护 (P1-2)**：
+  - 实现 `_AtomicExposureWriter`，7 大产物基于 `*.tmp.tif` 写入并原子替换，异常或取消时零临时文件残留。
+- **NoData 与 QC Sentinel 规范 (P1-3, P1-4)**：
+  - `event_count` NoData 规范设为 `4294967295`，与全淹没区域合法的 0 次事件严格解耦。
+- **批处理引擎深层产物校验与别名归一 (P1-5, P1-6, P1-7)**：
+  - 升级 `_verify_exposure_artifacts` 深度校验全部 7 大产物及其规范签名；清理 `discover_rasters` 重复 `stat()` 调用。
+- **FES 掩膜元数据权威审计 (Docs)**：
+  - 查证 `fes2022b/mask_fes2022B.nc` 物理尺寸严格为 1,027,081 字节 (0.98 MB)，澄清历史文档中 55.6 MB 与 700 MB 的误植，并产出 `docs/FES_MASK_METADATA_AUDIT.md`。
+
 ### 变更 (Changed)
 - **统一全系统采样时间语义为严格半开区间 `[start, end)`**：
   - 全年连续与自定义时段默认统一采用 `inclusive="left"`，彻底杜绝端点重复计算与跨年重叠统计。

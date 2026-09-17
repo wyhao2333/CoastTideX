@@ -1,6 +1,12 @@
 # CoastTideX 全项目完整上下文与系统审计报告
 # Complete Project Context, Architecture, Methodology & Code Change Audit
 
+> [!WARNING]
+> **历史审计归档说明 / Historical Archival Notice**:
+> 本文档为 CoastTideX v1.4 / v1.5 Beta 阶段的历史审计与全景演进归档文档。
+> 文档中记录的部分路径、分支状态、暂定参数与早期临时方案仅供历史追溯与科学审计。
+> 最新系统功能、数据依赖关系与开发规范请以项目根目录下的 `README.md`、`README_EN.md`、`CHANGELOG.md` 及 `docs/DEVELOPMENT_GUIDE.md` 为准。
+
 **文档密级/属性**：内部研发与科学审计文档 (Internal R&D and Scientific Audit Document)  
 **系统名称**：CoastTideX 全球海岸带高精度潮位模拟与高程基准转换系统  
 **当前版本阶段**：**CoastTideX v1.5 Beta (Controlled Real-FES / Real-Intertidal Functional & Scientific Prototype)**  
@@ -8,7 +14,7 @@
 **工作区根目录**：`I:\Test_tide_model`  
 **Git 当前分支**：`test/v1.5-beta-real-fes`  
 **Git 最新提交**：`cab590fac13b6cc04207c1b4b311f039958022d8`  
-**系统架构师 / 作者**：王宇豪 (Wang Yuhao)  
+**系统架构师 / 作者**：王宇浩 (Wang Yuhao)  
 **开源授权协议**：MIT License  
 
 ---
@@ -249,7 +255,7 @@ CoastTideX 系统全貌如下图所示：
 | `03628f4` | 2026-09-14 | wyhao2333 | **feat(v1.5): 硬化 ExistingOutputPolicy 与 Stage 2 缓存一致性**<br>统一输出策略枚举，强化防篡改保护与 Stage 2 零冗余执行。 |
 | `8dac9b5` | 2026-09-14 | wyhao2333 | **feat(v1.5): Round 2 队列 UX、异步扫描与内存硬防护**<br>解决扫描卡死，引入 `ScanSnapshot` 静态队列快照与 Stage 2 分块累加。 |
 | `0867461` | 2026-09-14 | wyhao2333 | **test(v1.5): Mock 静态基准偏移以兼容 CI 纯净环境**<br>确保 `test_v15_hardening_r2.py` 在缺失大文件重力场栅格的 CI 环境下顺利执行。 |
-| `e943967` | 2026-09-14 | wyhao2333 | **fix(v1.5): Round 2.1 掩膜语义澄清、安全收口与帮助手册清理**<br>澄清 FES 掩膜与 MDT 掩膜科学区别，清理无效默认路径，作者姓名更新为中文“王宇豪”。 |
+| `e943967` | 2026-09-14 | wyhao2333 | **fix(v1.5): Round 2.1 掩膜语义澄清、安全收口与帮助手册清理**<br>澄清 FES 掩膜与 MDT 掩膜科学区别，清理无效默认路径，作者姓名更新为中文“王宇浩”。 |
 | `7522857` | 2026-09-15 | wyhao2333 | **fix(v1.5): 恢复 EIGEN Delta-N 规范默认路径与元数据修正**<br>极小范围收口，规整 `config.yaml` 默认路径。 |
 | `919b3f8` | 2026-09-15 | wyhao2333 | **test(v1.5): 构建受控真实 FES 验证工具链与自动化测试**<br>新增 `scripts/validate_v15_beta_real_fes.py` 与 `tests/test_v15_beta_validation_harness.py`。 |
 | `bf6adc5` | 2026-09-15 | wyhao2333 | **docs(v1.5): 输出受控真实 FES 潮间带 Beta 验证报告**<br>记录包含章节 A 至 S 的全面真实验证报告 `docs/V1_5_BETA_REAL_FES_VALIDATION.md`。 |
@@ -490,7 +496,7 @@ CoastTideX 系统全貌如下图所示：
 
 ## 9. 审计签署与元数据确认 (Sign-Off & Verification Metadata)
 
-- **审计执行人**：王宇豪 (Wang Yuhao)
+- **审计执行人**：王宇浩 (Wang Yuhao)
 - **代码库根目录**：`I:\Test_tide_model`
 - **审计基线 Git Commit**：`cab590fac13b6cc04207c1b4b311f039958022d8`
 - **GitHub Actions 最新 CI 运行**：Run ID `34888969929` (`completed success`)

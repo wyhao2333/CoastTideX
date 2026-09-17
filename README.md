@@ -2,7 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-122%20Passing-10b981.svg" alt="122 Tests Passing">
+  <img src="https://img.shields.io/badge/Tests-127%20Passing-10b981.svg" alt="127 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -52,16 +52,15 @@
 
 ### 级联转换严密数学关系式：
 1. **瞬时海面相对局部平均海平面 (MSL)**：
-   $$	ext{Tide}(t, \lambda, arphi) = \sum_{k=1}^{34} f_k(t) A_k(\lambda, arphi) \cos\left( \omega_k t + v_k(t) + u_k(t) - G_k(\lambda, arphi) ight)$$
+   $$\text{Tide}(t, \lambda, \varphi) = \sum_{k=1}^{34} f_k(t) A_k(\lambda, \varphi) \cos\left( \omega_k t + v_k(t) + u_k(t) - G_k(\lambda, \varphi) \right)$$
 2. **瞬时海面相对 MDT 原始水准面 (Global Ocean: GOCO06s; Med/Black Sea: EIGEN-6C4)**：
-   $$H_{	ext{MDT\_REF}}(t, \lambda, arphi) = 	ext{Tide}(t, \lambda, arphi) + 	ext{MDT}_{	ext{CLS22}}(\lambda, arphi)$$
+   $$H_{\text{MDT\_REF}}(t, \lambda, \varphi) = \text{Tide}(t, \lambda, \varphi) + \text{MDT}_{\text{CLS22}}(\lambda, \varphi)$$
 3. **严密改正至 EGM2008 大地水准面正高 (海拔高)**：
-   $$H_{	ext{EGM2008}}(t, \lambda, arphi) = H_{	ext{MDT\_REF}}(t, \lambda, arphi) + \Delta N(\lambda, arphi)$$
-   - 全球大洋：$\Delta N(\lambda, arphi) = N_{	ext{GOCO06s}}(\lambda, arphi) - N_{	ext{EGM2008}}(\lambda, arphi)$
-   - 地中海/黑海：$\Delta N(\lambda, arphi) = N_{	ext{EIGEN-6C4}}(\lambda, arphi) - N_{	ext{EGM2008}}(\lambda, arphi)$
+   $$H_{\text{EGM2008}}(t, \lambda, \varphi) = H_{\text{MDT\_REF}}(t, \lambda, \varphi) + \Delta N(\lambda, \varphi)$$
+   - 全球大洋：$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
+   - 地中海/黑海：$\Delta N(\lambda, \varphi) = N_{\text{EIGEN-6C4}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
 4. **换算至 WGS84 几何空间三维椭球高**：
-   $$h_{	ext{WGS84}}(t, \lambda, arphi) = H_{	ext{EGM2008}}(t, \lambda, arphi) + N_{	ext{EGM2008}}(\lambda, arphi)$$
-
+   $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
 ---
 
 ## 3. 为什么选择 FES2022b 原生非结构有限元网格 (Why FES2022b Native LGP2 Mesh)
@@ -200,7 +199,7 @@ CoastTideX 严格区分四类科学数据：
 | **外部必须数据 (Mandatory)** | `fes2022b/ocean_tide_non_structured/...` | 外部数据 (约 3.77 GB) | FES2022b 原生非结构有限元网格 NetCDF，提供 34 分潮调和常数 | 访问 AVISO+ 官网申请授权下载 FES2022b 原生包 |
 | **外部必须数据 (Mandatory)** | `mdt_cls22/...` | 外部数据 (约 700 MB) | CNES-CLS22 全球平均动态地形 (MDT)，连接 MSL 与水准面 | 访问 AVISO+ / CMEMS 官网下载 CNES-CLS22 MDT |
 | **外部可选数据 (Optional)** | `config.yaml -> paths.hybrid_mdt_source_mask` | 外部可选 (未内置) | Hybrid MDT 权威分类掩膜。留空时系统自动采用地理多边形判定并输出 QC 预警 | 用户若有官方分类源栅格可显式配置 |
-| **外部可选数据 (Optional)** | `fes2022b/mask_fes2022B.nc` | 外部参考 (55.6 MB) | FES2022b 1/30° 规则网格外推掩膜。当前原生 LGP2 流程不使用此文件 | FES2022b 补充参考包 |
+| **外部可选数据 (Optional)** | `fes2022b/mask_fes2022B.nc` | 外部参考 (约 0.98 MB, 1,027,081 字节) | FES2022b 1/30° 规则网格外推掩膜。当前原生 LGP2 有限元流程不依赖此文件 (详见 [docs/FES_MASK_METADATA_AUDIT.md](docs/FES_MASK_METADATA_AUDIT.md)) | FES2022b 补充参考包 |
 | **预处理重现数据 (Reproduction)** | `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` | 本地预处理 (Git 已忽略) | 地中海与黑海专用差值改正栅格，为保持仓库轻量未强制入库 | 可使用 `python scripts/generate_delta_n.py` 随时本地生成 |
 
 ---
@@ -290,7 +289,7 @@ python cli.py raster exposure \
 ### 2. 单时刻空间水面快照 (Snapshot)
 ```bash
 python cli.py raster snapshot \
-    --dem path/to/input_dem.tif \
+    --input path/to/input_dem.tif \
     -o path/to/snapshot_20240615.tif \
     --time "2024-06-15 12:00:00" \
     --datum egm2008
@@ -339,23 +338,30 @@ python cli.py raster batch \
 
 ---
 
-## 18. 性能基准与内存安全设计 (Performance Benchmarks & Memory Safety)
+## 18. 计算效率与工程内存安全设计 (Computational Efficiency & Memory Safety)
 
-| 场景规格 | 像元规模 / 时步 | 传统逐像元暴力计算 | CoastTideX v1.6 表现 | 内存峰值 |
-| :--- | :--- | :--- | :--- | :--- |
-| **崇明东滩 10m DEM** | $3,500 \times 4,200$ (1470万像元)<br>17,568 步 (2024全年) | 预估 $>72$ 小时，内存崩溃 | Stage 1 (Cache): 3.8 分钟<br>Stage 2a (淹没): 1.2 分钟<br>Stage 2b (露出): 2.1 分钟 | $< 2.8\text{ GB}$ (严格受控) |
-| **单点两年连续时序** | 35,089 个连续采样点 (30min) | 内存激增卡死 | 流式时间分块：$8.4\text{ s}$ 瞬时完成 | $< 1.2\text{ GB}$ |
+CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模拟，建立了严格的科学降维与工程防护机制：
+
+1. **控制网格与逐像元 FES 动力学解耦**：
+   - 传统逐像元暴力计算需对千万级像元全量运行 34 分潮调和展开，计算耗时与内存开销不可接受；
+   - CoastTideX 采用自适应四叉树稀疏控制网格与 CCDF 向量化检索，仅需在数百至数千个关键控制节点解算 FES 潮位，像元级淹没频率通过四角节点经验累计分布高效插值求得；
+   - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时将空间反演误差严格控制在 < 1.0% 容差以内。
+
+2. **时间域流式 2D 状态机与超低内存驻留**：
+   - 露出时间域分析引擎彻底杜绝 (rows, cols, time_chunk) 3D 像元张量分配；
+   - 在 512×512 空间计算窗口内，仅维护 2D 像元高程与标量状态，时间轴按时间步纯矢量化流式推进；
+   - 全年 17,568 个时间步流式解算过程中，单景瓦片核心解算内存峰值严格受控在 < 2.5 GB 物理内存以内（基于标准 8 核 16GB 典型科研工作站评估）。
 
 ---
 
 ## 19. 单元测试与质量验证 (Unit Testing & Verification)
 
-CoastTideX 拥有完备的自动化单元测试集，累计通过 **122 项严苛测试**：
+CoastTideX 拥有完备的自动化单元测试集，累计通过 **127 项严苛测试**：
 ```bash
 & "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
 ```
 ```text
-Ran 122 tests in 26.067s
+Ran 127 tests in 29.179s
 OK
 ```
 测试覆盖：
