@@ -998,7 +998,8 @@ class TestProductionHardeningRound4(_BaseExposureProductionTest):
         mem_cache = estimate_control_node_memory(1000, 1000, dtype_bytes=8)
         self.assertAlmostEqual(mem_cache, mem_inund * 2.0)
 
-        engine = RasterTideEngine(max_in_memory_control_nodes=2)
+        mock_pred = MagicMock()
+        engine = RasterTideEngine(predictor=mock_pred, max_in_memory_control_nodes=2)
         dem_path = self._create_synthetic_dem("dem_mem.tif", 20, 20, val=0.5)
 
         with self.assertRaises(RasterMemoryLimitError) as ctx:
