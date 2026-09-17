@@ -9,7 +9,9 @@ import shutil
 import tempfile
 import unittest
 import inspect
+from unittest.mock import patch, MagicMock
 from datetime import datetime, timezone
+import netCDF4
 
 import numpy as np
 import pandas as pd
@@ -26,6 +28,7 @@ from core.exposure_engine import (
     QC_EXP_DEGRADED_CELL,
     QC_EXP_INSUFFICIENT_NODES,
     QC_EXP_DATUM_APPROX,
+    QC_EXP_TERMINAL_UNAVAILABLE,
     QC_EXP_TERMINAL_APPROX,
     QC_EXP_PARTIAL_VALID_TIME,
     QC_EXP_PERMANENTLY_SUBMERGED,
@@ -35,15 +38,22 @@ from core.exposure_engine import (
     NODATA_FLOAT32,
     NODATA_QC
 )
-from core.raster_engine import ControlNode, QuadCell, RasterInfo, RasterTideEngine
+from core.raster_engine import ControlNode, QuadCell, RasterInfo, RasterTideEngine, build_support_topology
 from core.batch_raster_engine import _verify_exposure_artifacts
 from core.tide_cache import (
     write_tide_cache,
     read_tide_cache,
+    read_tide_cache_structure,
+    TideCacheTimeSeriesReader,
+    TideCacheStructure,
+    TideCacheIntegrityError,
+    TideCacheCompatibilityError,
+    parse_cache_time_to_utc,
     inspect_tide_cache_metadata,
     validate_tide_cache_compatibility,
     calculate_exposure_from_tide_cache,
     build_expected_cache_spec,
+    generate_tide_cache_signature,
     CACHE_SCHEMA_VERSION
 )
 
@@ -363,6 +373,377 @@ class TestBatchArtifactVerificationAndAtomic(unittest.TestCase):
         with rasterio.open(exp_paths.exposure_event_count_path) as src_cnt:
             self.assertEqual(src_cnt.nodata, 4294967295)
             self.assertEqual(src_cnt.dtypes[0], "uint32")
+
+
+
+class _BaseExposureProductionTest(unittest.TestCase):
+    """v1.6 生产环境多维严密测试基类"""
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="exp_prod_v16_")
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _create_synthetic_dem(self, filename="dem.tif", width=20, height=20, val=1.0):
+        path = os.path.join(self.temp_dir, filename)
+        trans = Affine(100.0, 0.0, 500000.0, 0.0, -100.0, 3500000.0)
+        elev = np.full((height, width), val, dtype=np.float32)
+        profile = {
+            "driver": "GTiff", "height": height, "width": width, "count": 1,
+            "dtype": "float32", "crs": "EPSG:32651", "transform": trans, "nodata": -9999.0
+        }
+        with rasterio.open(path, "w", **profile) as dst:
+            dst.write(elev, 1)
+        return path
+
+    def _create_synthetic_cache(self, dem_path, cache_filename="tide.nc", n_times=20, with_terminal=True, schema_ver="1.2"):
+        info = RasterTideEngine().inspect_raster(dem_path, compute_valid_count=True)
+        cache_path = os.path.join(self.temp_dir, cache_filename)
+        dr = pd.date_range("2024-01-01 00:00:00", periods=n_times, freq="30min", tz="UTC")
+
+        nodes_dict = {}
+        for nid, (x, y) in enumerate([
+            (500000.0, 3498000.0),
+            (502000.0, 3498000.0),
+            (500000.0, 3500000.0),
+            (502000.0, 3500000.0)
+        ]):
+            t_series = np.sin(np.linspace(nid * 0.5, nid * 0.5 + 2 * np.pi, n_times)).astype(np.float32) * 2.0
+            nodes_dict[(int(x), int(y))] = ControlNode(
+                node_id=nid, x=x, y=y, lon=122.0 + nid * 0.01, lat=31.0 + nid * 0.01,
+                valid=True, water_levels_sorted=np.sort(t_series), static_offset_m=0.0,
+                tide_msl_raw=t_series, component_id=1
+            )
+
+        cell = QuadCell(
+            cell_id=0, x_min=500000.0, y_min=3498000.0, x_max=502000.0, y_max=3500000.0,
+            level=0,
+            node_a=nodes_dict[(500000, 3498000)],
+            node_b=nodes_dict[(502000, 3498000)],
+            node_c=nodes_dict[(500000, 3500000)],
+            node_d=nodes_dict[(502000, 3500000)]
+        )
+
+        term = np.array([0.5, 0.7, -0.2, 0.1], dtype=np.float32) if with_terminal else None
+        end_time_str = (dr[-1] + pd.Timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+
+        cache_meta = {
+            "start_time": dr[0].strftime("%Y-%m-%d %H:%M:%S"),
+            "end_time": end_time_str,
+            "freq": "30min",
+            "source_tz": "UTC",
+            "inclusive": "left",
+            "constituents": "all",
+            "dem_datum": "egm2008",
+            "initial_control_spacing_m": 4000.0,
+            "min_control_spacing_m": 500.0,
+            "inundation_error_tolerance_pct": 1.0,
+            "target_mode": "intertidal",
+            "topology_max_resolution_m": 100.0,
+            "topology_valid_fraction_threshold": 0.5,
+            "fes_model": "FES2022b",
+            "fes_source_type": "native_lgp2"
+        }
+
+        write_tide_cache(
+            cache_path=cache_path,
+            info=info,
+            leaf_cells=[cell],
+            node_cache=nodes_dict,
+            time_index=dr,
+            metadata=cache_meta,
+            tide_msl_terminal=term,
+            schema_version=schema_ver
+        )
+        return cache_path, info
+
+
+class TestChunkedReaderVsOracle(_BaseExposureProductionTest):
+    """生产场景 1: 分块时序读取器 (time_chunk_size=7) 与全量 Oracle 黄金解算的一致性 (全部 7 大栅格等价)"""
+
+    def test_chunked_reader_vs_oracle(self):
+        dem_path = self._create_synthetic_dem("dem_sc1.tif", 20, 20, val=0.5)
+        cache_path, info = self._create_synthetic_cache(dem_path, "cache_sc1.nc", n_times=20)
+
+        out_dir_chunk = os.path.join(self.temp_dir, "out_chunk")
+        out_dir_oracle = os.path.join(self.temp_dir, "out_oracle")
+
+        res_chunk = calculate_exposure_from_tide_cache(
+            dem_path=dem_path, cache_path=cache_path, output_dir=out_dir_chunk, time_chunk_size=7
+        )
+        res_oracle = calculate_exposure_from_tide_cache(
+            dem_path=dem_path, cache_path=cache_path, output_dir=out_dir_oracle, time_chunk_size=50
+        )
+
+        fields = [
+            "exposure_fraction", "exposure_duration_h", "exposure_max_continuous_h",
+            "exposure_mean_event_h", "exposure_event_count", "exposure_valid_time_fraction", "exposure_qc"
+        ]
+        for f in fields:
+            p_chunk = getattr(res_chunk["products"], f"{f}_path")
+            p_oracle = getattr(res_oracle["products"], f"{f}_path")
+            with rasterio.open(p_chunk) as src_c, rasterio.open(p_oracle) as src_o:
+                arr_c = src_c.read(1)
+                arr_o = src_o.read(1)
+                if f in ["exposure_event_count", "exposure_qc"]:
+                    np.testing.assert_array_equal(arr_c, arr_o, err_msg=f"{f} 栅格未完全相等")
+                else:
+                    np.testing.assert_allclose(arr_c, arr_o, atol=1e-4, err_msg=f"{f} 栅格数值不吻合")
+
+
+class TestTimeChunkLimitAndNoFullLoad(_BaseExposureProductionTest):
+    """生产场景 2: NetCDF 切片长度严格限制在 time_chunk_size 内，且绝不调用 load_raw_tide=True"""
+
+    def test_time_chunk_limit_and_no_full_load(self):
+        dem_path = self._create_synthetic_dem("dem_sc2.tif", 20, 20, val=0.5)
+        cache_path, info = self._create_synthetic_cache(dem_path, "cache_sc2.nc", n_times=25)
+
+        read_slices = []
+        orig_read_chunk = TideCacheTimeSeriesReader.read_chunk
+
+        def spy_read_chunk(reader_self, node_indices, start_idx, end_idx):
+            read_slices.append((len(node_indices), start_idx, end_idx, end_idx - start_idx))
+            return orig_read_chunk(reader_self, node_indices, start_idx, end_idx)
+
+        with patch.object(TideCacheTimeSeriesReader, "read_chunk", new=spy_read_chunk):
+            with patch("core.tide_cache.read_tide_cache") as mock_read_raw:
+                out_dir = os.path.join(self.temp_dir, "out_sc2")
+                calculate_exposure_from_tide_cache(
+                    dem_path=dem_path, cache_path=cache_path, output_dir=out_dir, time_chunk_size=7
+                )
+                mock_read_raw.assert_not_called()
+
+        self.assertTrue(len(read_slices) >= 4, f"期望分块数 >= 4，实际为 {len(read_slices)}")
+        for n_nodes, s, e, span in read_slices:
+            self.assertLessEqual(span, 7, f"切片时间步跨度 {span} 超出 time_chunk_size=7 限制")
+
+
+class TestTopologyBarrierProduction(_BaseExposureProductionTest):
+    """生产场景 3: 双盆地天然山脊/地形屏障隔离，严禁高水位越障渗透"""
+
+    def test_topology_barrier_production(self):
+        dem_path = os.path.join(self.temp_dir, "dem_barrier.tif")
+        trans = Affine(100.0, 0.0, 500000.0, 0.0, -100.0, 3500000.0)
+        elev = np.full((20, 40), 0.5, dtype=np.float32)
+        elev[:, 15:25] = -9999.0
+        profile = {
+            "driver": "GTiff", "height": 20, "width": 40, "count": 1,
+            "dtype": "float32", "crs": "EPSG:32651", "transform": trans, "nodata": -9999.0
+        }
+        with rasterio.open(dem_path, "w", **profile) as dst:
+            dst.write(elev, 1)
+
+        info = RasterTideEngine().inspect_raster(dem_path, compute_valid_count=True)
+        top_res = build_support_topology(info, topology_max_resolution_m=100.0, topology_valid_fraction_threshold=0.5)
+        labeled_coarse = top_res[0]
+
+        comp_left = labeled_coarse[10, 5]
+        comp_right = labeled_coarse[10, 35]
+        self.assertNotEqual(comp_left, comp_right)
+        self.assertGreater(comp_left, 0)
+        self.assertGreater(comp_right, 0)
+
+        t_high = np.full(10, 5.0, dtype=np.float32)
+        n0 = ControlNode(node_id=0, x=500500.0, y=3499000.0, lon=122.0, lat=31.0, valid=True,
+                         water_levels_sorted=t_high, static_offset_m=0.0, tide_msl_raw=t_high,
+                         component_id=int(comp_left))
+
+        t_low = np.full(10, -2.0, dtype=np.float32)
+        n1 = ControlNode(node_id=1, x=503500.0, y=3499000.0, lon=122.03, lat=31.0, valid=True,
+                         water_levels_sorted=t_low, static_offset_m=0.0, tide_msl_raw=t_low,
+                         component_id=int(comp_right))
+
+        cell_l = QuadCell(cell_id=0, x_min=500000.0, y_min=3498000.0, x_max=501500.0, y_max=3500000.0,
+                          level=0, node_a=n0, node_b=n0, node_c=n0, node_d=n0)
+        cell_r = QuadCell(cell_id=1, x_min=502500.0, y_min=3498000.0, x_max=504000.0, y_max=3500000.0,
+                          level=0, node_a=n1, node_b=n1, node_c=n1, node_d=n1)
+
+        out_paths = ExposureProductPaths(
+            exposure_fraction_path=os.path.join(self.temp_dir, "b_frac.tif"),
+            exposure_duration_h_path=os.path.join(self.temp_dir, "b_dur.tif"),
+            exposure_max_continuous_h_path=os.path.join(self.temp_dir, "b_max.tif"),
+            exposure_mean_event_h_path=os.path.join(self.temp_dir, "b_mean.tif"),
+            exposure_event_count_path=os.path.join(self.temp_dir, "b_cnt.tif"),
+            exposure_valid_time_fraction_path=os.path.join(self.temp_dir, "b_val.tif"),
+            exposure_qc_path=os.path.join(self.temp_dir, "b_qc.tif")
+        )
+
+        dr = pd.date_range("2024-01-01 00:00:00", periods=10, freq="30min", tz="UTC")
+        stream_exposure_metrics_interpolation(
+            dem_path=dem_path,
+            output_paths=out_paths,
+            cells=[cell_l, cell_r],
+            nodes=[n0, n1],
+            time_series_utc=np.asarray(dr),
+            target_datum="egm2008",
+            time_chunk_size=10,
+            terminal_node_tides=np.array([5.0, -2.0], dtype=np.float32),
+            terminal_timestamp_sec=dr[-1].timestamp() + 1800.0,
+            labeled_coarse=labeled_coarse,
+            downsample_factor=top_res[2],
+            h_coarse=top_res[3],
+            w_coarse=top_res[4]
+        )
+
+        with rasterio.open(out_paths.exposure_fraction_path) as src:
+            frac = src.read(1)
+            self.assertEqual(np.nanmax(frac[:, 0:14]), 0.0)
+            self.assertEqual(np.nanmin(frac[:, 25:39]), 100.0)
+
+
+class TestCornerWeightRenormalizationProduction(_BaseExposureProductionTest):
+    """生产场景 4: 部分角点失效时的权重自动重新归一化验证"""
+
+    def test_corner_weight_renormalization_production(self):
+        rows, cols = 4, 4
+        z_elev = 2.5
+        times = np.arange(0, 5 * 1800, 1800, dtype=np.float64)
+
+        wl_nodes = np.full((len(times), 4), np.nan, dtype=np.float32)
+        wl_nodes[:, 0] = 2.0
+        wl_nodes[:, 1] = 4.0
+        term_nodes = np.array([2.0, 4.0, np.nan, np.nan], dtype=np.float32)
+
+        renorm_weights = np.zeros((4, rows, cols), dtype=np.float32)
+        renorm_weights[0, :, :] = 0.5
+        renorm_weights[1, :, :] = 0.5
+
+        z_grid = np.full((rows, cols), z_elev, dtype=np.float32)
+
+        res = compute_2d_vec(
+            wl_nodes=wl_nodes,
+            term_nodes=term_nodes,
+            times_sec=times,
+            terminal_ts=times[-1] + 1800.0,
+            weights=renorm_weights,
+            z=z_grid
+        )
+        self.assertEqual(np.max(res["exposure_fraction_pct"]), 0.0)
+        self.assertEqual(np.max(res["cumulative_exposure_h"]), 0.0)
+
+
+class TestTerminalTimeAndTimezones(_BaseExposureProductionTest):
+    """生产场景 5: 时区转换保真、缺失终端时刻的分母守恒与 QC 标记"""
+
+    def test_timezone_parsing_and_schema_11_terminal_semantics(self):
+        t_sh = parse_cache_time_to_utc("2024-01-01 08:00:00+08:00")
+        t_utc = parse_cache_time_to_utc("2024-01-01T00:00:00Z")
+        self.assertEqual(t_sh, t_utc)
+
+        t_la = parse_cache_time_to_utc("2024-01-01 00:00:00-08:00")
+        t_utc8 = parse_cache_time_to_utc("2024-01-01T08:00:00Z")
+        self.assertEqual(t_la, t_utc8)
+
+        t_naive = parse_cache_time_to_utc("2024-01-01 08:00:00", default_tz="Asia/Shanghai")
+        self.assertEqual(t_naive, t_utc)
+
+        dem_path = self._create_synthetic_dem("dem_sc5.tif", 20, 20, val=0.5)
+        cache_path, info = self._create_synthetic_cache(dem_path, "cache_sc5.nc", n_times=10, with_terminal=False, schema_ver="1.1")
+
+        out_dir = os.path.join(self.temp_dir, "out_sc5")
+        res = calculate_exposure_from_tide_cache(dem_path=dem_path, cache_path=cache_path, output_dir=out_dir)
+
+        with rasterio.open(res["products"].exposure_valid_time_fraction_path) as src_v, \
+             rasterio.open(res["products"].exposure_qc_path) as src_q:
+            val_frac = src_v.read(1)
+            qc_arr = src_q.read(1)
+            self.assertAlmostEqual(float(val_frac[0, 0]), 90.0, places=1)
+            self.assertTrue(bool(qc_arr[0, 0] & QC_EXP_TERMINAL_UNAVAILABLE))
+
+            tags = src_v.tags()
+            self.assertIn("CACHE_SIGNATURE", tags)
+            self.assertIn("CACHE_SCHEMA_VERSION", tags)
+            self.assertEqual(tags["CACHE_SCHEMA_VERSION"], "1.1")
+
+
+class TestAtomicWriterCleanupOnFailure(_BaseExposureProductionTest):
+    """生产场景 6: 写入中断/异常时临时文件 (*.tmp.tif) 零残留防护测试"""
+
+    def test_atomic_writer_cleanup_on_failure(self):
+        base_dir = os.path.join(self.temp_dir, "atomic_test")
+        os.makedirs(base_dir, exist_ok=True)
+        paths = ExposureProductPaths(
+            exposure_fraction_path=os.path.join(base_dir, "frac.tif"),
+            exposure_duration_h_path=os.path.join(base_dir, "dur.tif"),
+            exposure_max_continuous_h_path=os.path.join(base_dir, "max.tif"),
+            exposure_mean_event_h_path=os.path.join(base_dir, "mean.tif"),
+            exposure_event_count_path=os.path.join(base_dir, "cnt.tif"),
+            exposure_valid_time_fraction_path=os.path.join(base_dir, "val.tif"),
+            exposure_qc_path=os.path.join(base_dir, "qc.tif")
+        )
+        profile = {
+            "driver": "GTiff", "height": 10, "width": 10, "count": 1,
+            "crs": "EPSG:32651", "transform": Affine(10.0, 0.0, 500000.0, 0.0, -10.0, 3500000.0)
+        }
+
+        try:
+            with _AtomicExposureWriter(paths, profile) as writer:
+                writer.open()
+                tmp_files = [f for f in os.listdir(base_dir) if f.endswith(".tmp.tif")]
+                self.assertEqual(len(tmp_files), 7)
+                raise RuntimeError("Simulated crash during write")
+        except RuntimeError:
+            pass
+
+        remaining_tmp = [f for f in os.listdir(base_dir) if f.endswith(".tmp.tif")]
+        self.assertEqual(len(remaining_tmp), 0)
+        self.assertFalse(os.path.exists(paths.exposure_fraction_path))
+
+
+class TestStaleDEMMismatch(_BaseExposureProductionTest):
+    """生产场景 7: DEM 修改时间或文件大小变动导致陈旧 Cache 拒绝服务"""
+
+    def test_stale_dem_mismatch(self):
+        dem_path = self._create_synthetic_dem("dem_sc7.tif", 20, 20, val=0.5)
+        cache_path, info = self._create_synthetic_cache(dem_path, "cache_sc7.nc", n_times=10)
+
+        with open(dem_path, "ab") as f:
+            f.write(b"corrupt_dem_padding_bytes")
+
+        with self.assertRaises(TideCacheCompatibilityError) as ctx:
+            calculate_exposure_from_tide_cache(dem_path=dem_path, cache_path=cache_path)
+        err_msg = str(ctx.exception)
+        self.assertTrue("文件大小已改变" in err_msg or "不匹配" in err_msg or "不兼容" in err_msg)
+
+        dem_path2 = self._create_synthetic_dem("dem_sc7_2.tif", 20, 20, val=0.5)
+        cache_path2, _ = self._create_synthetic_cache(dem_path2, "cache_sc7_2.nc", n_times=10)
+
+        stat_old = os.stat(dem_path2)
+        os.utime(dem_path2, (stat_old.st_atime, stat_old.st_mtime + 500.0))
+
+        with self.assertRaises(TideCacheCompatibilityError) as ctx2:
+            calculate_exposure_from_tide_cache(dem_path=dem_path2, cache_path=cache_path2)
+        err_msg2 = str(ctx2.exception)
+        self.assertTrue("修改时间已更新" in err_msg2 or "不匹配" in err_msg2 or "不兼容" in err_msg2)
+
+
+class TestZeroFESCallInStage2(_BaseExposureProductionTest):
+    """生产场景 8: Stage 2 纯 Cache 驱动解算零 FES 物理模型调用不变量"""
+
+    def test_zero_fes_call_in_stage2(self):
+        dem_path = self._create_synthetic_dem("dem_sc8.tif", 20, 20, val=0.5)
+        cache_path, _ = self._create_synthetic_cache(dem_path, "cache_sc8.nc", n_times=10)
+
+        mock_fes = MagicMock()
+        with patch("core.tide_engine.FESTidePredictor.predict_points_period", mock_fes):
+            calculate_exposure_from_tide_cache(dem_path=dem_path, cache_path=cache_path)
+            mock_fes.assert_not_called()
+
+
+class TestCorruptCellNodeIndexRaisesIntegrityError(_BaseExposureProductionTest):
+    """生产场景 9: 损坏/越界的控制节点索引必须抛出 TideCacheIntegrityError"""
+
+    def test_corrupt_cell_node_index_raises_integrity_error(self):
+        dem_path = self._create_synthetic_dem("dem_sc9.tif", 20, 20, val=0.5)
+        cache_path, _ = self._create_synthetic_cache(dem_path, "cache_sc9.nc", n_times=10)
+
+        with netCDF4.Dataset(cache_path, "a") as ds:
+            ds.variables["cell_node_indices"][0, 0] = 99999
+
+        with self.assertRaises(TideCacheIntegrityError) as ctx:
+            read_tide_cache_structure(cache_path)
+        err_msg = str(ctx.exception)
+        self.assertTrue("99999" in err_msg or "越界" in err_msg or "拓扑损坏" in err_msg)
 
 
 if __name__ == "__main__":

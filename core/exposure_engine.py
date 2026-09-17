@@ -56,13 +56,15 @@ from rasterio.windows import Window
 from .raster_engine import (
     RasterInfo, ControlNode, QuadCell, RasterCalculationCancelled, ExistingOutputError
 )
+from .tide_cache import TideCacheIntegrityError, TideCacheTimeSeriesReader
 
 # 露出分析质量控制位掩膜定义 / Exposure QC Bitmask Definitions
 QC_EXP_VALID = 0                         # 0: 正常高保真解算 / Normal high-fidelity computation
 QC_EXP_DEGRADED_CELL = 1                 # bit 0: 四叉树单元部分角点降级插值 / Degraded interpolation in quad cell
 QC_EXP_INSUFFICIENT_NODES = 2            # bit 1: 缺少足够有效控制节点 / Insufficient valid control nodes
 QC_EXP_DATUM_APPROX = 4                  # bit 2: 基准面偏移采用多边形近似 / Datum offset from polygon approximation
-QC_EXP_TERMINAL_APPROX = 8               # bit 3: 终端时刻采样缺失或近似 / Terminal endpoint unavailable or approximated
+QC_EXP_TERMINAL_UNAVAILABLE = 8          # bit 3: 终端时刻采样缺失或不可用 / Terminal endpoint unavailable
+QC_EXP_TERMINAL_APPROX = QC_EXP_TERMINAL_UNAVAILABLE  # 向后兼容别名 / Backward compatibility alias
 QC_EXP_PARTIAL_VALID_TIME = 16           # bit 4: 时间序列存在无效数据间隙 / Temporal invalid gaps present
 QC_EXP_PERMANENTLY_SUBMERGED = 32        # bit 5: 全有效时段常时淹没 / Permanently submerged throughout valid time
 QC_EXP_PERMANENTLY_EXPOSED = 64          # bit 6: 全有效时段常时露出 / Permanently exposed throughout valid time
@@ -94,7 +96,8 @@ def compute_1d_continuous_exposure(
     timestamps_seconds: np.ndarray,
     elevation: float,
     terminal_water_level: Optional[float] = None,
-    terminal_timestamp_seconds: Optional[float] = None
+    terminal_timestamp_seconds: Optional[float] = None,
+    requested_total_window_sec: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     单点一维连续潜在天文潮露出时间域基准算法 (包含跨界线性插值与事件统计)。
@@ -106,6 +109,7 @@ def compute_1d_continuous_exposure(
         elevation: 地形高程 z [米] / Terrain surface elevation z [m]
         terminal_water_level: 终端时刻 H(t_end) [米]，用于闭合最后一个半开区间 / Terminal water level H(t_end) [m]
         terminal_timestamp_seconds: 终端时刻纪元秒 / Terminal epoch timestamp in seconds
+        requested_total_window_sec: 显式指定的全时段请求窗口跨度 (秒)，缺失 terminal 采样时用于保留完整时间分母
 
     返回 / Returns:
         包含累计露出时长、露出比例、最长连续露出、平均事件时长与事件次数的字典。
@@ -128,11 +132,18 @@ def compute_1d_continuous_exposure(
     if terminal_water_level is not None and terminal_timestamp_seconds is not None:
         wl_seq = np.append(water_levels, terminal_water_level)
         ts_seq = np.append(timestamps_seconds, terminal_timestamp_seconds)
+        total_window_sec = float(terminal_timestamp_seconds - timestamps_seconds[0])
     else:
         wl_seq = np.asarray(water_levels, dtype=float)
         ts_seq = np.asarray(timestamps_seconds, dtype=float)
+        if requested_total_window_sec is not None:
+            total_window_sec = float(requested_total_window_sec)
+        elif len(ts_seq) > 1:
+            dt_nom = (ts_seq[-1] - ts_seq[0]) / (len(ts_seq) - 1)
+            total_window_sec = float(ts_seq[-1] + dt_nom - ts_seq[0])
+        else:
+            total_window_sec = float(ts_seq[-1] - ts_seq[0]) if len(ts_seq) > 1 else 1.0
 
-    total_window_sec = float(ts_seq[-1] - ts_seq[0]) if len(ts_seq) > 1 else 0.0
     if total_window_sec <= 0.0:
         total_window_sec = 1.0
 
@@ -250,7 +261,12 @@ def compute_1d_continuous_exposure(
 class _AtomicExposureWriter:
     """
     露出分析 7 大 GeoTIFF 产物原子写入安全包装器 (Atomic GeoTIFF Writer Bundle)。
-    保证在发生异常或取消时绝不残留损坏的目标文件。
+    
+    工程特性说明 (Engineering Architecture Note):
+    采用单文件级原子替换 (Per-file atomic replacement via os.replace)，并非跨 7 个文件的分布式数据库事务。
+    通过临时文件 (*.tmp.tif) 隔离写入，在全部处理完成并通过校验后逐一替换到正式路径。
+    若打开 (open)、写入 (write_window) 或分块处理流程发生任何异常/用户取消，
+    严格在 try/finally 中关闭句柄并清理全部已创建的 *.tmp.tif 临时文件，绝不残留损坏的半成品。
     """
     def __init__(self, paths: ExposureProductPaths, profile: dict):
         self.paths = paths
@@ -275,6 +291,16 @@ class _AtomicExposureWriter:
         }
         self.handles = {}
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            self.cleanup_tmp()
+        else:
+            if self.handles:
+                self.close_and_commit()
+
     def open(self, metadata_tags: Optional[Dict[str, str]] = None):
         prof_f32 = self.profile.copy()
         prof_f32.update({'count': 1, 'dtype': 'float32', 'nodata': NODATA_FLOAT32, 'compress': 'deflate', 'predictor': 2})
@@ -289,25 +315,30 @@ class _AtomicExposureWriter:
         prof_u16 = prof_f32.copy()
         prof_u16.update({'dtype': 'uint16', 'nodata': NODATA_QC, 'predictor': 1})
 
-        # 确保目标目录存在
-        for p in self.target_paths.values():
-            d = os.path.dirname(os.path.abspath(p))
-            if d:
-                os.makedirs(d, exist_ok=True)
+        try:
+            # 确保目标目录存在
+            for p in self.target_paths.values():
+                d = os.path.dirname(os.path.abspath(p))
+                if d:
+                    os.makedirs(d, exist_ok=True)
 
-        self.handles["frac"] = rasterio.open(self.tmp_paths["frac"], 'w', **prof_f32)
-        self.handles["dur"] = rasterio.open(self.tmp_paths["dur"], 'w', **prof_f32)
-        self.handles["max"] = rasterio.open(self.tmp_paths["max"], 'w', **prof_f32)
-        self.handles["mean"] = rasterio.open(self.tmp_paths["mean"], 'w', **prof_f32)
-        self.handles["val_time"] = rasterio.open(self.tmp_paths["val_time"], 'w', **prof_f32)
-        self.handles["count"] = rasterio.open(self.tmp_paths["count"], 'w', **prof_u32)
-        self.handles["qc"] = rasterio.open(self.tmp_paths["qc"], 'w', **prof_u16)
+            self.handles["frac"] = rasterio.open(self.tmp_paths["frac"], 'w', **prof_f32)
+            self.handles["dur"] = rasterio.open(self.tmp_paths["dur"], 'w', **prof_f32)
+            self.handles["max"] = rasterio.open(self.tmp_paths["max"], 'w', **prof_f32)
+            self.handles["mean"] = rasterio.open(self.tmp_paths["mean"], 'w', **prof_f32)
+            self.handles["val_time"] = rasterio.open(self.tmp_paths["val_time"], 'w', **prof_f32)
+            self.handles["count"] = rasterio.open(self.tmp_paths["count"], 'w', **prof_u32)
+            self.handles["qc"] = rasterio.open(self.tmp_paths["qc"], 'w', **prof_u16)
 
-        if metadata_tags:
-            for k, ds in self.handles.items():
-                tags = metadata_tags.copy()
-                tags["PRODUCT_ROLE"] = k
-                ds.update_tags(**tags)
+            if metadata_tags:
+                for k, ds in self.handles.items():
+                    tags = metadata_tags.copy()
+                    tags["PRODUCT_ROLE"] = k
+                    ds.update_tags(**tags)
+        except Exception:
+            self.cleanup_tmp()
+            raise
+
 
     def write_window(
         self,
@@ -360,6 +391,31 @@ class _AtomicExposureWriter:
                     os.remove(tmp_f)
             except Exception:
                 pass
+
+
+class _InMemoryTimeSeriesReader:
+    """内部轻量适配器：用于内存中已附带时序的节点对象切片 (保证测试与轻量调用接口统一)"""
+    def __init__(self, nodes: List[ControlNode]):
+        self.nodes = nodes
+        self.num_nodes = len(nodes)
+
+    def read_chunk(self, node_indices: List[int], start_time_idx: int, end_time_idx: int) -> np.ndarray:
+        chunk_len = max(0, end_time_idx - start_time_idx)
+        if len(node_indices) == 0:
+            return np.zeros((0, chunk_len), dtype=np.float32)
+        res = np.empty((len(node_indices), chunk_len), dtype=np.float32)
+        for i, nid in enumerate(node_indices):
+            if nid < 0 or nid >= self.num_nodes:
+                raise TideCacheIntegrityError(f"请求的控制节点索引越界: {nid}")
+            node = self.nodes[nid]
+            raw = getattr(node, "tide_msl_raw", None)
+            if raw is None:
+                raw = getattr(node, "water_levels_msl", None)
+            if raw is not None and len(raw) >= end_time_idx:
+                res[i, :] = raw[start_time_idx:end_time_idx]
+            else:
+                res[i, :] = np.nan
+        return res
 
 
 def compute_2d_vec(
@@ -618,6 +674,10 @@ def stream_exposure_metrics_interpolation(
     block_size: int = 512,
     terminal_node_tides: Optional[np.ndarray] = None,
     terminal_timestamp_sec: Optional[float] = None,
+    requested_time_start_sec: Optional[float] = None,
+    requested_time_end_sec: Optional[float] = None,
+    cache_path: Optional[str] = None,
+    time_reader: Optional[Any] = None,
     labeled_coarse: Optional[np.ndarray] = None,
     downsample_factor: int = 1,
     h_coarse: int = 0,
@@ -633,11 +693,12 @@ def stream_exposure_metrics_interpolation(
 
     科学不变量与工程安全 / Invariants & Engineering Safety:
     1. 内存中绝不构造 rows x cols x time_chunk 的 3D 像元矩阵 (彻底杜绝 1GB+ 临时时序占用)；
-    2. 彻底去除像元级 Python 循环，全部采用 2D NumPy 数组矢量化状态转移；
-    3. 严格遵循 target-mask-derived topology guard，禁止跨连通域屏障插值；
-    4. 无效控制角点严格重归一化权重，绝不以 0m 混入插值；
-    5. 全产物 *.tmp.tif 原子写入，异常/取消时零残留；
-    6. event_count 无效值为 4294967295，常时淹没为 0。
+    2. 绝不在内存中一次性分配全量节点时序 (彻底杜绝 n_nodes x n_time 巨型矩阵)；
+    3. 彻底去除像元级 Python 循环，全部采用 2D NumPy 数组矢量化状态转移；
+    4. 严格遵循 target-mask-derived topology guard，禁止跨连通域屏障插值；
+    5. 无效控制角点严格重归一化权重，绝不以 0m 混入插值；
+    6. 全产物 *.tmp.tif 原子写入，异常/取消时零残留；
+    7. event_count 无效值为 4294967295，常时淹没为 0。
     """
     t_start = time.time()
 
@@ -667,37 +728,41 @@ def stream_exposure_metrics_interpolation(
     ts_seconds = np.asarray([pd.Timestamp(t).timestamp() for t in time_series_utc], dtype=np.float64)
 
     has_terminal = (terminal_node_tides is not None and terminal_timestamp_sec is not None)
-    if has_terminal:
-        terminal_dt_sec = float(terminal_timestamp_sec - ts_seconds[-1])
+    if requested_time_start_sec is not None and requested_time_end_sec is not None:
+        total_time_span_sec = float(requested_time_end_sec - requested_time_start_sec)
+    elif has_terminal and terminal_timestamp_sec is not None:
         total_time_span_sec = float(terminal_timestamp_sec - ts_seconds[0])
     else:
-        terminal_dt_sec = 0.0
-        total_time_span_sec = float(ts_seconds[-1] - ts_seconds[0]) if n_time > 1 else 1.0
+        dt_nom = (ts_seconds[-1] - ts_seconds[0]) / (n_time - 1) if n_time > 1 else 1800.0
+        total_time_span_sec = float((ts_seconds[-1] + dt_nom) - ts_seconds[0])
 
     if total_time_span_sec <= 0.0:
         total_time_span_sec = 1.0
 
-    # 提取控制节点的水位时序 (已转换至目标基准)
+    if has_terminal and terminal_timestamp_sec is not None:
+        terminal_dt_sec = float(terminal_timestamp_sec - ts_seconds[-1])
+    else:
+        terminal_dt_sec = 0.0
+
+    # 建立轻量节点静态属性与映射 (禁止在此处分配 n_nodes x n_time 巨幅矩阵)
     n_nodes = len(nodes)
-    node_water_levels = np.zeros((n_nodes, n_time), dtype=np.float32)
-    node_valid_mask = np.zeros(n_nodes, dtype=bool)
-    node_components = np.zeros(n_nodes, dtype=np.int32)
-    node_datum_approx = np.zeros(n_nodes, dtype=bool)
+    node_offsets = np.array([float(n.static_offset_m) if np.isfinite(n.static_offset_m) else 0.0 for n in nodes], dtype=np.float32)
+    node_valid_mask = np.array([bool(n.valid) for n in nodes], dtype=bool)
+    node_components = np.array([int(getattr(n, "component_id", 0)) for n in nodes], dtype=np.int32)
+    node_qc_arr = np.array([int(getattr(n, "qc_bitmask", 0)) for n in nodes], dtype=np.uint32)
+    node_datum_approx = (node_qc_arr & 16) != 0
     node_id_to_idx = {getattr(n, "node_id", i): i for i, n in enumerate(nodes)}
 
-    for idx, node in enumerate(nodes):
-        node_components[idx] = getattr(node, "component_id", 0)
-        node_qc = getattr(node, "qc_bitmask", 0)
-        if node_qc & 16:  # QC_DATUM_SOURCE_APPROX
-            node_datum_approx[idx] = True
-
-        raw_tide = getattr(node, "tide_msl_raw", None)
-        if raw_tide is None:
-            raw_tide = getattr(node, "water_levels_msl", None)
-        if node.valid and raw_tide is not None and len(raw_tide) == n_time:
-            off = node.static_offset_m if np.isfinite(node.static_offset_m) else 0.0
-            node_water_levels[idx, :] = (raw_tide + off).astype(np.float32)
-            node_valid_mask[idx] = True
+    # 初始化时序切片读取器
+    reader = None
+    reader_needs_close = False
+    if time_reader is not None:
+        reader = time_reader
+    elif cache_path is not None:
+        reader = TideCacheTimeSeriesReader(cache_path).open()
+        reader_needs_close = True
+    else:
+        reader = _InMemoryTimeSeriesReader(nodes)
 
     # 终端时刻各节点水位 (严格校验有效性，无效设为 NaN)
     terminal_node_wl = np.full(n_nodes, np.nan, dtype=np.float32)
@@ -706,13 +771,16 @@ def stream_exposure_metrics_interpolation(
             if node.valid and idx < len(terminal_node_tides):
                 t_val = terminal_node_tides[idx]
                 if np.isfinite(t_val):
-                    off = node.static_offset_m if np.isfinite(node.static_offset_m) else 0.0
-                    terminal_node_wl[idx] = float(t_val + off)
+                    terminal_node_wl[idx] = float(t_val + node_offsets[idx])
 
     # 准备元数据标签
-    t_end_tag = str(time_series_utc[-1])
-    if has_terminal and terminal_timestamp_sec is not None:
-        t_end_tag = pd.Timestamp(terminal_timestamp_sec, unit="s", tz="UTC").isoformat()
+    t_start_tag = str(metadata_tags.get("REQUESTED_TIME_START", time_series_utc[0])) if metadata_tags else str(time_series_utc[0])
+    t_end_tag = str(metadata_tags.get("REQUESTED_TIME_END", "")) if metadata_tags else ""
+    if not t_end_tag:
+        if has_terminal and terminal_timestamp_sec is not None:
+            t_end_tag = pd.Timestamp(terminal_timestamp_sec, unit="s", tz="UTC").isoformat()
+        else:
+            t_end_tag = str(time_series_utc[-1])
 
     full_meta = {
         "SOFTWARE": "CoastTideX v1.6 Beta",
@@ -722,6 +790,9 @@ def stream_exposure_metrics_interpolation(
         "VERTICAL_DATUM": str(target_datum).upper(),
         "TIME_START": str(time_series_utc[0]),
         "TIME_END": t_end_tag,
+        "REQUESTED_TIME_START": t_start_tag,
+        "REQUESTED_TIME_END": t_end_tag,
+        "TERMINAL_SAMPLE_AVAILABLE": "true" if has_terminal else "false",
         "TIME_INTERVAL_SEMANTICS": "[start, end)",
         "TIME_SAMPLES": str(n_time),
         "SOURCE_DEM": os.path.basename(dem_path),
@@ -751,8 +822,11 @@ def stream_exposure_metrics_interpolation(
         elif hasattr(c, "node_a") and hasattr(c, "node_b") and hasattr(c, "node_c") and hasattr(c, "node_d"):
             raw_ids = (c.node_a.node_id, c.node_b.node_id, c.node_c.node_id, c.node_d.node_id)
         else:
-            raw_ids = (0, 0, 0, 0)
-        return tuple(node_id_to_idx.get(nid, 0) for nid in raw_ids)
+            raise TideCacheIntegrityError("QuadCell 缺少节点索引属性，无法识别角点控制节点！")
+        for nid in raw_ids:
+            if nid not in node_id_to_idx:
+                raise TideCacheIntegrityError(f"QuadCell 引用了不存在的控制节点 ID {nid}，严禁降级回退！")
+        return tuple(node_id_to_idx[nid] for nid in raw_ids)
 
     try:
         with rasterio.open(dem_path) as src_dem:
@@ -899,105 +973,129 @@ def stream_exposure_metrics_interpolation(
 
                                 cell_mappings.append((sub_in_cell, tuple(usable_indices), norm_weights))
 
-                        # 重构单时间片像元水位的内部函数 (No 3D Array Created!)
-                        def _reconstruct_slice(t_step_idx: int) -> np.ndarray:
-                            h_slice = np.full((r_len, c_len), np.nan, dtype=np.float32)
-                            for sub_mask, idxs, w_mat in cell_mappings:
-                                node_wls = node_water_levels[list(idxs), t_step_idx] # (K,)
-                                h_slice[sub_mask] = np.sum(w_mat * node_wls[:, None], axis=0)
-                            return h_slice
+                        # 找出当前分块所需的所有唯一控制节点全局索引 (按需提取局部节点)
+                        block_node_set = set()
+                        for _, idxs, _ in cell_mappings:
+                            for gi in idxs:
+                                block_node_set.add(gi)
+                        block_node_indices = sorted(list(block_node_set))
+                        local_map = {gi: li for li, gi in enumerate(block_node_indices)}
+                        local_offsets = node_offsets[block_node_indices] if len(block_node_indices) > 0 else np.array([], dtype=np.float32)
 
-                        # 时间维逐时间步流式推进 (纯 2D 矢量化更新)
-                        for step_idx in range(n_time):
-                            h1_slice = _reconstruct_slice(step_idx)
-                            t1 = ts_seconds[step_idx]
+                        # 时间维按 time_chunk_size 分块流式推进 (按需从 reader 切片，绝不全量常驻)
+                        for chunk_start in range(0, n_time, time_chunk_size):
+                            chunk_end = min(n_time, chunk_start + time_chunk_size)
+                            chunk_len = chunk_end - chunk_start
+                            if len(block_node_indices) > 0:
+                                raw_chunk = reader.read_chunk(block_node_indices, chunk_start, chunk_end)
+                                wl_chunk = raw_chunk + local_offsets[:, None]
+                            else:
+                                wl_chunk = np.empty((0, chunk_len), dtype=np.float32)
 
-                            if step_idx == 0:
+                            for t_local in range(chunk_len):
+                                step_idx = chunk_start + t_local
+                                t1 = ts_seconds[step_idx]
+
+                                h1_slice = np.full((r_len, c_len), np.nan, dtype=np.float32)
+                                for sub_mask, idxs, w_mat in cell_mappings:
+                                    local_idxs = [local_map[gi] for gi in idxs]
+                                    node_wls = wl_chunk[local_idxs, t_local]
+                                    val_nodes = np.isfinite(node_wls)
+                                    if np.all(val_nodes):
+                                        h1_slice[sub_mask] = np.sum(w_mat * node_wls[:, None], axis=0)
+                                    elif np.any(val_nodes):
+                                        sub_w = w_mat[val_nodes, :]
+                                        sum_w = np.sum(sub_w, axis=0)
+                                        sum_w_safe = np.where(sum_w > 1e-9, sum_w, 1.0)
+                                        norm_sub_w = sub_w / sum_w_safe[None, :]
+                                        h1_slice[sub_mask] = np.sum(norm_sub_w * node_wls[val_nodes, None], axis=0)
+
+                                if step_idx == 0:
+                                    prev_wl = h1_slice
+                                    prev_ts = t1
+                                    continue
+
+                                dt = float(t1 - prev_ts)
+                                if dt <= 0.0:
+                                    prev_wl = h1_slice
+                                    prev_ts = t1
+                                    continue
+
+                                val_step = np.isfinite(prev_wl) & np.isfinite(h1_slice) & valid_dem_mask
+
+                                inval_step = (~val_step) & valid_dem_mask
+                                cut_ongoing = inval_step & (curr_exp_sec > 0.0)
+                                if np.any(cut_ongoing):
+                                    ev_count[cut_ongoing] += 1
+                                    max_cont_sec[cut_ongoing] = np.maximum(max_cont_sec[cut_ongoing], curr_exp_sec[cut_ongoing])
+                                    curr_exp_sec[cut_ongoing] = 0.0
+
+                                if np.any(val_step):
+                                    valid_dur_sec[val_step] += dt
+                                    h0_v = prev_wl[val_step]
+                                    h1_v = h1_slice[val_step]
+                                    z_v = dem_block[val_step]
+                                    c_v = curr_exp_sec[val_step]
+                                    t_v = total_exp_sec[val_step]
+                                    m_v = max_cont_sec[val_step]
+                                    cnt_v = ev_count[val_step]
+
+                                    e0 = (h0_v <= z_v)
+                                    e1 = (h1_v <= z_v)
+
+                                    # Case A: 全露出
+                                    m_a = e0 & e1
+                                    if np.any(m_a):
+                                        c_v[m_a] += dt
+                                        t_v[m_a] += dt
+                                        m_v[m_a] = np.maximum(m_v[m_a], c_v[m_a])
+
+                                    # Case B: 全淹没
+                                    m_b = (~e0) & (~e1)
+                                    ong_b = m_b & (c_v > 0.0)
+                                    if np.any(ong_b):
+                                        cnt_v[ong_b] += 1
+                                        m_v[ong_b] = np.maximum(m_v[ong_b], c_v[ong_b])
+                                        c_v[ong_b] = 0.0
+
+                                    # Case C: 淹没 -> 露出 (~e0 & e1)
+                                    m_c = (~e0) & e1
+                                    if np.any(m_c):
+                                        den_c = h0_v[m_c] - h1_v[m_c]
+                                        r_c = np.where(np.abs(den_c) > 1e-9, (h0_v[m_c] - z_v[m_c]) / den_c, 0.0)
+                                        r_c = np.clip(r_c, 0.0, 1.0)
+                                        dt_e_c = (1.0 - r_c) * dt
+
+                                        ong_c = (c_v[m_c] > 0.0)
+                                        if np.any(ong_c):
+                                            cnt_v[m_c] = np.where(ong_c, cnt_v[m_c] + 1, cnt_v[m_c])
+                                            m_v[m_c] = np.where(ong_c, np.maximum(m_v[m_c], c_v[m_c]), m_v[m_c])
+
+                                        c_v[m_c] = dt_e_c
+                                        t_v[m_c] += dt_e_c
+                                        m_v[m_c] = np.maximum(m_v[m_c], c_v[m_c])
+
+                                    # Case D: 露出 -> 淹没 (e0 & ~e1)
+                                    m_d = e0 & (~e1)
+                                    if np.any(m_d):
+                                        den_d = h1_v[m_d] - h0_v[m_d]
+                                        r_d = np.where(np.abs(den_d) > 1e-9, (z_v[m_d] - h0_v[m_d]) / den_d, 0.0)
+                                        r_d = np.clip(r_d, 0.0, 1.0)
+                                        dt_e_d = r_d * dt
+
+                                        c_v[m_d] += dt_e_d
+                                        t_v[m_d] += dt_e_d
+                                        m_v[m_d] = np.maximum(m_v[m_d], c_v[m_d])
+                                        cnt_v[m_d] += 1
+                                        c_v[m_d] = 0.0
+
+                                    curr_exp_sec[val_step] = c_v
+                                    total_exp_sec[val_step] = t_v
+                                    max_cont_sec[val_step] = m_v
+                                    ev_count[val_step] = cnt_v
+
                                 prev_wl = h1_slice
                                 prev_ts = t1
-                                continue
-
-                            dt = float(t1 - prev_ts)
-                            if dt <= 0.0:
-                                prev_wl = h1_slice
-                                prev_ts = t1
-                                continue
-
-                            val_step = np.isfinite(prev_wl) & np.isfinite(h1_slice) & valid_dem_mask
-
-                            inval_step = (~val_step) & valid_dem_mask
-                            cut_ongoing = inval_step & (curr_exp_sec > 0.0)
-                            if np.any(cut_ongoing):
-                                ev_count[cut_ongoing] += 1
-                                max_cont_sec[cut_ongoing] = np.maximum(max_cont_sec[cut_ongoing], curr_exp_sec[cut_ongoing])
-                                curr_exp_sec[cut_ongoing] = 0.0
-
-                            if np.any(val_step):
-                                valid_dur_sec[val_step] += dt
-                                h0_v = prev_wl[val_step]
-                                h1_v = h1_slice[val_step]
-                                z_v = dem_block[val_step]
-                                c_v = curr_exp_sec[val_step]
-                                t_v = total_exp_sec[val_step]
-                                m_v = max_cont_sec[val_step]
-                                cnt_v = ev_count[val_step]
-
-                                e0 = (h0_v <= z_v)
-                                e1 = (h1_v <= z_v)
-
-                                # Case A: 全露出
-                                m_a = e0 & e1
-                                if np.any(m_a):
-                                    c_v[m_a] += dt
-                                    t_v[m_a] += dt
-                                    m_v[m_a] = np.maximum(m_v[m_a], c_v[m_a])
-
-                                # Case B: 全淹没
-                                m_b = (~e0) & (~e1)
-                                ong_b = m_b & (c_v > 0.0)
-                                if np.any(ong_b):
-                                    cnt_v[ong_b] += 1
-                                    m_v[ong_b] = np.maximum(m_v[ong_b], c_v[ong_b])
-                                    c_v[ong_b] = 0.0
-
-                                # Case C: 淹没 -> 露出 (~e0 & e1)
-                                m_c = (~e0) & e1
-                                if np.any(m_c):
-                                    den_c = h0_v[m_c] - h1_v[m_c]
-                                    r_c = np.where(np.abs(den_c) > 1e-9, (h0_v[m_c] - z_v[m_c]) / den_c, 0.0)
-                                    r_c = np.clip(r_c, 0.0, 1.0)
-                                    dt_e_c = (1.0 - r_c) * dt
-
-                                    ong_c = (c_v[m_c] > 0.0)
-                                    if np.any(ong_c):
-                                        cnt_v[m_c] = np.where(ong_c, cnt_v[m_c] + 1, cnt_v[m_c])
-                                        m_v[m_c] = np.where(ong_c, np.maximum(m_v[m_c], c_v[m_c]), m_v[m_c])
-
-                                    c_v[m_c] = dt_e_c
-                                    t_v[m_c] += dt_e_c
-                                    m_v[m_c] = np.maximum(m_v[m_c], c_v[m_c])
-
-                                # Case D: 露出 -> 淹没 (e0 & ~e1)
-                                m_d = e0 & (~e1)
-                                if np.any(m_d):
-                                    den_d = h1_v[m_d] - h0_v[m_d]
-                                    r_d = np.where(np.abs(den_d) > 1e-9, (z_v[m_d] - h0_v[m_d]) / den_d, 0.0)
-                                    r_d = np.clip(r_d, 0.0, 1.0)
-                                    dt_e_d = r_d * dt
-
-                                    c_v[m_d] += dt_e_d
-                                    t_v[m_d] += dt_e_d
-                                    m_v[m_d] = np.maximum(m_v[m_d], c_v[m_d])
-                                    cnt_v[m_d] += 1
-                                    c_v[m_d] = 0.0
-
-                                curr_exp_sec[val_step] = c_v
-                                total_exp_sec[val_step] = t_v
-                                max_cont_sec[val_step] = m_v
-                                ev_count[val_step] = cnt_v
-
-                            prev_wl = h1_slice
-                            prev_ts = t1
 
                         # 处理终端时刻采样 (Terminal Sample Crossing)
                         if has_terminal and terminal_dt_sec > 0.0:
@@ -1116,7 +1214,7 @@ def stream_exposure_metrics_interpolation(
 
                             qc_v = out_qc[val_pixels]
                             if not has_terminal:
-                                qc_v |= QC_EXP_TERMINAL_APPROX
+                                qc_v |= QC_EXP_TERMINAL_UNAVAILABLE
 
                             # 极端常时状态标记
                             is_perm_exp = (np.abs(dur_h - val_dur_h) <= 1e-4)
@@ -1153,6 +1251,12 @@ def stream_exposure_metrics_interpolation(
         # 异常或取消时清理临时文件，绝不留下损坏的半成品文件
         writer.cleanup_tmp()
         raise
+    finally:
+        if reader_needs_close and reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
 
     elapsed = time.time() - t_start
     if progress_callback:

@@ -389,6 +389,7 @@ def main(args_list: Optional[List[str]] = None):
 
             if args.cache:
                 print(f"[*] 使用已有 Tide Cache (零 FES 重复调用): {args.cache}")
+                print("[!] 使用 Tide Cache 内嵌的科学参数与时间跨度；命令行中的 --step/--dem-datum/--year 参数将被自动忽略。")
                 from core.tide_cache import calculate_exposure_from_tide_cache
                 exp_res = calculate_exposure_from_tide_cache(
                     dem_path=args.dem,

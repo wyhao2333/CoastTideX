@@ -9,6 +9,7 @@ import os
 import json
 import time
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable, Set
@@ -45,6 +46,45 @@ class ExistingOutputError(FileExistsError):
 class TideCacheCompatibilityError(ValueError):
     """Tide Cache 与目标 DEM 或解算参数不兼容异常"""
     pass
+
+
+class TideCacheIntegrityError(ValueError):
+    """Tide Cache 数据完整性损坏异常 (如单元引用的控制节点编号越界或不存在)"""
+    pass
+
+
+def parse_cache_time_to_utc(time_str: str, default_tz: str = "UTC") -> float:
+    """
+    安全解析时间字符串为 UTC epoch 纪元秒浮点数。
+    支持 UTC 格式、带时区偏移格式 (如 '+08:00') 以及指定 default_tz 的 naive 字符串。
+    """
+    ts = pd.Timestamp(time_str)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(default_tz)
+    ts_utc = ts.tz_convert("UTC")
+    return float(ts_utc.timestamp())
+
+
+@dataclass
+class TideCacheStructure:
+    """
+    轻量级 Tide Cache 网格结构体 (不包含常驻 node x time 时序巨幅矩阵)。
+    专用于二阶段流式露出分析按需分块读取与拓扑重建。
+    """
+    metadata: Dict[str, Any]
+    nodes: List[ControlNode]
+    leaf_cells: List[QuadCell]
+    time_index: pd.DatetimeIndex
+    num_nodes: int
+    num_cells: int
+    time_samples: int
+    terminal_tide: Optional[np.ndarray] = None
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
 
 
 def estimate_tide_cache_size(
@@ -654,7 +694,7 @@ def write_tide_cache(
         schema_version=schema_version
     )
 
-    time_epochs = (time_index.astype("int64") // 10**9).to_numpy(dtype=np.float64)
+    time_epochs = np.asarray([float(t.timestamp()) for t in pd.to_datetime(time_index, utc=True)], dtype=np.float64)
     est_mem = estimate_tide_cache_size(num_nodes, num_times, resident_array_count=2)
 
     try:
@@ -896,10 +936,20 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
         leaf_cells: List[QuadCell] = []
 
         for c in range(num_cells):
-            na = nodes[int(cell_nodes[c, 0])]
-            nb = nodes[int(cell_nodes[c, 1])]
-            nc = nodes[int(cell_nodes[c, 2])]
-            nd = nodes[int(cell_nodes[c, 3])]
+            idx_a = int(cell_nodes[c, 0])
+            idx_b = int(cell_nodes[c, 1])
+            idx_c = int(cell_nodes[c, 2])
+            idx_d = int(cell_nodes[c, 3])
+            for idx_k in (idx_a, idx_b, idx_c, idx_d):
+                if idx_k < 0 or idx_k >= num_nodes:
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 拓扑损坏: QuadCell {c} 引用了越界控制节点索引 {idx_k} (合法节点范围: 0 ~ {num_nodes - 1})"
+                    )
+
+            na = nodes[idx_a]
+            nb = nodes[idx_b]
+            nc = nodes[idx_c]
+            nd = nodes[idx_d]
             qc_c = int(cell_qc[c])
 
             cell = QuadCell(
@@ -939,6 +989,168 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
         }
 
 
+def read_tide_cache_structure(cache_path: str) -> TideCacheStructure:
+    """
+    轻量级只读解析 Tide Cache 控制网格拓扑结构与元数据 (零时序数组内存加载)。
+    严禁读取 tide_msl_m 巨幅矩阵，峰值内存仅取决于节点与网格单元数量 (< 5MB)。
+    """
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
+
+    with netCDF4.Dataset(cache_path, mode="r") as ds:
+        is_complete = str(getattr(ds, "CACHE_COMPLETE", "false")).lower() == "true"
+        if not is_complete:
+            raise ValueError(f"Tide Cache 文件未完整写入 (缺少 CACHE_COMPLETE 标记): {cache_path}")
+
+        attrs = {attr: getattr(ds, attr) for attr in ds.ncattrs()}
+
+        node_x = ds.variables["node_x"][:]
+        node_y = ds.variables["node_y"][:]
+        node_lon = ds.variables["node_lon"][:]
+        node_lat = ds.variables["node_lat"][:]
+        node_val = ds.variables["node_valid"][:]
+        static_offset = ds.variables["static_offset_m"][:]
+        comp_id = ds.variables["component_id"][:]
+        node_qc = ds.variables["node_qc"][:]
+
+        num_nodes = len(node_x)
+        nodes: List[ControlNode] = []
+
+        for i in range(num_nodes):
+            is_valid = bool(node_val[i])
+            off_m = float(static_offset[i])
+            node = ControlNode(
+                node_id=i,
+                x=float(node_x[i]),
+                y=float(node_y[i]),
+                lon=float(node_lon[i]),
+                lat=float(node_lat[i]),
+                water_levels_sorted=None,
+                valid=is_valid,
+                static_offset_m=off_m,
+                component_id=int(comp_id[i]),
+                qc_bitmask=int(node_qc[i]),
+                qc_code=int(node_qc[i]),
+                tide_msl_raw=None
+            )
+            nodes.append(node)
+
+        cell_bounds = ds.variables["cell_bounds"][:]
+        cell_nodes = ds.variables["cell_node_indices"][:]
+        cell_lvl = ds.variables["cell_level"][:]
+        cell_qc = ds.variables["cell_qc"][:]
+        cell_err = ds.variables["cell_max_error"][:]
+
+        num_cells = len(cell_lvl)
+        leaf_cells: List[QuadCell] = []
+
+        for c in range(num_cells):
+            idx_a = int(cell_nodes[c, 0])
+            idx_b = int(cell_nodes[c, 1])
+            idx_c = int(cell_nodes[c, 2])
+            idx_d = int(cell_nodes[c, 3])
+            for idx_k in (idx_a, idx_b, idx_c, idx_d):
+                if idx_k < 0 or idx_k >= num_nodes:
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 拓扑损坏: QuadCell {c} 引用了越界控制节点索引 {idx_k} (合法节点范围: 0 ~ {num_nodes - 1})"
+                    )
+
+            na = nodes[idx_a]
+            nb = nodes[idx_b]
+            nc = nodes[idx_c]
+            nd = nodes[idx_d]
+            qc_c = int(cell_qc[c])
+
+            cell = QuadCell(
+                cell_id=c,
+                x_min=float(cell_bounds[c, 0]),
+                y_min=float(cell_bounds[c, 1]),
+                x_max=float(cell_bounds[c, 2]),
+                y_max=float(cell_bounds[c, 3]),
+                level=int(cell_lvl[c]),
+                node_a=na,
+                node_b=nb,
+                node_c=nc,
+                node_d=nd,
+                qc_min_spacing_reached=bool(qc_c & QC_BIT_MIN_SPACING_REACHED),
+                qc_max_refinement_reached=bool(qc_c & QC_BIT_MAX_REFINEMENT_REACHED),
+                qc_validity_boundary=bool(qc_c & QC_BIT_FES_VALIDITY_BOUNDARY),
+                max_error_pct=float(cell_err[c])
+            )
+            leaf_cells.append(cell)
+
+        time_epochs = ds.variables["time"][:]
+        time_index = pd.to_datetime(time_epochs, unit="s", utc=True)
+
+        terminal_tide = None
+        if "tide_msl_terminal_m" in ds.variables:
+            terminal_tide = np.array(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32)
+
+        return TideCacheStructure(
+            metadata=attrs,
+            nodes=nodes,
+            leaf_cells=leaf_cells,
+            time_index=time_index,
+            num_nodes=num_nodes,
+            num_cells=num_cells,
+            time_samples=len(time_epochs),
+            terminal_tide=terminal_tide
+        )
+
+
+class TideCacheTimeSeriesReader:
+    """
+    Tide Cache NetCDF 时序流式分块读取器。
+    按需提取指定控制节点集合的局部时间窗口切片，支持 context manager。
+    严格限制内存驻留，禁止将全量节点时序一次性载入内存。
+    """
+    def __init__(self, cache_path: str):
+        self.cache_path = str(cache_path)
+        self._ds: Optional[netCDF4.Dataset] = None
+        self.num_nodes: int = 0
+        self.num_times: int = 0
+
+    def open(self):
+        if self._ds is None:
+            if not os.path.exists(self.cache_path):
+                raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {self.cache_path}")
+            self._ds = netCDF4.Dataset(self.cache_path, mode="r")
+            self.num_nodes = len(self._ds.dimensions["node"])
+            self.num_times = len(self._ds.dimensions["time"])
+        return self
+
+    def close(self):
+        if self._ds is not None:
+            try:
+                self._ds.close()
+            except Exception:
+                pass
+            self._ds = None
+
+    def __enter__(self):
+        return self.open()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def read_chunk(self, node_indices: List[int], start_time_idx: int, end_time_idx: int) -> np.ndarray:
+        """
+        读取指定节点集合在 [start_time_idx, end_time_idx) 时间区间的 Raw MSL 潮位切片。
+        返回形状为 (len(node_indices), end_time_idx - start_time_idx) 的 float32 数组。
+        """
+        if self._ds is None:
+            self.open()
+        if len(node_indices) == 0:
+            return np.zeros((0, max(0, end_time_idx - start_time_idx)), dtype=np.float32)
+        for nid in node_indices:
+            if nid < 0 or nid >= self.num_nodes:
+                raise TideCacheIntegrityError(f"请求的控制节点索引越界: {nid} (合法范围: 0 ~ {self.num_nodes - 1})")
+
+        var_tide = self._ds.variables["tide_msl_m"]
+        chunk = var_tide[node_indices, start_time_idx:end_time_idx]
+        return np.asarray(chunk, dtype=np.float32)
+
+
 def calculate_inundation_from_tide_cache(
     dem_path: str,
     cache_path: str,
@@ -967,13 +1179,25 @@ def calculate_inundation_from_tide_cache(
     engine = RasterTideEngine()
     info = engine.inspect_raster(dem_path, compute_valid_count=True)
 
+    fsize = getattr(info, "file_size_bytes", None)
+    mtime = getattr(info, "mtime_ns", None)
+    if (fsize is None or mtime is None) and os.path.exists(dem_path):
+        try:
+            st = os.stat(dem_path)
+            fsize = st.st_size
+            mtime = st.st_mtime_ns
+        except Exception:
+            pass
+
     expected_spec = {
         "width": info.width,
         "height": info.height,
         "crs": info.crs,
         "transform": info.transform,
         "bounds": info.bounds,
-        "nodata": info.nodata
+        "nodata": info.nodata,
+        "file_size_bytes": fsize,
+        "mtime_ns": mtime
     }
 
     compatible, reasons = validate_tide_cache_compatibility(cache_path, expected_spec)
@@ -1074,6 +1298,7 @@ def calculate_exposure_from_tide_cache(
 ) -> Dict[str, Any]:
     """
     基于预先生成的 Tide Cache (*_tide.nc, Schema 1.2) 与输入 DEM 解算潜在天文潮露出时间域栅格产品 (零 FES 重复调用)。
+    采用流式轻量级读取 (TideCacheStructure + TideCacheTimeSeriesReader)，绝不一次性加载全量时序矩阵。
     生成 7 大独立 GeoTIFF 科学产品。
     """
     t_start = time.time()
@@ -1089,13 +1314,25 @@ def calculate_exposure_from_tide_cache(
     engine = RasterTideEngine()
     info = engine.inspect_raster(dem_path, compute_valid_count=True)
 
+    fsize = getattr(info, "file_size_bytes", None)
+    mtime = getattr(info, "mtime_ns", None)
+    if (fsize is None or mtime is None) and os.path.exists(dem_path):
+        try:
+            st = os.stat(dem_path)
+            fsize = st.st_size
+            mtime = st.st_mtime_ns
+        except Exception:
+            pass
+
     expected_spec = {
         "width": info.width,
         "height": info.height,
         "crs": info.crs,
         "transform": info.transform,
         "bounds": info.bounds,
-        "nodata": info.nodata
+        "nodata": info.nodata,
+        "file_size_bytes": fsize,
+        "mtime_ns": mtime
     }
 
     compatible, reasons = validate_tide_cache_compatibility(cache_path, expected_spec)
@@ -1105,14 +1342,14 @@ def calculate_exposure_from_tide_cache(
         )
 
     if progress_callback:
-        progress_callback(5, "Tide Cache 兼容性通过，正在加载控制网格与时序...")
+        progress_callback(5, "Tide Cache 兼容性通过，正在加载控制网格拓扑...")
 
-    cache_data = read_tide_cache(cache_path, load_raw_tide=True)
-    leaf_cells: List[QuadCell] = cache_data["leaf_cells"]
-    nodes: List[ControlNode] = cache_data["nodes"]
-    meta: Dict[str, Any] = cache_data["metadata"]
-    time_idx: pd.DatetimeIndex = cache_data["time_index"]
-    terminal_tide: Optional[np.ndarray] = cache_data.get("terminal_tide")
+    cache_data = read_tide_cache_structure(cache_path)
+    leaf_cells: List[QuadCell] = cache_data.leaf_cells
+    nodes: List[ControlNode] = cache_data.nodes
+    meta: Dict[str, Any] = cache_data.metadata
+    time_idx: pd.DatetimeIndex = cache_data.time_index
+    terminal_tide: Optional[np.ndarray] = cache_data.terminal_tide
 
     # 准备产物路径
     from .exposure_engine import ExposureProductPaths, stream_exposure_metrics_interpolation
@@ -1150,12 +1387,29 @@ def calculate_exposure_from_tide_cache(
             if os.path.exists(p):
                 raise ExistingOutputError(f"目标输出产物已存在且不允许覆盖: {p}")
 
-    # 计算终端时刻时间戳 (秒)
+    # 解析请求时间窗口及终端时刻时间戳 (秒)
+    source_tz = str(meta.get("TIMEZONE", "UTC"))
+    req_start_sec = None
+    req_end_sec = None
+    if "TIME_START" in meta:
+        try:
+            req_start_sec = parse_cache_time_to_utc(str(meta["TIME_START"]), source_tz)
+        except Exception:
+            pass
+    if "TIME_END" in meta:
+        try:
+            req_end_sec = parse_cache_time_to_utc(str(meta["TIME_END"]), source_tz)
+        except Exception:
+            pass
+
     term_ts_sec = None
-    if terminal_tide is not None:
-        end_t_str = str(meta.get("TIME_END", ""))
-        if end_t_str:
-            term_ts_sec = float(pd.Timestamp(end_t_str).timestamp())
+    if terminal_tide is not None and req_end_sec is not None:
+        term_ts_sec = req_end_sec
+    elif terminal_tide is not None and "TIME_END" in meta:
+        try:
+            term_ts_sec = parse_cache_time_to_utc(str(meta["TIME_END"]), source_tz)
+        except Exception:
+            pass
 
     from .raster_engine import build_support_topology
     top_res_m = float(meta.get("TOPOLOGY_RESOLUTION_M", 100.0))
@@ -1193,6 +1447,9 @@ def calculate_exposure_from_tide_cache(
         block_size=block_size,
         terminal_node_tides=terminal_tide,
         terminal_timestamp_sec=term_ts_sec,
+        requested_time_start_sec=req_start_sec,
+        requested_time_end_sec=req_end_sec,
+        cache_path=cache_path,
         labeled_coarse=labeled_coarse,
         downsample_factor=downsample_factor,
         h_coarse=h_coarse,
