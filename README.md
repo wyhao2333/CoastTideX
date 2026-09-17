@@ -1,8 +1,9 @@
 # CoastTideX: 全球海岸带高精度潮位模拟与高程基准转换系统
 
 <p align="center">
+  <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-127%20Passing-10b981.svg" alt="127 Tests Passing">
+  <img src="https://img.shields.io/badge/Tests-136%20Passing-10b981.svg" alt="136 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -319,7 +320,7 @@ python cli.py raster batch \
 
 ## 16. 快速上手：GUI 桌面图形界面指南 (Quick Start: GUI Desktop Guide)
 
-双击运行根目录下的 `run_gui.bat`（或在激活的虚拟环境中运行 `python main.py`）：
+双击运行根目录下的 `run_gui.bat`（或在激活的虚拟环境中运行 `python app.py`，命令行批处理亦可使用 `python cli.py --help`）：
 1. **选项卡 1：单点/时段潮位序列**：输入经纬度，一键生成潮位折线图、极值标注与高程基准转换表；
 2. **选项卡 2：批量站点多时刻解算**：导入 CSV 坐标表，批量解算并导出结果；
 3. **选项卡 3：单影像栅格解算 / 验证**：加载 GeoTIFF，自由选择快照解算、潜在淹没频率或潜在露出时间域分析；
@@ -345,10 +346,10 @@ CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模
 1. **控制网格与逐像元 FES 动力学解耦**：
    - 传统逐像元暴力计算需对千万级像元全量运行 34 分潮调和展开，计算耗时与内存开销不可接受；
    - CoastTideX 采用自适应四叉树稀疏控制网格与 CCDF 向量化检索，仅需在数百至数千个关键控制节点解算 FES 潮位，像元级淹没频率通过四角节点经验累计分布高效插值求得；
-   - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时将空间反演误差严格控制在 < 1.0% 容差以内。
+   - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时将空间反演误差严格控制在设置的容差（默认 < 1.0%）以内。
 
 2. **时间域流式 2D 状态机与超低内存驻留**：
-   - 露出时间域分析引擎彻底杜绝 (rows, cols, time_chunk) 3D 像元张量分配；
+   - 露出时间域分析引擎彻底杜绝 $(rows, cols, time\_chunk)$ 3D 像元张量分配；
    - 在 512×512 空间计算窗口内，仅维护 2D 像元高程与标量状态，时间轴按时间步纯矢量化流式推进；
    - 全年 17,568 个时间步流式解算过程中，单景瓦片核心解算内存峰值严格受控在 < 2.5 GB 物理内存以内（基于标准 8 核 16GB 典型科研工作站评估）。
 
@@ -356,20 +357,24 @@ CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模
 
 ## 19. 单元测试与质量验证 (Unit Testing & Verification)
 
-CoastTideX 拥有完备的自动化单元测试集，累计通过 **127 项严苛测试**：
+CoastTideX 拥有完备的分层自动化测试体系，全工程累计通过 **136 项严谨单元测试**：
 ```bash
 & "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
 ```
 ```text
-Ran 127 tests in 29.179s
+Ran 136 tests in ~43.8s
 OK
 ```
-测试覆盖：
-- 4 大高程基准闭合性与地中海/黑海区域大地水准面跳变测试；
-- 自适应控制网格拓扑连通防护与屏障隔离验证；
-- 潜在露出分析 1D 解析解、跨界线性插值及 2D 分块流式累加测试；
-- Tide Cache Schema 1.2 写入/读取、防篡改签名与断点恢复测试；
-- 真实 FES2022b 潮位与真实长兴岛/崇明东滩 DEM 实战对比测试。
+
+### 测试层次与执行边界说明：
+1. **GitHub Actions 远端 CI 流水线 (自动化构建与回归防护)**：
+   - 在无图形界面、无真实 `pyfes` C/C++ 扩展编译环境的纯净 Linux runner 上运行；
+   - 依靠测试替身（Mock Predictors）、合成潮汐动力学场与数学解析解桩，全面覆盖 4 大高程基准闭合性、四叉树网格拓扑连通防护、Tide Cache NetCDF 流式读写、断点恢复、异常回滚及 2D 向量化状态机。
+2. **本地全要素真实科学验证 (Local Full Validation Harness)**：
+   - 位于 `tests/test_v15_beta_validation_harness.py`；
+   - 专用于在配置有真实 FES2022b 原生非结构网格 (`fes2022b/` 3.77 GB) 与崇明东滩/长兴岛真实 DEM 的本地工作站环境下执行物理真实性端到端校验。
+3. **v1.6 生产场景严密覆盖 (Production Scenarios)**：
+   - 涵盖时序分块切片读取器 vs 全量 Oracle 0 误差等价性、切片时间跨度上界约束、双盆地山脊拓扑屏障隔离、失效角点权重自动重新归一化、多时区转换与缺失终端潮位分母守恒、`_AtomicExposureWriter` 异常临时文件零残留、陈旧 DEM 修改拦截、Stage 2 零 FES 物理调用不变量以及 NetCDF 节点越界完整性校验等 9 大生产级专项测试。
 
 ---
 

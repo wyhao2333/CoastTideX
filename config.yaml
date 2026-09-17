@@ -6,7 +6,7 @@ paths:
   # FES2022b 原生非结构有限元网格 NetCDF 文件路径 (近岸精度最高)
   fes_ns_grid: "fes2022b/ocean_tide_non_structured/FES2022b_OceanTide_NSgrid.nc"
   
-  # FES2022b 1/30° 规则网格潮位来源/外推掩膜 NetCDF 文件路径 (可选外部参考，0:Native Ocean, 1:Extrapolated Tide, 2:Land, 3:Lake)
+  # FES2022b 1/30° 规则网格潮位来源/外推掩膜 NetCDF 文件路径 (可选外部参考，0=Ocean native data, 1=Extrapolated data, 2=Land, 3=Lake)
   # 注意：当前 CoastTideX Native LGP2 主解算流程不使用此文件参与潮位计算；此文件亦不是 Hybrid MDT 基准来源掩膜。
   fes_extrapolation_mask_nc: "fes2022b/mask_fes2022B.nc"
 

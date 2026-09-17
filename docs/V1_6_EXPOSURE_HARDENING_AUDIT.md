@@ -1,6 +1,9 @@
 # CoastTideX v1.6 科学与工程系统性加固与第二轮审计报告
 # Systematic Scientific & Engineering Hardening Audit Report (v1.6 Beta)
 
+> [!WARNING]
+> **历史报告已更新 / SUPERSEDED**：本文档为 Round 2 阶段性加固审计报告。关于 Stage 2 内存解耦（$O(K_{\text{local}} \times \text{time\_chunk\_size})$ 流式读取）、Tide Cache 结构与读取器、终端潮位时间语义及 9 大生产场景验证的最终规范，已被 Round 3 权威审计报告取代，请参阅 [docs/V1_6_EXPOSURE_HARDENING_ROUND3.md](file:///I:/Test_tide_model/docs/V1_6_EXPOSURE_HARDENING_ROUND3.md)。
+
 - **审计基准时间 / Audit Date**: 2026-09-17
 - **系统版本 / System Version**: CoastTideX v1.6 Beta (Hardened)
 - **主要开发者 / Lead Developer**: 王宇浩 (Wang Yuhao)
@@ -25,7 +28,7 @@
   - 彻底去除像元级双重循环；
   - 采用纯二维 NumPy 数组就地维护流式状态：`total_exp_sec` (Float64), `max_cont_sec` (Float64), `curr_exp_sec` (Float64), `ev_count` (UInt32), `valid_dur_sec` (Float64), `prev_wl` (Float32)；
   - 逐时间步流式重构二维单时刻水面切片，在 $(rows, cols)$ 空间掩膜上一次性执行 4 类几何跨界状态转移（全露出、全淹没、淹没转露出、露出转淹没）；
-  - 线性跨界交点比例 $r = 	ext{clip}\left(rac{z - H_0}{H_1 - H_0}, 0.0, 1.0ight)$ 矢量化求交。
+  - 线性跨界交点比例 $r = \text{clip}\left(\frac{z - H_0}{H_1 - H_0}, 0.0, 1.0\right)$ 矢量化求交。
 - **验证结果**: 编写了 `compute_2d_vec` 与 `compute_1d_continuous_exposure` 在 100 组随机时序上的严密对比测试，**两者的累计露出时长、最大单次连续露出、平均事件时长与发生次数在浮点精度范围内达到精确 0 误差**。
 
 ### 2. 拓扑屏障连通防护与连通域隔离 (P0-2)

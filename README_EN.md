@@ -1,8 +1,9 @@
 # CoastTideX: High-Precision Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System
 
 <p align="center">
+  <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-127%20Passing-10b981.svg" alt="127 Tests Passing">
+  <img src="https://img.shields.io/badge/Tests-136%20Passing-10b981.svg" alt="136 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -26,7 +27,7 @@ Powered by the authoritative French CNES/AVISO **FES2022b global ocean tide hydr
 In **CoastTideX v1.6**, the system advances into the **time domain**, introducing the **Potential Astronomical Tidal Exposure Duration Engine for Tidal Flats and Beaches**, **strictly unified half-open interval `[start, end)` temporal slicing semantics**, and **Tide Cache Schema 1.2 (with terminal water level sampling)**.
 
 > [!NOTE]
-> Current project status: **CoastTideX v1.6 Beta / Feature Branch**. It is fully tested with 127 automated unit tests and is suitable for rigorous research and production evaluation.
+> Current project status: **CoastTideX v1.6 Beta / Feature Branch**. It is fully covered by 136 automated unit tests and is suitable for rigorous research and production evaluation.
 
 ---
 
@@ -280,7 +281,7 @@ python cli.py raster batch \
 
 ## 16. Quick Start: GUI Desktop Guide
 
-Launch the desktop interface via `run_gui.bat` or `python main.py`:
+Launch the desktop interface via `run_gui.bat` or `python app.py` (CLI batch mode is available via `python cli.py --help`):
 - **Tab 1: Single Point / Timeseries**: Predicts timeseries, identifies HW/LW, and performs multi-datum conversion;
 - **Tab 2: Batch Station Predictions**: Ingests CSV coordinate lists and evaluates water levels across multiple epochs;
 - **Tab 3: Spatial Raster Simulation**: Supports Snapshot, Inundation Frequency, and Exposure Duration analysis for single GeoTIFF files;
@@ -302,7 +303,7 @@ CoastTideX is architected for large-scale coastal remote sensing scenes and long
 
 1. **Decoupled Quadtree Control Grid vs. Brute-Force Pixel Inversion**:
    - Rather than evaluating full FES harmonic expansions across tens of millions of DEM pixels, CoastTideX adaptively concentrates tidal evaluations on sparse quadtree control nodes (hundreds to thousands of nodes per scene);
-   - Inundation frequency is rapidly inverted via empirical CCDF search at each pixel, bypassing over 99% of redundant FES calculations while bounding the spatial error to < 1.0% tolerance.
+   - Inundation frequency is rapidly inverted via empirical CCDF search at each pixel, bypassing over 99% of redundant FES calculations while bounding the spatial error to the configured tolerance (default < 1.0%).
 
 2. **2D Vectorized Streaming State Machine (< 2.5 GB RAM)**:
    - Completely eliminates 3D `(rows, cols, time_chunk)` pixel tensor allocations in memory;
@@ -313,14 +314,19 @@ CoastTideX is architected for large-scale coastal remote sensing scenes and long
 
 ## 19. Unit Testing & Quality Verification
 
-CoastTideX passes **122 comprehensive unit tests**:
+CoastTideX passes **136 rigorous automated unit tests**:
 ```bash
 & "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
 ```
 ```text
-Ran 127 tests in 29.179s
+Ran 136 tests in ~43.8s
 OK
 ```
+
+### Testing Strategy & Isolation:
+1. **GitHub Actions Remote CI**: Runs in a headless Linux environment without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics;
+2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs;
+3. **v1.6 Production Hardening Suite**: 9 production-grade scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
 
 ---
 

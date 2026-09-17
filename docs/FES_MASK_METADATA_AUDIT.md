@@ -33,25 +33,29 @@
 
 ### 全局属性 (Global Attributes):
 - `Conventions`: `"CF-1.6"`
-- `title`: `"FES2022b land-sea and shelf-deep ocean mask"`
-- `source`: `"AVISO+ / CNES / LEGOS"`
+- `title`: `"FES2022 mask for extrapolated tide elavations"` (注：保留官方 NetCDF 原始拼写)
+- `summary`: `"Mask to differentiate native data and extrapolated data for FES2022 tide elevation grids"`
+- `source / credits`: `"authors : LEGOS, NOVELTIS, CLS ; owner : CNES"`
+- `project`: `"FES2022"`
+- `product_version`: `"b"`
+- `date_created`: `"2024-06-11 09:23:49"`
 
 ### 格网维度 (Dimensions):
-- `lat`: **5401** (纬度范围: -90.0° 至 +90.0°，采样间隔 $\Delta \varphi = 1/30^\circ \approx 0.0333^\circ$)
-- `lon`: **10800** (经度范围: 0.0° 至 360.0°，采样间隔 $\Delta \lambda = 1/30^\circ \approx 0.0333^\circ$)
+- `latitude`: **5401** (范围: -90.0° 至 +90.0°，采样间隔 $\Delta \varphi = 1/30^\circ \approx 0.03333^\circ$)
+- `longitude`: **10800** (范围: 0.0° 至 360.0°，采样间隔 $\Delta \lambda = 1/30^\circ \approx 0.03333^\circ$)
 - **总格网点数**: $5401 \times 10800 = 58,330,800$ (约 5833 万格网节点)
 
 ### 变量定义 (Variables):
-1. `lat(lat)`: `float64`, units: `degrees_north`
-2. `lon(lon)`: `float64`, units: `degrees_east`
-3. `mask(lat, lon)`: `float32` / `int8` (Deflate 压缩存储)
+1. `latitude(latitude)`: `float32`, units: `degrees_north`
+2. `longitude(longitude)`: `float32`, units: `degrees_east`
+3. `mask(latitude, longitude)`: `float32`, `long_name: "Mask : 0=Ocean native data, 1=Extrapolated data, 2=Land, 3=Lake"`, `_FillValue: 1.8446744e+19`
 
 ### `mask` 取值含义说明 (Mask Value Classifications):
-经统计，该文件掩膜变量包含以下取值类别：
-- `0.0` (**Open Deep Ocean**): 深海大洋开阔水域，全动力学解；
-- `1.0` (**Continental Land**): 大陆与大型岛屿陆地像元；
-- `2.0` (**Continental Shelf / Shallow Seas**): 大陆架与近岸浅水陆架区；
-- `3.0` (**Inland Lakes / Marginal Extrapolations**): 内陆大型湖泊或近岸外推过渡区。
+文件内部 `mask` 变量的 `long_name` 属性与官方数值定义严格如下：
+- `0`: **Ocean native data** (大洋原生数值解，无外推)
+- `1`: **Extrapolated data** (近岸外推数据)
+- `2`: **Land** (陆地像元)
+- `3`: **Lake** (内陆湖泊像元)
 
 ---
 
