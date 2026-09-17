@@ -49,7 +49,7 @@ tide:
   # 整年预测模式默认时间步长 (推荐 30min，2024闰年严格对应 17,568 样本点)
   annual_default_freq: "30min"
 
-# 空间栅格潮汐计算引擎配置 (Spatial Raster Tide Engine v1.4)
+# 空间栅格潮汐计算引擎配置 (Spatial Raster Tide Engine)
 raster:
   # FES 空间批量评估最大单次点数 (防止 M 空间点 × T 时间步一次性爆内存)
   max_fes_evaluate_points: 500000
@@ -78,7 +78,7 @@ raster:
   # 拓扑连通判定有效像元比例阈值 (保守保护陆地 NoData barrier)
   topology_valid_fraction_threshold: 0.5
 
-  # 内存中允许驻留的最大控制节点数 (超过后抛出 RasterMemoryLimitError；v1.4 暂不引入复杂 disk-backed memmap 架构)
+  # 内存中允许驻留的最大控制节点数 (超过后抛出 RasterMemoryLimitError)
   max_in_memory_control_nodes: 50000
 
 # 界面与展示默认配置

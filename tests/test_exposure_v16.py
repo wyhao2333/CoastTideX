@@ -38,7 +38,12 @@ from core.exposure_engine import (
     NODATA_FLOAT32,
     NODATA_QC
 )
-from core.raster_engine import ControlNode, QuadCell, RasterInfo, RasterTideEngine, build_support_topology
+from core.raster_engine import (
+    ControlNode, QuadCell, RasterInfo, RasterTideEngine, build_support_topology,
+    compute_cell_membership, resolve_topology_compatible_corners,
+    estimate_control_node_memory, RasterMemoryLimitError,
+    QC_BIT_VALID, QC_BIT_SPATIAL_FALLBACK, QC_BIT_INSUFFICIENT_NODES, QC_BIT_CONNECTIVITY_FALLBACK
+)
 from core.batch_raster_engine import _verify_exposure_artifacts
 from core.tide_cache import (
     write_tide_cache,
@@ -744,6 +749,338 @@ class TestCorruptCellNodeIndexRaisesIntegrityError(_BaseExposureProductionTest):
             read_tide_cache_structure(cache_path)
         err_msg = str(ctx.exception)
         self.assertTrue("99999" in err_msg or "越界" in err_msg or "拓扑损坏" in err_msg)
+
+
+class TestProductionHardeningRound4(_BaseExposureProductionTest):
+    """
+    第四轮生产 Hardening 深度针对性验证测试集:
+    1. 非 UTC (如 Asia/Shanghai) Stage 1 导出 -> Stage 2 解算端到端时间轴保真
+    2. 混合拓扑连通域 (A/B/UNKNOWN) 科学隔离与 UNKNOWN 像元保守策略
+    3. 四叉树叶单元内部半开区间 [cx0, cx1) / [cy0, cy1) 单一片区归属
+    4. 终端时刻采样基于像元级 val_term_step 判定 QC_EXP_TERMINAL_UNAVAILABLE
+    5. 内存估算模型在 Tide Cache 导出 (dtype_bytes=8) 下的预算防线
+    6. 独立 1D 连续露出 Oracle 与 2D 流式状态机在多种波形下的数值等价性
+    7. 任意角点失效组合 (1, 2, 3 个有效) 权重重新归一化无稀释不变量
+    """
+
+    def test_stage1_to_stage2_non_utc_e2e(self):
+        """P0-1: Stage 1 非 UTC (如 Asia/Shanghai) 导出 Cache -> Stage 2 解算 Exposure 端到端严格无时间轴偏移"""
+        dem_path = self._create_synthetic_dem("dem_non_utc.tif", 10, 10, val=0.5)
+        info = RasterTideEngine().inspect_raster(dem_path, compute_valid_count=True)
+        cache_path = os.path.join(self.temp_dir, "cache_cst.nc")
+
+        # 模拟 Stage 1: start_time/end_time 带有 Asia/Shanghai
+        # 2024-01-01 08:00:00+08:00 对应 UTC 2024-01-01 00:00:00
+        # 2024-01-01 18:00:00+08:00 对应 UTC 2024-01-01 10:00:00
+        start_cst = "2024-01-01 08:00:00"
+        end_cst = "2024-01-01 18:00:00"
+        dr = pd.date_range("2024-01-01 00:00:00", periods=20, freq="30min", tz="UTC")
+
+        nodes_dict = {}
+        for nid, (x, y) in enumerate([
+            (500000.0, 3498000.0),
+            (502000.0, 3498000.0),
+            (500000.0, 3500000.0),
+            (502000.0, 3500000.0)
+        ]):
+            t_series = np.sin(np.linspace(0, 2 * np.pi, 20)).astype(np.float32)
+            nodes_dict[(int(x), int(y))] = ControlNode(
+                node_id=nid, x=x, y=y, lon=122.0, lat=31.0, valid=True,
+                water_levels_sorted=np.sort(t_series), static_offset_m=0.0,
+                tide_msl_raw=t_series, component_id=1
+            )
+        cell = QuadCell(
+            cell_id=0, x_min=500000.0, y_min=3498000.0, x_max=502000.0, y_max=3500000.0,
+            level=0,
+            node_a=nodes_dict[(500000, 3498000)],
+            node_b=nodes_dict[(502000, 3498000)],
+            node_c=nodes_dict[(500000, 3500000)],
+            node_d=nodes_dict[(502000, 3500000)]
+        )
+        term = np.array([0.5, 0.5, 0.5, 0.5], dtype=np.float32)
+
+        cache_meta = {
+            "start_time": start_cst,
+            "end_time": end_cst,
+            "freq": "30min",
+            "source_tz": "Asia/Shanghai",
+            "inclusive": "left",
+            "constituents": "all",
+            "dem_datum": "egm2008",
+            "initial_control_spacing_m": 4000.0,
+            "min_control_spacing_m": 500.0,
+            "inundation_error_tolerance_pct": 1.0,
+            "target_mode": "intertidal",
+            "topology_max_resolution_m": 100.0,
+            "topology_valid_fraction_threshold": 0.5,
+            "fes_model": "FES2022b",
+            "fes_source_type": "native_lgp2"
+        }
+        write_tide_cache(
+            cache_path=cache_path,
+            info=info,
+            leaf_cells=[cell],
+            node_cache=nodes_dict,
+            time_index=dr,
+            metadata=cache_meta,
+            tide_msl_terminal=term,
+            schema_version="1.2"
+        )
+
+        # 验证 NetCDF 全局属性中写入了标准的 UTC 规范字段
+        with netCDF4.Dataset(cache_path, "r") as ds:
+            self.assertIn("TIME_START_UTC", ds.ncattrs())
+            self.assertIn("TIME_END_UTC", ds.ncattrs())
+            self.assertIn("TIME_START_UTC_EPOCH", ds.ncattrs())
+            self.assertIn("TIME_END_UTC_EPOCH", ds.ncattrs())
+            self.assertTrue(ds.TIME_START_UTC.endswith("Z") or "+00:00" in ds.TIME_START_UTC)
+            self.assertTrue(ds.TIME_END_UTC.endswith("Z") or "+00:00" in ds.TIME_END_UTC)
+            start_epoch = float(ds.TIME_START_UTC_EPOCH)
+            end_epoch = float(ds.TIME_END_UTC_EPOCH)
+            self.assertEqual(start_epoch, 1704067200.0)
+            self.assertEqual(end_epoch, 1704103200.0)
+
+        # Stage 2 纯 Cache 解算
+        out_dir = os.path.join(self.temp_dir, "out_non_utc")
+        res = calculate_exposure_from_tide_cache(
+            dem_path=dem_path,
+            cache_path=cache_path,
+            output_dir=out_dir
+        )
+        self.assertEqual(res["status"], "COMPLETED")
+        with rasterio.open(res["products"].exposure_duration_h_path) as src:
+            tags = src.tags()
+            self.assertEqual(tags.get("TIME_START"), "2024-01-01 00:00:00+00:00")
+            self.assertEqual(tags.get("TIME_END"), "2024-01-01T10:00:00+00:00")
+
+    def test_topology_mixed_components_and_unknown_handling(self):
+        """P0-2: Inundation 与 Exposure 拓扑语义统一及 UNKNOWN (0) 处理测试"""
+        # Case A: 像元 component > 0 (1), 角点有 1 和 0 (UNKNOWN)
+        # UNKNOWN 节点严禁混入，只有 matching component 节点可用
+        usable, norm_w, flags = resolve_topology_compatible_corners(
+            pixel_component=1,
+            corner_components=[1, 0, 1, 0],
+            corner_valids=[True, True, True, True],
+            corner_weights=[0.25, 0.25, 0.25, 0.25]
+        )
+        self.assertEqual(usable, [0, 2])
+        self.assertFalse(flags["insufficient_nodes"])
+        self.assertTrue(flags["spatial_fallback"])
+        self.assertTrue(flags["connectivity_fallback"])
+        np.testing.assert_allclose(norm_w, [0.5, 0.5])
+
+        # Case B: 像元 component == 0 (UNKNOWN), 角点全为同一明确连通域 (如全为 2)
+        # 允许回退插值，标记 connectivity_fallback
+        usable_b, norm_w_b, flags_b = resolve_topology_compatible_corners(
+            pixel_component=0,
+            corner_components=[2, 2, 2, 2],
+            corner_valids=[True, True, True, True],
+            corner_weights=[0.25, 0.25, 0.25, 0.25]
+        )
+        self.assertEqual(usable_b, [0, 1, 2, 3])
+        self.assertFalse(flags_b["insufficient_nodes"])
+        self.assertTrue(flags_b["connectivity_fallback"])
+        np.testing.assert_allclose(norm_w_b, [0.25, 0.25, 0.25, 0.25])
+
+        # Case C: 像元 component == 0 (UNKNOWN), 角点存在跨连通域冲突 (既有 1 又有 2)
+        # 严格阻断插值，返回 insufficient_nodes = True
+        usable_c, norm_w_c, flags_c = resolve_topology_compatible_corners(
+            pixel_component=0,
+            corner_components=[1, 2, 1, 2],
+            corner_valids=[True, True, True, True],
+            corner_weights=[0.25, 0.25, 0.25, 0.25]
+        )
+        self.assertEqual(usable_c, [])
+        self.assertIsNone(norm_w_c)
+        self.assertTrue(flags_c["insufficient_nodes"])
+
+        # Case D: 像元 component == 1, 但角点全是 component 2
+        # 严格阻断插值
+        usable_d, norm_w_d, flags_d = resolve_topology_compatible_corners(
+            pixel_component=1,
+            corner_components=[2, 2, 2, 2],
+            corner_valids=[True, True, True, True],
+            corner_weights=[0.25, 0.25, 0.25, 0.25]
+        )
+        self.assertEqual(usable_d, [])
+        self.assertTrue(flags_d["insufficient_nodes"])
+
+    def test_leaf_cell_boundary_single_membership(self):
+        """P1: 四叉树叶单元内部半开区间 [cx0, cx1) / [cy0, cy1) 保证相邻单元边界像元单一片区归属"""
+        raster_bounds = (0.0, 0.0, 100.0, 100.0)
+        cell_left = (0.0, 0.0, 50.0, 100.0)
+        cell_right = (50.0, 0.0, 100.0, 100.0)
+
+        # 点恰好在内部交界线 x = 50.0, y = 50.0
+        px_x = np.array([50.0])
+        px_y = np.array([50.0])
+
+        in_l = compute_cell_membership(px_x, px_y, cell_left, raster_bounds)
+        in_r = compute_cell_membership(px_x, px_y, cell_right, raster_bounds)
+
+        self.assertFalse(bool(in_l[0]))
+        self.assertTrue(bool(in_r[0]))
+        self.assertEqual(int(in_l[0]) + int(in_r[0]), 1)
+
+        # 点恰好在外边界东端 x = 100.0, y = 50.0
+        px_east = np.array([100.0])
+        in_r_east = compute_cell_membership(px_east, px_y, cell_right, raster_bounds)
+        self.assertTrue(bool(in_r_east[0]))
+
+        # 网格覆盖率求和测试：在相邻单元的总归属计数必须严格为 1
+        xs = np.linspace(0.0, 100.0, 101)
+        ys = np.full(101, 50.0)
+        m_l = compute_cell_membership(xs, ys, cell_left, raster_bounds)
+        m_r = compute_cell_membership(xs, ys, cell_right, raster_bounds)
+        total_m = m_l.astype(int) + m_r.astype(int)
+        self.assertTrue(np.all(total_m == 1), "所有像元在相邻单元上的归属计数必须严格为 1")
+
+    def test_terminal_qc_per_pixel(self):
+        """P1: 终端时刻采样基于像元级 val_term_step 判定 QC_EXP_TERMINAL_UNAVAILABLE"""
+        dem_path = self._create_synthetic_dem("dem_term_pixel.tif", 2, 2, val=0.5)
+        dr = pd.date_range("2024-01-01 00:00:00", periods=5, freq="30min", tz="UTC")
+
+        # 8 个节点，分别供左单元 (c0) 与右单元 (c1)
+        nodes = []
+        for nid in range(8):
+            t_s = np.zeros(5, dtype=np.float32)
+            nodes.append(ControlNode(
+                node_id=nid, x=500000.0 + (nid % 4) * 50.0, y=3499800.0 + (nid // 4) * 50.0,
+                lon=122.0, lat=31.0, valid=True, water_levels_sorted=t_s, static_offset_m=0.0,
+                tide_msl_raw=t_s, component_id=1
+            ))
+
+        c0 = QuadCell(cell_id=0, x_min=500000.0, y_min=3499800.0, x_max=500100.0, y_max=3500000.0,
+                      level=0, node_a=nodes[0], node_b=nodes[1], node_c=nodes[2], node_d=nodes[3])
+        c1 = QuadCell(cell_id=1, x_min=500100.0, y_min=3499800.0, x_max=500200.0, y_max=3500000.0,
+                      level=0, node_a=nodes[4], node_b=nodes[5], node_c=nodes[6], node_d=nodes[7])
+
+        # terminal: 节点 0~3 有效 (0.0m), 节点 4~7 无效 (NaN)
+        term_tides = np.array([0.0, 0.0, 0.0, 0.0, np.nan, np.nan, np.nan, np.nan], dtype=np.float32)
+
+        out_paths = ExposureProductPaths(
+            exposure_fraction_path=os.path.join(self.temp_dir, "t_frac.tif"),
+            exposure_duration_h_path=os.path.join(self.temp_dir, "t_dur.tif"),
+            exposure_max_continuous_h_path=os.path.join(self.temp_dir, "t_max.tif"),
+            exposure_mean_event_h_path=os.path.join(self.temp_dir, "t_mean.tif"),
+            exposure_event_count_path=os.path.join(self.temp_dir, "t_cnt.tif"),
+            exposure_valid_time_fraction_path=os.path.join(self.temp_dir, "t_val.tif"),
+            exposure_qc_path=os.path.join(self.temp_dir, "t_qc.tif")
+        )
+
+        stream_exposure_metrics_interpolation(
+            dem_path=dem_path,
+            output_paths=out_paths,
+            cells=[c0, c1],
+            nodes=nodes,
+            time_series_utc=np.asarray(dr),
+            target_datum="egm2008",
+            time_chunk_size=5,
+            terminal_node_tides=term_tides,
+            terminal_timestamp_sec=dr[-1].timestamp() + 1800.0
+        )
+
+        with rasterio.open(out_paths.exposure_qc_path) as src_q, \
+             rasterio.open(out_paths.exposure_valid_time_fraction_path) as src_v:
+            qc = src_q.read(1)
+            val_frac = src_v.read(1)
+            # col 0 (cell 0 像元) 终端有效 -> 无 QC_EXP_TERMINAL_UNAVAILABLE
+            self.assertFalse(bool(qc[0, 0] & QC_EXP_TERMINAL_UNAVAILABLE))
+            self.assertAlmostEqual(val_frac[0, 0], 100.0, places=1)
+
+            # col 1 (cell 1 像元) 终端 NaN -> 标记 QC_EXP_TERMINAL_UNAVAILABLE 且 valid_time_fraction < 100%
+            self.assertTrue(bool(qc[0, 1] & QC_EXP_TERMINAL_UNAVAILABLE))
+            self.assertLess(val_frac[0, 1], 100.0)
+
+    def test_memory_budget_dtype_bytes_check(self):
+        """P1: 内存估算模型在 Tide Cache 导出 (dtype_bytes=8) 与标准淹没 (dtype_bytes=4) 下的预算防线"""
+        mem_inund = estimate_control_node_memory(1000, 1000, dtype_bytes=4)
+        mem_cache = estimate_control_node_memory(1000, 1000, dtype_bytes=8)
+        self.assertAlmostEqual(mem_cache, mem_inund * 2.0)
+
+        engine = RasterTideEngine(max_in_memory_control_nodes=2)
+        dem_path = self._create_synthetic_dem("dem_mem.tif", 20, 20, val=0.5)
+
+        with self.assertRaises(RasterMemoryLimitError) as ctx:
+            engine.calculate_inundation_raster(
+                dem_path=dem_path,
+                start_time="2024-01-01 00:00:00",
+                end_time="2024-01-01 02:00:00",
+                freq="1h",
+                export_tide_cache_path=os.path.join(self.temp_dir, "mem_test_cache.nc")
+            )
+        self.assertIn("max_in_memory_control_nodes", str(ctx.exception))
+
+    def test_exposure_oracle_1d_vs_streaming(self):
+        """多波形 (半日潮/全日潮/大小潮/平水/线性上升) 1D Oracle 与 2D 状态机一致性验证"""
+        times = np.arange(0, 48 * 3600, 1800, dtype=np.float64)
+        dt = 1800.0
+        n_steps = len(times)
+        term_ts = times[-1] + dt
+
+        waveforms = {
+            "semidiurnal": np.sin(2 * np.pi * times / (12.42 * 3600)) * 2.0,
+            "diurnal_composite": np.sin(2 * np.pi * times / (12.42 * 3600)) * 1.5 + np.sin(2 * np.pi * times / (24.0 * 3600)) * 0.8,
+            "linear_ramp": np.linspace(-2.0, 2.0, n_steps),
+            "flat_water": np.full(n_steps, 0.5)
+        }
+
+        elevations = [-1.0, 0.0, 0.5, 1.2, 3.0]
+
+        for name, wl in waveforms.items():
+            wl = wl.astype(np.float32)
+            term_wl = float(wl[-1])
+            for z in elevations:
+                res_1d = compute_1d_continuous_exposure(
+                    water_levels=wl,
+                    timestamps_seconds=times,
+                    elevation=z,
+                    terminal_water_level=term_wl,
+                    terminal_timestamp_seconds=term_ts
+                )
+
+                wl_nodes = wl[:, None]
+                term_nodes = np.array([term_wl], dtype=np.float32)
+                weights = np.ones((1, 1, 1), dtype=np.float32)
+                z_mat = np.full((1, 1), z, dtype=np.float32)
+
+                res_2d = compute_2d_vec(
+                    wl_nodes=wl_nodes,
+                    term_nodes=term_nodes,
+                    times_sec=times,
+                    terminal_ts=term_ts,
+                    weights=weights,
+                    z=z_mat
+                )
+
+                self.assertAlmostEqual(res_1d["exposure_fraction_pct"], float(res_2d["exposure_fraction_pct"][0, 0]), places=4,
+                                       msg=f"Waveform {name}, z={z} fraction mismatch")
+                self.assertAlmostEqual(res_1d["cumulative_exposure_h"], float(res_2d["cumulative_exposure_h"][0, 0]), places=4,
+                                       msg=f"Waveform {name}, z={z} cum_exp mismatch")
+                self.assertAlmostEqual(res_1d["max_continuous_exposure_h"], float(res_2d["max_continuous_exposure_h"][0, 0]), places=4,
+                                       msg=f"Waveform {name}, z={z} max_cont mismatch")
+                self.assertEqual(res_1d["event_count"], int(res_2d["event_count"][0, 0]),
+                                 msg=f"Waveform {name}, z={z} event_count mismatch")
+
+    def test_corner_weight_renormalization_all_combinations(self):
+        """角点失效 (1, 2, 3 个有效) 权重重新归一化数学不变量 (无零稀释，sum=1.0) 验证"""
+        for n_valid in [1, 2, 3]:
+            for valid_subset in [[0], [0, 1], [0, 2, 3], [1, 3]]:
+                if len(valid_subset) != n_valid:
+                    continue
+                valids = [i in valid_subset for i in range(4)]
+                raw_w = [0.25, 0.25, 0.25, 0.25]
+                usable, norm_w, flags = resolve_topology_compatible_corners(
+                    pixel_component=0,
+                    corner_components=[0, 0, 0, 0],
+                    corner_valids=valids,
+                    corner_weights=raw_w
+                )
+                self.assertEqual(usable, valid_subset)
+                self.assertAlmostEqual(float(np.sum(norm_w)), 1.0, places=6)
+                self.assertTrue(flags["spatial_fallback"])
+                for w in norm_w:
+                    self.assertAlmostEqual(w, 1.0 / n_valid, places=5)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-136%20Passing-10b981.svg" alt="136 Tests Passing">
+  <img src="https://img.shields.io/badge/Tests-143%20Passing-10b981.svg" alt="143 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">

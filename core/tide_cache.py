@@ -1,8 +1,8 @@
 """
-CoastTideX 控制网格潮汐缓存模块 (Tide Cache Module v1.5 Alpha Hardened)
+CoastTideX 控制网格潮汐缓存模块 (CoastTideX Tide Cache Module)
 支持自适应四叉树控制节点潮位时序的高效 NetCDF4 序列化、流式压缩存储、完整性校验、
 全要素兼容性签名 (Compatibility Signature) 与轻量元数据检视，以及
-基于 Tide Cache 的二阶段天文潮潜在淹没频率解算 (零 FES 重复调用)。
+基于 Tide Cache 的二阶段天文潮潜在淹没频率与露出分析解算 (零 FES 重复调用)。
 """
 
 import os
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Callable, Set
 from collections import defaultdict
 
+import dateutil.tz
 import numpy as np
 import pandas as pd
 import netCDF4
@@ -53,14 +54,25 @@ class TideCacheIntegrityError(ValueError):
     pass
 
 
-def parse_cache_time_to_utc(time_str: str, default_tz: str = "UTC") -> float:
+def parse_cache_time_to_utc(time_val: Any, default_tz: str = "UTC") -> float:
     """
-    安全解析时间字符串为 UTC epoch 纪元秒浮点数。
-    支持 UTC 格式、带时区偏移格式 (如 '+08:00') 以及指定 default_tz 的 naive 字符串。
+    安全解析时间字符串或数值为 UTC epoch 纪元秒浮点数。
+    支持 UTC 格式、带时区偏移格式 (如 '+08:00')、'local' 时区解析以及指定 default_tz 的 naive 字符串。
     """
-    ts = pd.Timestamp(time_str)
+    try:
+        val_f = float(time_val)
+        if val_f > 1e8:
+            return val_f
+    except (ValueError, TypeError):
+        pass
+
+    ts = pd.Timestamp(time_val)
     if ts.tzinfo is None:
-        ts = ts.tz_localize(default_tz)
+        target_tz = dateutil.tz.tzlocal() if str(default_tz).lower() == "local" else default_tz
+        try:
+            ts = ts.tz_localize(target_tz, ambiguous=False, nonexistent="shift_forward")
+        except Exception:
+            ts = ts.tz_localize(target_tz, ambiguous=True, nonexistent="shift_forward")
     ts_utc = ts.tz_convert("UTC")
     return float(ts_utc.timestamp())
 
@@ -720,10 +732,23 @@ def write_tide_cache(
             ds.setncattr("SOURCE_NODATA", float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else np.nan)
             ds.setncattr("SOURCE_FILE_SIZE_BYTES", int(fsize_val) if fsize_val is not None else 0)
             ds.setncattr("SOURCE_MTIME_NS", int(mtime_val) if mtime_val is not None else 0)
-            ds.setncattr("TIME_START", str(metadata.get("start_time", time_index[0].isoformat())))
-            ds.setncattr("TIME_END", str(metadata.get("end_time", time_index[-1].isoformat())))
+            source_tz_str = str(metadata.get("source_tz", "UTC"))
+            start_str = str(metadata.get("start_time", time_index[0].isoformat()))
+            end_str = str(metadata.get("end_time", time_index[-1].isoformat()))
+
+            start_utc_epoch = float(metadata.get("start_time_utc_epoch", parse_cache_time_to_utc(start_str, default_tz=source_tz_str)))
+            end_utc_epoch = float(metadata.get("end_time_utc_epoch", parse_cache_time_to_utc(end_str, default_tz=source_tz_str)))
+            start_utc_iso = str(metadata.get("start_time_utc", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()))
+            end_utc_iso = str(metadata.get("end_time_utc", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()))
+
+            ds.setncattr("TIME_START", start_str)
+            ds.setncattr("TIME_END", end_str)
+            ds.setncattr("TIME_START_UTC", start_utc_iso)
+            ds.setncattr("TIME_END_UTC", end_utc_iso)
+            ds.setncattr("TIME_START_UTC_EPOCH", start_utc_epoch)
+            ds.setncattr("TIME_END_UTC_EPOCH", end_utc_epoch)
             ds.setncattr("TIME_STEP", str(metadata.get("freq", "30min")))
-            ds.setncattr("TIMEZONE", str(metadata.get("source_tz", "UTC")))
+            ds.setncattr("TIMEZONE", source_tz_str)
             ds.setncattr("TIME_INCLUSIVE", str(metadata.get("inclusive", "left")))
             ds.setncattr("TIME_SAMPLES", int(num_times))
             ds.setncattr("FES_MODEL", "FES2022b")
@@ -1391,12 +1416,24 @@ def calculate_exposure_from_tide_cache(
     source_tz = str(meta.get("TIMEZONE", "UTC"))
     req_start_sec = None
     req_end_sec = None
-    if "TIME_START" in meta:
+
+    if "TIME_START_UTC_EPOCH" in meta:
+        try:
+            req_start_sec = float(meta["TIME_START_UTC_EPOCH"])
+        except Exception:
+            pass
+    if req_start_sec is None and "TIME_START" in meta:
         try:
             req_start_sec = parse_cache_time_to_utc(str(meta["TIME_START"]), source_tz)
         except Exception:
             pass
-    if "TIME_END" in meta:
+
+    if "TIME_END_UTC_EPOCH" in meta:
+        try:
+            req_end_sec = float(meta["TIME_END_UTC_EPOCH"])
+        except Exception:
+            pass
+    if req_end_sec is None and "TIME_END" in meta:
         try:
             req_end_sec = parse_cache_time_to_utc(str(meta["TIME_END"]), source_tz)
         except Exception:

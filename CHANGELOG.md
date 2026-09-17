@@ -54,6 +54,14 @@
   - 升级 `_verify_exposure_artifacts` 深度校验全部 7 大产物及其规范签名；清理 `discover_rasters` 重复 `stat()` 调用。
 - **FES 掩膜元数据权威审计 (Docs)**：
   - 查证 `fes2022b/mask_fes2022B.nc` 物理尺寸严格为 1,027,081 字节 (0.98 MB)，澄清历史文档中 55.6 MB 与 700 MB 的误植，并产出 `docs/FES_MASK_METADATA_AUDIT.md`。
+- **第四轮最终 Hardening 闭环修复 (Round 4 Final Pre-Merge Hardening)**：
+  - **P0-1 非 UTC 时区 Stage 1 -> Tide Cache 时间轴对齐**：在 Tide Cache NetCDF 全局属性中规范化写入标准 UTC 锚定字段 (`TIME_START_UTC`, `TIME_END_UTC`, `TIME_START_UTC_EPOCH`, `TIME_END_UTC_EPOCH`)，并在 `core/tide_cache.py` 中强化支持数字秒时间戳与本地时区安全解析，彻底消除非 UTC 时区时间轴平移风险。
+  - **P0-2 淹没与露出双引擎拓扑语义科学统一**：抽象共享核心函数 `compute_cell_membership` 与 `resolve_topology_compatible_corners`，严格隔离不同连通域水体，保守处理 component 0 (UNKNOWN) 节点，杜绝未知节点跨盆地渗透污染。
+  - **P1 内存预算模型修正**：修正 `RasterTideEngine` 导出 Tide Cache 时的内存预算估算 (`dtype_bytes = 8`，覆盖 raw MSL 与 sorted 数组)，防止内存溢出。
+  - **P1 叶单元半开区间单一片区归属**：空间插值叶单元统一执行内部 `[x_min, x_max)` / `[y_min, y_max)` 半开区间归属，仅外边界闭合，彻底消除内部边界像元多单元重复累加。
+  - **P1 终端时刻 QC 逐像元精细化**：终端时刻有效性判定由全局变量提升至像元级 `val_term_step`，精准标记局部终端失效像元的 `QC_EXP_TERMINAL_UNAVAILABLE` 并扣减对应 `valid_time_fraction`。
+  - **受控真实 FES2022b 经验 Oracle 评测**：基于真实 FES2022b 模型与长江口代表性潮间带地形完成 30 点位对照解算，输出规范误差指标 (Fraction MAE: 0.0395 pp, Duration MAE: 0.0190 h, Event Count error: 0)。
+  - **生产场景严密自动化测试套件**：单元测试套件扩充至 143 个并通过完整回归，覆盖端到端非 UTC 转换、混合拓扑隔离、半开边界唯一归属、逐像元终端 QC 与 1D Oracle 多波形等价性。
 
 ### 变更 (Changed)
 - **统一全系统采样时间语义为严格半开区间 `[start, end)`**：

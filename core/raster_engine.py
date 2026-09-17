@@ -19,7 +19,7 @@ import time
 import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Iterator, Optional, Tuple, List, Dict, Any, Set, Callable
+from typing import Iterator, Optional, Tuple, List, Dict, Any, Set, Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -37,10 +37,14 @@ except ImportError:
 
 from .utils import (
     load_app_config, resolve_project_path, normalize_longitude,
-    circular_longitude_span, convert_time_to_utc, compute_inundation_frequency
+    circular_longitude_span, convert_time_to_utc, compute_inundation_frequency,
+    build_time_index
 )
 from .datum_engine import DatumTransformer, DatumDataError
 from .tide_engine import FESTidePredictor
+
+COASTTIDEX_VERSION = "1.6"
+
 
 
 class RasterCalculationCancelled(RuntimeError):
@@ -90,6 +94,102 @@ QC_MIN_SPACING_REACHED = QC_BIT_MIN_SPACING_REACHED
 QC_CONNECTIVITY_FALLBACK = QC_BIT_CONNECTIVITY_FALLBACK
 QC_FES_VALIDITY_BOUNDARY = QC_BIT_FES_VALIDITY_BOUNDARY
 QC_MAX_REFINEMENT_REACHED = QC_BIT_MAX_REFINEMENT_REACHED
+
+
+def compute_cell_membership(
+    px_x: np.ndarray | float,
+    px_y: np.ndarray | float,
+    cell_bounds: Tuple[float, float, float, float],
+    raster_bounds: Tuple[float, float, float, float]
+) -> np.ndarray | bool:
+    """
+    统一的半开区间四叉树叶单元像元归属判定 (Half-open QuadCell Pixel Membership)。
+    内部边界严格为 [x_min, x_max) 与 [y_min, y_max)，
+    仅在栅格最东端 (East) 和最北端 (North) 外边界允许闭合 [x_min, x_max] / [y_min, y_max]。
+    保证相邻叶单元边界上的像元单一片区归属，消弭处理顺序依赖。
+    """
+    cx0, cy0, cx1, cy1 = cell_bounds[0], cell_bounds[1], cell_bounds[2], cell_bounds[3]
+    rx0, ry0, rx1, ry1 = raster_bounds[0], raster_bounds[1], raster_bounds[2], raster_bounds[3]
+
+    is_east = (cx1 >= rx1 - 1e-6)
+    is_north = (cy1 >= ry1 - 1e-6)
+
+    x_in = (px_x >= cx0) & (px_x <= cx1 if is_east else px_x < cx1)
+    y_in = (px_y >= cy0) & (px_y <= cy1 if is_north else px_y < cy1)
+    return x_in & y_in
+
+
+def resolve_topology_compatible_corners(
+    pixel_component: int,
+    corner_components: Sequence[int],
+    corner_valids: Sequence[bool],
+    corner_weights: Sequence[np.ndarray | float]
+) -> Tuple[List[int], Optional[np.ndarray], Dict[str, bool]]:
+    """
+    统一的拓扑连通域角点兼容性与权重自适应重归一化算法。
+    供 Inundation Frequency 与 Exposure Time-Domain 共享同一套科学连通性判定规则。
+
+    参数:
+        pixel_component: 像元归属的拓扑连通域编号 (0 为 UNKNOWN)
+        corner_components: 4个角点节点的连通域编号序列
+        corner_valids: 4个角点节点的有效性布尔值序列
+        corner_weights: 4个角点的双线性权重序列 (每项为标量或 1D 数组)
+
+    返回:
+        usable_corner_indices: 可用于插值的角点索引列表 (0~3 的子集)
+        normalized_weights: 堆叠并重新归一化的权重数组 (K, P) 或 (K,)；若无可用节点返回 None
+        flags: 包含 'insufficient_nodes', 'spatial_fallback', 'connectivity_fallback' 的字典
+    """
+    valid_corners = [k for k in range(4) if corner_valids[k]]
+    node_comps = {corner_components[k] for k in valid_corners}
+    non_z_node_comps = {c for c in node_comps if c > 0}
+
+    usable_corners: List[int] = []
+    is_fallback = False
+
+    if len(valid_corners) == 0:
+        usable_corners = []
+    elif pixel_component > 0:
+        if pixel_component in non_z_node_comps:
+            # 明确连通域像元：严格只使用匹配该连通域的控制节点 (严禁 UNKNOWN 节点混入)
+            usable_corners = [k for k in valid_corners if corner_components[k] == pixel_component]
+        elif len(non_z_node_comps) == 0:
+            # 所有节点未归属明确连通域 (全为 0 UNKNOWN)，保守回退允许插值，并记录 fallback
+            usable_corners = list(valid_corners)
+            is_fallback = True
+        else:
+            # 像元归属连通域 A，但节点属于连通域 B 且无 A，严格阻断跨水体污染
+            usable_corners = []
+    else:
+        # 像元处于未知连通域 (component 0 UNKNOWN):
+        # 仅当所有有效节点全归属同一明确连通域或全未划分时方允许插值
+        if len(non_z_node_comps) <= 1:
+            usable_corners = list(valid_corners)
+            is_fallback = True
+        else:
+            # 存在跨连通域冲突 (既有 A 又有 B)，UNKNOWN 像元不可插值，严格阻断
+            usable_corners = []
+
+    flags = {
+        "insufficient_nodes": (len(usable_corners) == 0),
+        "spatial_fallback": (0 < len(usable_corners) < 4),
+        "connectivity_fallback": is_fallback or (0 < len(usable_corners) < len(valid_corners))
+    }
+
+    if len(usable_corners) == 0:
+        return usable_corners, None, flags
+
+    # 提取并重归一化可用权重
+    sub_weights = [corner_weights[k] for k in usable_corners]
+    weights_stack = np.asarray(sub_weights, dtype=np.float32)
+    w_sum = np.sum(weights_stack, axis=0)
+    w_safe = np.where(w_sum > 1e-9, w_sum, 1.0)
+    if weights_stack.ndim == 1:
+        norm_weights = weights_stack / w_safe
+    else:
+        norm_weights = weights_stack / w_safe[None, :]
+
+    return usable_corners, norm_weights, flags
 
 
 @dataclass
@@ -496,11 +596,11 @@ def stream_inundation_frequency_interpolation(
                         pixel_comps = labeled_coarse[r_c_arr, c_c_arr]
 
                         for cell in intersecting_cells:
-                            is_east = (cell.x_max >= info.bounds[2] - 1e-6)
-                            is_north = (cell.y_max >= info.bounds[3] - 1e-6)
-                            x_in = (px_xs >= cell.x_min) & (px_xs <= cell.x_max if is_east else px_xs < cell.x_max)
-                            y_in = (px_ys >= cell.y_min) & (px_ys <= cell.y_max if is_north else px_ys < cell.y_max)
-                            in_cell = x_in & y_in
+                            in_cell = compute_cell_membership(
+                                px_xs, px_ys,
+                                cell_bounds=(cell.x_min, cell.y_min, cell.x_max, cell.y_max),
+                                raster_bounds=info.bounds
+                            )
                             if not np.any(in_cell):
                                 continue
 
@@ -518,18 +618,11 @@ def stream_inundation_frequency_interpolation(
                             w_b = u * (1.0 - v)
                             w_c = (1.0 - u) * v
                             w_d = u * v
+                            raw_weights = [w_a, w_b, w_c, w_d]
 
-                            c_nodes = [
-                                (cell.node_a, w_a),
-                                (cell.node_b, w_b),
-                                (cell.node_c, w_c),
-                                (cell.node_d, w_d)
-                            ]
-
-                            valid_nodes = []
-                            for n, w_vec in c_nodes:
-                                if n.valid and len(n.water_levels_sorted) > 0:
-                                    valid_nodes.append((n, w_vec))
+                            c_nodes = [cell.node_a, cell.node_b, cell.node_c, cell.node_d]
+                            corner_valids = [bool(n.valid and len(n.water_levels_sorted) > 0) for n in c_nodes]
+                            corner_comps = [int(n.component_id) for n in c_nodes]
 
                             sub_freq = np.full(len(sub_z), np.nan, dtype=np.float32)
                             sub_qc = np.zeros(len(sub_z), dtype=np.uint16)
@@ -542,65 +635,38 @@ def stream_inundation_frequency_interpolation(
                             if cell.qc_validity_boundary:
                                 cell_qc_flags |= QC_BIT_FES_VALIDITY_BOUNDARY
 
-                            node_comps = {n.component_id for n, _ in valid_nodes}
-                            non_z_node_comps = {c for c in node_comps if c > 0}
+                            unique_p_comps = np.unique(sub_comps)
+                            for p_comp in unique_p_comps:
+                                mask_pc = (sub_comps == p_comp)
+                                pc_z = sub_z[mask_pc]
+                                pc_weights = [w[mask_pc] for w in raw_weights]
 
-                            if len(valid_nodes) == 0:
-                                sub_qc |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES)
-                            elif len(valid_nodes) == 4 and (len(non_z_node_comps) == 0 or (len(non_z_node_comps) == 1 and (sub_comps == list(non_z_node_comps)[0]).all())):
-                                na, nb, nc, nd = cell.node_a, cell.node_b, cell.node_c, cell.node_d
-                                fa = compute_inundation_frequency(na.water_levels_sorted, sub_z, as_percentage=True)
-                                fb = compute_inundation_frequency(nb.water_levels_sorted, sub_z, as_percentage=True)
-                                fc = compute_inundation_frequency(nc.water_levels_sorted, sub_z, as_percentage=True)
-                                fd = compute_inundation_frequency(nd.water_levels_sorted, sub_z, as_percentage=True)
+                                usable_corners, norm_w, top_flags = resolve_topology_compatible_corners(
+                                    pixel_component=int(p_comp),
+                                    corner_components=corner_comps,
+                                    corner_valids=corner_valids,
+                                    corner_weights=pc_weights
+                                )
 
-                                sub_freq = (w_a * fa + w_b * fb + w_c * fc + w_d * fd).astype(np.float32)
-                                node_bits = na.qc_bitmask | nb.qc_bitmask | nc.qc_bitmask | nd.qc_bitmask
-                                sub_qc |= (cell_qc_flags | node_bits)
-                            else:
-                                unique_p_comps = np.unique(sub_comps)
-                                for p_comp in unique_p_comps:
-                                    mask_pc = (sub_comps == p_comp)
-                                    pc_z = sub_z[mask_pc]
+                                if top_flags["insufficient_nodes"] or norm_w is None:
+                                    sub_freq[mask_pc] = np.nan
+                                    sub_qc[mask_pc] |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES | QC_BIT_CONNECTIVITY_FALLBACK)
+                                else:
+                                    f_accum = np.zeros_like(pc_z, dtype=float)
+                                    p_bits = cell_qc_flags
+                                    if top_flags["spatial_fallback"]:
+                                        p_bits |= QC_BIT_SPATIAL_FALLBACK
+                                    if top_flags["connectivity_fallback"]:
+                                        p_bits |= QC_BIT_CONNECTIVITY_FALLBACK
 
-                                    if p_comp > 0:
-                                        if p_comp in non_z_node_comps:
-                                            usable_nodes = [
-                                                (n, w_vec[mask_pc]) for n, w_vec in valid_nodes
-                                                if n.component_id == p_comp
-                                            ]
-                                        elif len(non_z_node_comps) == 0:
-                                            # 所有节点未划分连通域 (全为 0)，允许作为单连通域整体插值
-                                            usable_nodes = [(n, w_vec[mask_pc]) for n, w_vec in valid_nodes]
-                                        else:
-                                            usable_nodes = []
-                                    else:
-                                        # 像元处于未知连通域 (0): 仅当所有节点全归属同一连通域或全未划分时，方允许插值
-                                        if len(non_z_node_comps) <= 1:
-                                            usable_nodes = [(n, w_vec[mask_pc]) for n, w_vec in valid_nodes]
-                                        else:
-                                            usable_nodes = []
+                                    for idx_u, k_corner in enumerate(usable_corners):
+                                        node_k = c_nodes[k_corner]
+                                        fn = compute_inundation_frequency(node_k.water_levels_sorted, pc_z, as_percentage=True)
+                                        f_accum += norm_w[idx_u] * fn
+                                        p_bits |= node_k.qc_bitmask
 
-                                    if len(usable_nodes) == 0:
-                                        sub_freq[mask_pc] = np.nan
-                                        sub_qc[mask_pc] |= (cell_qc_flags | QC_BIT_INSUFFICIENT_NODES | QC_BIT_CONNECTIVITY_FALLBACK)
-                                    else:
-                                        total_w = sum(w for _, w in usable_nodes)
-                                        total_w = np.where(total_w > 1e-6, total_w, 1.0)
-                                        f_accum = np.zeros_like(pc_z, dtype=float)
-                                        p_bits = cell_qc_flags
-                                        if len(usable_nodes) < 4:
-                                            p_bits |= QC_BIT_SPATIAL_FALLBACK
-                                        if len(usable_nodes) < len(valid_nodes) or p_comp == 0:
-                                            p_bits |= QC_BIT_CONNECTIVITY_FALLBACK
-
-                                        for n, w_vec in usable_nodes:
-                                            fn = compute_inundation_frequency(n.water_levels_sorted, pc_z, as_percentage=True)
-                                            f_accum += (w_vec / total_w) * fn
-                                            p_bits |= n.qc_bitmask
-
-                                        sub_freq[mask_pc] = f_accum.astype(np.float32)
-                                        sub_qc[mask_pc] |= p_bits
+                                    sub_freq[mask_pc] = f_accum.astype(np.float32)
+                                    sub_qc[mask_pc] |= p_bits
 
                             freq_out[in_cell] = sub_freq
                             qc_out[in_cell] = sub_qc
@@ -654,7 +720,7 @@ def stream_inundation_frequency_interpolation(
 
 class RasterTideEngine:
     """
-    CoastTideX 空间栅格潮位解算核心引擎 (v1.4)。
+    CoastTideX 空间栅格潮位解算核心引擎。
     """
 
     def __init__(
@@ -1064,7 +1130,7 @@ class RasterTideEngine:
                         progress_callback(pct, f"正在流式解算单时刻空间潮位与质量掩膜 ({win_idx}/{total_windows} 块)...")
 
                 metadata = {
-                    'SOFTWARE': 'CoastTideX v1.4',
+                    'SOFTWARE': f'CoastTideX v{COASTTIDEX_VERSION}',
                     'ENGINE_MODE': 'snapshot_raster',
                     'TIDE_MODEL': 'FES2022b',
                     'SNAPSHOT_TIME_UTC': ts_utc_str,
@@ -1276,7 +1342,14 @@ class RasterTideEngine:
             t_end_str = str(end_time)
             inclusive_mode = 'left'  # v1.6: 全系统统一默认严格半开区间 [start, end) 杜绝端点双重统计
 
-        time_idx = pd.date_range(t_start_str, t_end_str, freq=freq, inclusive=inclusive_mode, tz="UTC")
+        _, time_idx_utc, _ = build_time_index(
+            start_time=t_start_str,
+            end_time=t_end_str,
+            freq=freq,
+            source_tz=source_tz,
+            inclusive=inclusive_mode
+        )
+        time_idx = time_idx_utc
         n_time_samples = len(time_idx)
 
         if progress_callback:
@@ -1381,9 +1454,10 @@ class RasterTideEngine:
             resident_count = sum(1 for n in node_cache.values() if len(n.water_levels_sorted) > 0)
             pending_count = len(uncalculated)
             total_attempted = resident_count + pending_count
+            bytes_per_sample = 8 if export_tide_cache_path else 4
             if total_attempted > self.max_in_memory_control_nodes:
-                mem_required_mb = estimate_control_node_memory(total_attempted, n_time_samples, dtype_bytes=4)
-                mem_budget_mb = estimate_control_node_memory(self.max_in_memory_control_nodes, n_time_samples, dtype_bytes=4)
+                mem_required_mb = estimate_control_node_memory(total_attempted, n_time_samples, dtype_bytes=bytes_per_sample)
+                mem_budget_mb = estimate_control_node_memory(self.max_in_memory_control_nodes, n_time_samples, dtype_bytes=bytes_per_sample)
                 raise RasterMemoryLimitError(
                     f"自适应控制网格节点超出常驻内存预算上限 (Raster engine exceeded max_in_memory_control_nodes budget)! "
                     f"当前常驻节点 (Resident): {resident_count}, 待解算新节点 (Pending batch): {pending_count}, "
@@ -1765,9 +1839,20 @@ class RasterTideEngine:
             except Exception as e:
                 warnings.warn(f"无法预计算终端时刻潮位采样: {e}")
 
+            start_utc_dt, _ = convert_time_to_utc(t_start_str, source_tz=source_tz)
+            end_utc_dt, _ = convert_time_to_utc(t_end_str, source_tz=source_tz)
+            start_utc_iso = pd.Timestamp(start_utc_dt[0], tz="UTC").isoformat()
+            end_utc_iso = pd.Timestamp(end_utc_dt[0], tz="UTC").isoformat()
+            start_utc_epoch = float(pd.Timestamp(start_utc_dt[0], tz="UTC").timestamp())
+            end_utc_epoch = float(pd.Timestamp(end_utc_dt[0], tz="UTC").timestamp())
+
             cache_meta = {
                 "start_time": t_start_str,
                 "end_time": t_end_str,
+                "start_time_utc": start_utc_iso,
+                "end_time_utc": end_utc_iso,
+                "start_time_utc_epoch": start_utc_epoch,
+                "end_time_utc_epoch": end_utc_epoch,
                 "freq": freq,
                 "source_tz": source_tz,
                 "inclusive": inclusive_mode,
@@ -1799,8 +1884,8 @@ class RasterTideEngine:
             elapsed = time.time() - t_start
             return RasterResultSummary(
                 output_path=output_path or "",
-                qc_output_path=qc_output_path or "",
-                mode="adaptive_control_grid_tide_only",
+                qc_output_path="",
+                mode='grid_only',
                 width=info.width,
                 height=info.height,
                 valid_pixels=0,
@@ -1821,7 +1906,7 @@ class RasterTideEngine:
             progress_callback(60, f"自适应细分完成: 共 {len(leaf_cells)} 个叶单元, {final_nodes_count} 个控制节点。构建空间索引并开始流式插值写入...")
 
         metadata = {
-            'SOFTWARE': 'CoastTideX v1.5 Alpha',
+            'SOFTWARE': f'CoastTideX v{COASTTIDEX_VERSION}',
             'ENGINE_MODE': 'inundation_frequency_raster',
             'TIDE_MODEL': 'FES2022b',
             'TIDE_CONSTITUENTS': 'all' if constituents == 'all' else str(constituents),

@@ -54,7 +54,8 @@ import rasterio.windows
 from rasterio.windows import Window
 
 from .raster_engine import (
-    RasterInfo, ControlNode, QuadCell, RasterCalculationCancelled, ExistingOutputError
+    RasterInfo, ControlNode, QuadCell, RasterCalculationCancelled, ExistingOutputError,
+    compute_cell_membership, resolve_topology_compatible_corners
 )
 from .tide_cache import TideCacheIntegrityError, TideCacheTimeSeriesReader
 
@@ -722,6 +723,7 @@ def stream_exposure_metrics_interpolation(
         h = src_dem.height
         nodata_val = src_dem.nodata
         trans = src_dem.transform
+        raster_bounds = (src_dem.bounds.left, src_dem.bounds.bottom, src_dem.bounds.right, src_dem.bounds.top)
 
     # 预计算时间序列及步长 (秒)
     n_time = len(time_series_utc)
@@ -902,11 +904,11 @@ def stream_exposure_metrics_interpolation(
                             c_idxs = _get_cell_node_idxs(cell)
                             cx0, cx1, cy0, cy1 = _get_cell_bounds(cell)
 
-                            in_cell = (
-                                (xs_arr >= cx0) & (xs_arr <= cx1) &
-                                (ys_arr >= cy0) & (ys_arr <= cy1) &
-                                valid_dem_mask
-                            )
+                            in_cell = compute_cell_membership(
+                                xs_arr, ys_arr,
+                                (cx0, cy0, cx1, cy1),
+                                raster_bounds=raster_bounds
+                            ) & valid_dem_mask
                             if not np.any(in_cell):
                                 continue
 
@@ -938,40 +940,29 @@ def stream_exposure_metrics_interpolation(
                                 if not np.any(sub_in_cell):
                                     continue
 
-                                # 筛选属于同一拓扑连通域的可用节点
-                                usable_indices = []
-                                usable_weights = []
-                                for k_n in range(4):
-                                    if not val_sub[k_n]:
-                                        continue
-                                    n_comp = comp_sub[k_n]
-                                    if p_comp > 0:
-                                        if n_comp == p_comp or n_comp == 0:
-                                            usable_indices.append(c_idxs[k_n])
-                                            usable_weights.append(weights_all[k_n][mask_comp])
-                                    else:
-                                        usable_indices.append(c_idxs[k_n])
-                                        usable_weights.append(weights_all[k_n][mask_comp])
+                                usable_weights_raw = [w[mask_comp] for w in weights_all]
+                                usable_corners, norm_weights, top_flags = resolve_topology_compatible_corners(
+                                    pixel_component=int(p_comp),
+                                    corner_components=comp_sub,
+                                    corner_valids=val_sub,
+                                    corner_weights=usable_weights_raw
+                                )
 
-                                if len(usable_indices) == 0:
+                                if top_flags["insufficient_nodes"] or norm_weights is None:
                                     out_qc[sub_in_cell] = QC_EXP_INSUFFICIENT_NODES
                                     continue
 
-                                # 重新归一化权重 (防止 1~3 个角点时以 0 稀释)
-                                weights_stack = np.array(usable_weights, dtype=np.float32) # (K, P)
-                                w_sum = np.sum(weights_stack, axis=0)
-                                w_safe = np.where(w_sum > 1e-9, w_sum, 1.0)
-                                norm_weights = weights_stack / w_safe[None, :]
+                                usable_indices = tuple(c_idxs[k] for k in usable_corners)
 
                                 # 记录 QC
                                 cell_qc = QC_EXP_VALID
-                                if len(usable_indices) < 4:
+                                if top_flags["spatial_fallback"]:
                                     cell_qc |= QC_EXP_DEGRADED_CELL
                                 if datum_approx_sub:
                                     cell_qc |= QC_EXP_DATUM_APPROX
                                 out_qc[sub_in_cell] = cell_qc
 
-                                cell_mappings.append((sub_in_cell, tuple(usable_indices), norm_weights))
+                                cell_mappings.append((sub_in_cell, usable_indices, norm_weights))
 
                         # 找出当前分块所需的所有唯一控制节点全局索引 (按需提取局部节点)
                         block_node_set = set()
@@ -1097,6 +1088,7 @@ def stream_exposure_metrics_interpolation(
                                 prev_wl = h1_slice
                                 prev_ts = t1
 
+                        val_term_step = np.zeros((r_len, c_len), dtype=bool)
                         # 处理终端时刻采样 (Terminal Sample Crossing)
                         if has_terminal and terminal_dt_sec > 0.0:
                             h_term_slice = np.full((r_len, c_len), np.nan, dtype=np.float32)
@@ -1213,8 +1205,8 @@ def stream_exposure_metrics_interpolation(
                             out_val_time[val_pixels] = (val_time_ratio * 100.0).astype(np.float32)
 
                             qc_v = out_qc[val_pixels]
-                            if not has_terminal:
-                                qc_v |= QC_EXP_TERMINAL_UNAVAILABLE
+                            term_unavail_mask = ~val_term_step[val_pixels]
+                            qc_v = np.where(term_unavail_mask, qc_v | QC_EXP_TERMINAL_UNAVAILABLE, qc_v)
 
                             # 极端常时状态标记
                             is_perm_exp = (np.abs(dur_h - val_dur_h) <= 1e-4)

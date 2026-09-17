@@ -588,7 +588,7 @@ class TestCoastTideX(unittest.TestCase):
                 # 水位 = Tide (1.5) + MDT (0.5) + DeltaN (-0.2) = 1.8m
                 self.assertAlmostEqual(out_data[0, 1], 1.8, places=3)
                 tags = src_out.tags()
-                self.assertEqual(tags.get('SOFTWARE'), 'CoastTideX v1.4')
+                self.assertEqual(tags.get('SOFTWARE'), 'CoastTideX v1.6')
                 self.assertEqual(tags.get('ENGINE_MODE'), 'snapshot_raster')
                 self.assertEqual(tags.get('VERTICAL_DATUM'), 'EGM2008')
 
