@@ -225,7 +225,7 @@ class TestCLIExposureAndBatchParsing(unittest.TestCase):
         ]
         # 我们用 patch parser.parse_args 或直接导入 parser 构建测试
         with patch("sys.argv", ["cli.py"] + test_args):
-            with patch("core.tide_engine.FESTidePredictor"), patch("core.datum_engine.DatumTransformer"):
+            with patch("cli.FESTidePredictor"), patch("cli.DatumTransformer"):
                 with patch("core.raster_engine.RasterTideEngine.calculate_exposure_raster") as mock_exp:
                     mock_exp.return_value = {"elapsed_seconds": 1.0, "products": None}
                     with patch("core.raster_engine.RasterTideEngine.inspect_raster") as mock_insp:
