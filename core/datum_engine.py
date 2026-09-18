@@ -1,5 +1,5 @@
 """
-CoastTideX 垂直基准转换引擎 (Datum Transformation Engine v1.4)
+CoastTideX 垂直基准转换引擎 (Datum Transformation Engine)
 实现从平均海平面 (MSL) 到 MDT 原始参考面 (GOCO06s / EIGEN-6C4)、EGM2008 大地水准面及 WGS84 空间几何椭球面的严密科学转换。
 
 科学转换原理:
@@ -315,7 +315,7 @@ def _apply_affine_transform(transform, xs, ys):
 
 class DatumTransformer:
     """
-    严密的海洋与大地测量垂直基准转换器 (v1.4)。
+    严密的海洋与大地测量垂直基准转换器。
     全面支持目标感知的基准加载 (Target-aware)、GOCO06s 与 EIGEN-6C4 双水准面差值改正及严格错误防御。
     """
 

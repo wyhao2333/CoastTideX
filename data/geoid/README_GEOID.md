@@ -1,4 +1,4 @@
-# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.6)
+# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.6 Beta)
 
 本目录包含 CoastTideX 系统用于高精度潮位垂直基准转换的核心空间栅格数据与大地测量学定义。
 
@@ -39,7 +39,7 @@ $$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{E
    $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
 
 > [!NOTE]
-> 在 v1.4 中，当计算目标仅为 MSL 或 EGM2008（`datum_target='both'` 或 `'egm2008'`）时，系统仅需加载 MDT 与 $\Delta N$ 栅格，**不再强制加载庞大的 EGM2008 绝对水准面起伏栅格 ($N$)**，实现计算内存与文件依赖的严密解耦。
+> 在当前基准引擎架构中，当计算目标仅为 MSL 或 EGM2008（`datum_target='both'` 或 `'egm2008'`）时，系统仅需加载 MDT 与 $\Delta N$ 栅格，**不再强制加载庞大的 EGM2008 绝对水准面起伏栅格 ($N$)**，实现计算内存与文件依赖的严密解耦。
 
 ### 2.3 复合型混合 MDT (Hybrid MDT) 区域基准特性：地中海与黑海
 CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全球海洋与区域模型的融合成果：
@@ -47,10 +47,10 @@ CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全�
 - **地中海 (Mediterranean Sea)**：融合 CMEMS2020-MED，其参考大地水准面为 **EIGEN-6C4** ($d/o=2190$)；
 - **黑海 (Black Sea)**：融合 CMEMS2020-BLK，其参考大地水准面为 **EIGEN-6C4** ($d/o=2190$)。
 
-**科学处理与双层判定机制 (CoastTideX v1.4 严谨架构)**：
+**科学处理与双层判定机制**：
 1. **第一优先级：权威来源掩膜 (`AUTHORITATIVE_MASK`)**：若配置了 `hybrid_mdt_source_mask.tif`，系统优先依据该权威栅格判定每个像元或离散点的基准源，质量评定为高保真度；
 2. **第二优先级：精细闭合多边形备用 (`QC_DATUM_SOURCE_APPROX`)**：若权威掩膜未配置或像元落入掩膜 NoData 区域，系统自动回退至几何闭合多边形射线法判别，并显式标记质量警告 `QC_DATUM_SOURCE_APPROX`，杜绝未知假设；
-3. **严格真值输出与拒绝伪造**：
+3. **严格标记与输出规范**：
    - 在地中海与黑海，标称主变量 `h_mdt_ref_m` 代表相对 EIGEN-6C4 的海面高；
    - `h_goco06s_m` 严格赋值为 `NaN`（坚决不冒充 GOCO06s）；
    - 正高转换通过专属 `delta_n_eigen6c4_minus_egm2008.tif` 进行差值改正：
@@ -89,5 +89,5 @@ CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全�
        --out data/geoid/delta_n_eigen6c4_minus_egm2008.tif
    ```
 
-脚本内含自动空间配准检查（CRS、Transform、Bounds、Resolution）与双线性重采样（Bilinear Resampling）机制，生成 GeoTIFF 采用 Deflate 算法压缩，确保体积低于 100MB 限制可受 Git 直接管理。
+脚本内含自动空间配准检查（CRS、Transform、Bounds、Resolution）与双线性重采样（Bilinear Resampling）机制，生成 GeoTIFF 采用 Deflate 算法压缩，生成体积紧凑且空间规格一致的栅格文件。
 

@@ -1,6 +1,6 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface v1.6)
-用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算与淹没频率分析。
+CoastTideX 命令行工具 (Command-Line Interface v1.6 Beta)
+用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算、淹没频率与潜在露出时间域分析。
 
 使用示例:
     # 自定义时段单点预测
@@ -17,6 +17,12 @@ CoastTideX 命令行工具 (Command-Line Interface v1.6)
 
     # 潮滩 DEM 潜在天文潮淹没频率解算 (Annual Inundation Frequency)
     python cli.py raster inundation --dem coastal_dem.tif --output inundation_freq.tif --year 2024 --step 30min --dem-datum egm2008
+
+    # 潮滩 DEM 潜在天文潮露出时间域分析 (7 大产品生成)
+    python cli.py raster exposure --dem coastal_dem.tif --output-dir ./exposure_out/ --year 2024 --step 30min --dem-datum egm2008
+
+    # 文件夹级批量栅格解算 (全要素模式: Tide Cache + 淹没频率 + 潜在露出产品)
+    python cli.py raster batch --input-folder ./tifs/ --output-folder ./batch_out/ --mode all --year 2024 --existing-policy resume
 """
 
 import os
@@ -44,7 +50,7 @@ from core.utils import export_dataframe
 
 
 def main(args_list: Optional[List[str]] = None):
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.6")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.6 Beta")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
 
@@ -110,7 +116,7 @@ def main(args_list: Optional[List[str]] = None):
     p_inund.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标感知模式 (默认: intertidal)")
     p_inund.add_argument("--export-cache", type=str, default=None, help="可选导出 Tide Cache (*_tide.nc)")
 
-    # 3.3 栅格潜在天文潮露出时间域分析 (v1.6)
+    # 3.3 栅格潜在天文潮露出时间域分析 (v1.6 Beta)
     p_exposure = raster_subparsers.add_parser("exposure", help="潜在天文潮露出时间域产品计算 (露出时长/频率/事件分析)")
     p_exposure.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
     p_exposure.add_argument("--output-dir", "-o", type=str, default=None, help="输出产品目录 (默认与 DEM 同级)")
@@ -130,8 +136,8 @@ def main(args_list: Optional[List[str]] = None):
     p_exposure.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标区域模式 (默认: intertidal)")
     p_exposure.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
 
-    # 3.4 批量潮间带栅格解算 (v1.5/v1.6)
-    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.5)")
+    # 3.4 批量潮间带栅格解算 (v1.6 Beta)
+    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.6 Beta)")
     p_batch_raster.add_argument("--input-folder", "-i", type=str, required=True, help="输入 GeoTIFF 文件夹路径")
     p_batch_raster.add_argument("--output-folder", "-o", type=str, default=None, help="输出文件夹路径 (默认: <input_folder>/CoastTideX_output)")
     p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache", "tide-exposure", "exposure-from-cache", "all"], help="解算模式 (默认: tide-inundation)")

@@ -927,6 +927,14 @@ class RasterTideEngine:
                 progress_callback=_prog_s2,
                 cancel_event=cancel_event
             )
+            res["mode"] = "exposure"
+            res["dem_path"] = dem_path
+            if output_dir:
+                res["output_dir"] = output_dir
+            elif "products" in res:
+                res["output_dir"] = os.path.dirname(os.path.abspath(res["products"].exposure_fraction_path))
+            if export_tide_cache_path:
+                res["export_tide_cache_path"] = cache_p
             return res
         finally:
             if need_cleanup and td:
@@ -1369,7 +1377,7 @@ class RasterTideEngine:
             获取坐标对应的拓扑连通域编号。
             component 0 严格为 UNKNOWN，仅在邻域内存在唯一明确连通域时方可归属。
             """
-            col_f, row_f = ~info.transform * (px_x, px_y)
+            col_f, row_f = ~info.transform @ (px_x, px_y)
             r_idx = int(np.clip(row_f // downsample_factor, 0, h_coarse - 1))
             c_idx = int(np.clip(col_f // downsample_factor, 0, w_coarse - 1))
             cid = int(labeled_coarse[r_idx, c_idx])
@@ -1551,8 +1559,8 @@ class RasterTideEngine:
             x0, x1 = xs_init[i_x], xs_init[i_x + 1]
             for i_y in range(len(ys_init) - 1):
                 y0, y1 = ys_init[i_y], ys_init[i_y + 1]
-                c0_f, r1_f = ~info.transform * (x0, y0)
-                c1_f, r0_f = ~info.transform * (x1, y1)
+                c0_f, r1_f = ~info.transform @ (x0, y0)
+                c1_f, r0_f = ~info.transform @ (x1, y1)
                 r_min = int(np.clip(min(r0_f, r1_f) // downsample_factor, 0, h_coarse - 1))
                 r_max = int(np.clip(max(r0_f, r1_f) // downsample_factor + 1, 0, h_coarse))
                 c_min = int(np.clip(min(c0_f, c1_f) // downsample_factor, 0, w_coarse - 1))

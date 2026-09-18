@@ -1,5 +1,5 @@
 """
-CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.5 Alpha Hardened)
+CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.6 Beta Hardened)
 支持文件夹级多 GeoTIFF 自动化发现、轻量级元数据检查、确定性排序、
 Tide Cache 序列化与二阶段淹没频率解算、统一 ExistingOutputPolicy 策略调度、
 全流程断点恢复 (Resume)、单文件失败隔离与任务清单 (Manifest) 管理。
@@ -106,6 +106,15 @@ class BatchManifest:
         "tide_cache_path",
         "frequency_path",
         "qc_path",
+        "exposure_output_dir",
+        "exposure_products_complete",
+        "exposure_fraction_path",
+        "exposure_duration_h_path",
+        "exposure_max_continuous_h_path",
+        "exposure_mean_event_h_path",
+        "exposure_event_count_path",
+        "exposure_valid_time_fraction_path",
+        "exposure_qc_path",
         "status",
         "run_action",
         "time_start",
@@ -131,12 +140,18 @@ class BatchManifest:
         self.records: Dict[str, Dict[str, Any]] = OrderedDict()
 
     def load(self) -> None:
-        """从已存在的 batch_manifest.json 加载既有记录"""
+        """从已存在的 batch_manifest.json 加载既有记录，具备向前向后字段兼容性"""
         if self.json_path.exists():
             try:
                 with open(self.json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.records = OrderedDict((item["input_path"], item) for item in data)
+                self.records = OrderedDict()
+                for item in data:
+                    in_path = item.get("input_path", "")
+                    if in_path:
+                        rec = {k: "" for k in self.FIELDS}
+                        rec.update(item)
+                        self.records[in_path] = rec
             except Exception:
                 self.records = OrderedDict()
 
@@ -534,6 +549,15 @@ class BatchRasterEngine:
                 tide_cache_path=tide_cache_path,
                 frequency_path=frequency_path,
                 qc_path=qc_path,
+                exposure_output_dir=str(tile_out_dir),
+                exposure_products_complete=False,
+                exposure_fraction_path=exp_paths.exposure_fraction_path,
+                exposure_duration_h_path=exp_paths.exposure_duration_h_path,
+                exposure_max_continuous_h_path=exp_paths.exposure_max_continuous_h_path,
+                exposure_mean_event_h_path=exp_paths.exposure_mean_event_h_path,
+                exposure_event_count_path=exp_paths.exposure_event_count_path,
+                exposure_valid_time_fraction_path=exp_paths.exposure_valid_time_fraction_path,
+                exposure_qc_path=exp_paths.exposure_qc_path,
                 crs=item["crs"],
                 width=item["width"],
                 height=item["height"],
@@ -554,6 +578,11 @@ class BatchRasterEngine:
                 continue
 
             prev_status = manifest.get_status(input_path)
+
+            # 确定本次任务各产物阶段需求
+            need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_ALL])
+            need_freq = (job_mode in [JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL])
+            need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL])
 
             # 构建本任务对应的预期缓存规格 (Expected Spec)
             dem_info = self.raster_engine.inspect_raster(input_path, compute_valid_count=False)
@@ -595,16 +624,23 @@ class BatchRasterEngine:
             # ---------------- ERROR_IF_EXISTS 策略防线 ----------------
             if policy == ExistingOutputPolicy.ERROR_IF_EXISTS:
                 conflict_files = []
-                if job_mode in (JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION):
-                    if os.path.exists(tide_cache_path):
-                        conflict_files.append(tide_cache_path)
-                if job_mode in (JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL):
+                if need_tide and os.path.exists(tide_cache_path):
+                    conflict_files.append(tide_cache_path)
+                if need_freq:
                     if os.path.exists(frequency_path):
                         conflict_files.append(frequency_path)
                     if os.path.exists(qc_path):
                         conflict_files.append(qc_path)
-                if job_mode in (JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL):
-                    for ep in [exp_paths.exposure_fraction_path, exp_paths.exposure_duration_h_path, exp_paths.exposure_qc_path]:
+                if need_exp:
+                    for ep in [
+                        exp_paths.exposure_fraction_path,
+                        exp_paths.exposure_duration_h_path,
+                        exp_paths.exposure_max_continuous_h_path,
+                        exp_paths.exposure_mean_event_h_path,
+                        exp_paths.exposure_event_count_path,
+                        exp_paths.exposure_valid_time_fraction_path,
+                        exp_paths.exposure_qc_path,
+                    ]:
                         if os.path.exists(ep):
                             conflict_files.append(ep)
 
@@ -633,35 +669,35 @@ class BatchRasterEngine:
             if policy == ExistingOutputPolicy.RESUME:
                 if job_mode == JOB_MODE_TIDE_ONLY:
                     if cache_ok:
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_TIDE_AND_INUNDATION:
                     if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
                     if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_TIDE_AND_EXPOSURE:
                     if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_EXPOSURE_FROM_CACHE:
                     if _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
@@ -670,7 +706,7 @@ class BatchRasterEngine:
                     if (cache_ok and
                         _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]) and
                         _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"])):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
@@ -682,7 +718,7 @@ class BatchRasterEngine:
                         input_path,
                         status=STATUS_FAILED,
                         run_action="FAILED",
-                        error_message=f"Mode 3 前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
                     )
                     manifest.save()
                     summary_counts["failed"] += 1
@@ -692,7 +728,7 @@ class BatchRasterEngine:
                         input_path,
                         status=STATUS_FAILED,
                         run_action="FAILED",
-                        error_message=f"Mode 3 前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
                     )
                     manifest.save()
                     summary_counts["failed"] += 1
@@ -826,6 +862,7 @@ class BatchRasterEngine:
                     valid_pixel_count=valid_pixels_cnt,
                     elapsed_frequency_seconds=round(elapsed_freq, 2) if need_freq else None,
                     elapsed_exposure_seconds=round(elapsed_exp, 2) if need_exp else None,
+                    exposure_products_complete=True if need_exp else False,
                     error_message=""
                 )
                 manifest.save()

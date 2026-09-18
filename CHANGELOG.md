@@ -14,28 +14,36 @@
     1. `*_exposure_fraction.tif` (Float32, %): 累计有效潜在露出时间比例；
     2. `*_exposure_duration_h.tif` (Float32, hours): 累计潜在露出时长；
     3. `*_exposure_max_continuous_h.tif` (Float32, hours): 最长单次连续潜在露出时长；
-    4. `*_exposure_mean_event_h.tif` (Float32, hours): 平均单次露出事件时长；
-    5. `*_exposure_event_count.tif` (UInt32, count): 露出事件完整发生频次；
+    4. `*_exposure_mean_event_h.tif` (Float32, hours): 平均单次连续潜在露出事件时长；
+    5. `*_exposure_event_count.tif` (UInt32, count): 请求时间窗口内识别到的连续潜在露出事件段数量；
     6. `*_exposure_valid_time_fraction.tif` (Float32, %): 有效时间数据覆盖比例；
     7. `*_exposure_qc.tif` (UInt16, bitmask): 露出分析专用质量控制位掩膜。
 - **时间域跨界线性插值 (Linear Crossing Interpolation)**：
-  - 在相邻时间步间检测水面高程跨越地形高程时刻，精确线性求解交点时刻 t*，杜绝整采样步长离散截断量化误差。
+  - 在相邻时间步间检测水面高程跨越地形高程时刻，精确线性求解交点时刻 t*，避免整采样步长离散截断量化误差。
 - **严格边界判定准则**：
   - 严格定义 $H(t) \le z$ 为露出 (Exposed)，$H(t) > z$ 为淹没 (Inundated)；$H(t) == z$ 严格归属于露出状态。
 - **Tide Cache Schema 1.2 升级**：
-  - 引入终端时刻潮位采样变量 `tide_msl_terminal_m(node)`，完美闭合时序末端半开区间跨界线性插值。
+  - 引入终端时刻潮位采样变量 `tide_msl_terminal_m(node)`，闭合时序末端半开区间跨界线性插值。
   - 保持完全向后兼容读取 Schema 1.1 缓存。
   - 新增 `calculate_exposure_from_tide_cache` 实现基于缓存的零 FES 重复调用露出反演。
 - **批处理引擎扩展 (`core/batch_raster_engine.py`)**：
-  - 新增任务运行模式：`JOB_MODE_EXPOSURE_FROM_CACHE` (`exposure-from-cache`), `JOB_MODE_TIDE_AND_EXPOSURE` (`tide-exposure`), `JOB_MODE_ALL` (`all`)。
-  - `BatchManifest` 增加 `elapsed_exposure_seconds` 耗时记录。
+  - 支持全部 6 大任务运行模式：`JOB_MODE_TIDE_ONLY` (`tide`), `JOB_MODE_TIDE_AND_INUNDATION` (`tide-inundation`), `JOB_MODE_INUNDATION_FROM_CACHE` (`inundation-from-cache`), `JOB_MODE_TIDE_AND_EXPOSURE` (`tide-exposure`), `JOB_MODE_EXPOSURE_FROM_CACHE` (`exposure-from-cache`), `JOB_MODE_ALL` (`all`)。
+  - `BatchManifest` 增加 `elapsed_exposure_seconds`、`exposure_output_dir` 与 `exposure_products_complete` 及 7 大产品路径映射，具备向前向后字段兼容性。
 - **命令行 CLI 与图形界面 GUI 全面支持露出分析**：
-  - CLI 新增 `python cli.py raster exposure` 子命令与 `--mode tide-exposure / exposure / all` 选项。
-  - GUI Tab 3 空间任务类型新增“⏳ 潜在天文潮露出时间域分析”，Tab 4 增加对应批处理流程选项。
+  - CLI 新增 `python cli.py raster exposure` 子命令，并在 `raster batch` 中全面支持 6 种模式。
+  - GUI Tab 3 空间任务类型支持“潜在天文潮露出时间域分析”，动态提议产品文件夹并弹窗展示 7 大产品摘要；Tab 4 增加对应 6 种批处理流程与 9 列状态表格。
 - **单元测试套件 (`tests/test_exposure_v16.py`)**：
   - 包含常时淹没、常时露出、等高严格边界、线性交点解析解、对称三角波事件统计以及端到端合成 DEM 零 FES 缓存反演验证。
 
 ### 修复与加固 (Fixed & Hardened in v1.6 Beta)
+- **GUI 与文档最终一致性对齐收尾 (GUI & Documentation Final Alignment)**：
+  - **Tab 3 露出工作流交互全链路贯通**：`RasterTideWorker` 支持 `mode == 'exposure'`，输出控件自适应切换为产品文件夹选择器，隐藏单独 QC 编辑框，执行完毕弹出专属 7 大产品路径及耗时摘要卡片。
+  - **设置面板 NetCDF 坐标多形态容错**：`_deep_validate_file` 支持 `latitude`/`lat` 与 `longitude`/`lon` 灵活匹配，严格限制掩膜类别为 0..3 并保持只读。
+  - **批量调度 6 模式与 ERROR_IF_EXISTS 统一预检**：基于 `need_tide`、`need_freq`、`need_exp` 早期判定，若当前策略为 `error_if_exists`，对全部 7 个露出产物进行完备冲突检测。
+  - **BatchManifest 完整性与向后兼容性**：清单规范扩充露出目录、产物映射与完成度标记，向后兼容读取旧清单。
+  - **用户操作手册重写**：重构 `gui/manual_dialog.py` 为 15 章节高保真规范文档，详细说明科学定义、边界条件、7 大产品、6 大模式与基准体系。
+  - **消除 Affine 乘法弃用警告**：将 `rasterio` 的 `*` 替换为 `@` 矩阵乘法运算符。
+  - **文风整肃与徽章对齐**：移除静态测试数量徽章，统一以 GitHub Actions 动态 CI 状态为准；清退非学术夸大修辞。
 - **彻底去除 2D 像元级 Python 循环与 3D 像元-时序立方体内存开销 (P0-1)**：
   - 采用纯二维 NumPy 数组就地维护流式状态转移，单步重构水面切片，经 100 组独立随机时序对比测试，与 1D 参考算法达到精确 0 误差等价。
 - **拓扑屏障连通防护深度集成 (P0-2)**：

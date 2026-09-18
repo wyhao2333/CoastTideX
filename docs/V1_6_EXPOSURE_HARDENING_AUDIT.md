@@ -2,7 +2,7 @@
 # Systematic Scientific & Engineering Hardening Audit Report (v1.6 Beta)
 
 > [!WARNING]
-> **历史报告已更新 / SUPERSEDED**：本文档为 Round 2 阶段性加固审计报告。关于 Stage 2 内存解耦（$O(K_{\text{local}} \times \text{time\_chunk\_size})$ 流式读取）、Tide Cache 结构与读取器、终端潮位时间语义及 9 大生产场景验证的最终规范，已被 Round 3 权威审计报告取代，请参阅 [docs/V1_6_EXPOSURE_HARDENING_ROUND3.md](file:///I:/Test_tide_model/docs/V1_6_EXPOSURE_HARDENING_ROUND3.md)。
+> **历史报告已更新 / SUPERSEDED**：本文档为 Round 2 阶段性加固审计报告。关于 Stage 2 内存解耦、Tide Cache 结构与读取器、终端潮位时间语义及生产场景验证，已被最新审计报告取代，请参阅 [Round 3 审计报告](V1_6_EXPOSURE_HARDENING_ROUND3.md) 及 [Round 4 最终加固审计报告](V1_6_EXPOSURE_HARDENING_ROUND4.md)。
 
 - **审计基准时间 / Audit Date**: 2026-09-17
 - **系统版本 / System Version**: CoastTideX v1.6 Beta (Hardened)

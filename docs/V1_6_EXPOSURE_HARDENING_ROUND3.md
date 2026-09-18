@@ -1,6 +1,9 @@
 # CoastTideX v1.6 Beta 第三轮系统性 Hardening 最终审计报告
 # Final Scientific & Engineering Hardening Audit Report (Round 3)
 
+> [!WARNING]
+> **历史报告已更新 / SUPERSEDED**：本文档为 Round 3 阶段性加固审计报告。最新的全链路 GUI、批处理清单、文档一致性与测试覆盖最终规范，请参阅 [Round 4 最终加固与一致性审计报告](V1_6_EXPOSURE_HARDENING_ROUND4.md)。
+
 - **项目名称**：CoastTideX (全球潮汐与高程基准空间模拟系统)
 - **版本标识**：v1.6 Beta (feat/v1.6-exposure-duration)
 - **审计日期**：2026-09-17

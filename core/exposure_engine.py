@@ -18,10 +18,10 @@ CoastTideX 潜在天文潮露出时间域分析引擎 / Potential Astronomical T
 
 核心架构与内存安全设计 / Core Architecture & Memory Invariants:
 --------------------------------------------------------------
-1. 彻底杜绝全像元时序三维数组 (No Full 3D Pixel-Time Cube):
-   严禁分配 (rows, cols, time_chunk) 规模的像元潮位数组。
-   在 512x512 空间窗口内仅保留 2D 像元高程与流式状态矩阵，单步/分批重构当前时间切片 H_pixel(t)，
-   实现随时间步长与像元规模严格解耦的超低内存驻留 (<100 MB)。
+1. 避免全像元时序三维数组分配 (No Full 3D Pixel-Time Cube):
+   不分配 (rows, cols, time_chunk) 规模的全局像元潮位三维立方体。
+   采用空间分块 (默认 512x512) 与时间切片流式重构，在当前空间窗口内仅保留 2D 像元高程与必要累积状态矩阵，
+   单步或按时步切片重构 H_pixel(t)，其内存开销主要取决于 block_size、局部控制节点数及分块流式缓冲区，实现可控的有界内存驻留。
 
 2. 纯二维 NumPy 向量化跨界插值与状态更新 (Vectorized 2D State Transitions):
    彻底消除 Pixel x Time 的 Python 级双循环。

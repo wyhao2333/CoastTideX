@@ -1,5 +1,5 @@
 """
-CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.5 Alpha)
+CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.6 Beta)
 提供对 FES2022b 网格、FES2022b 潮位掩膜、MDT 数据、双重 DeltaN 栅格及 Hybrid MDT 来源掩膜的可视化路径配置与深层数据校验。
 """
 
@@ -39,10 +39,14 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
         elif file_type == 'fes_mask':
             import netCDF4 as nc
             ds = nc.Dataset(path)
-            for var in ['mask', 'lat', 'lon']:
-                if var not in ds.variables:
-                    ds.close()
-                    return False, f"❌ FES掩膜缺少关键变量: {var}"
+            if 'mask' not in ds.variables:
+                ds.close()
+                return False, "❌ FES掩膜缺少关键变量: mask"
+            lat_var = next((v for v in ['latitude', 'lat'] if v in ds.variables), None)
+            lon_var = next((v for v in ['longitude', 'lon'] if v in ds.variables), None)
+            if not lat_var or not lon_var:
+                ds.close()
+                return False, "❌ FES掩膜缺少纬度/经度变量 (需包含 latitude/lat 与 longitude/lon)"
             mask_arr = ds.variables['mask'][:]
             unique_vals = np.unique(mask_arr)
             allowed = {0, 1, 2, 3}
@@ -83,11 +87,11 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
 
 
 class SettingsDialog(QDialog):
-    """数据源配置弹窗 (v1.5 Alpha)"""
+    """数据源配置弹窗 (v1.6 Beta)"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.5 Alpha")
+        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.6 Beta")
         self.resize(720, 520)
         self.config = load_app_config()
 

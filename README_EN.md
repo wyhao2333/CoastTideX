@@ -3,7 +3,6 @@
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-143%20Passing-10b981.svg" alt="143 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -22,12 +21,12 @@
 
 **CoastTideX** is an advanced open-source scientific software system designed for **coastal remote sensing, marine geodesy, intertidal morphodynamics, and hydrodynamic baseline unification**.
 
-Powered by the authoritative French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX overcomes the severe nearshore staircase distortions and land contamination errors intrinsic to conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' ultra-high-resolution global geoid undulation**, providing a seamless, mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
+Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX significantly mitigates the nearshore staircase distortions and land contamination errors intrinsic to conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' ultra-high-resolution global geoid undulation**, providing a seamless, mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
 
 In **CoastTideX v1.6**, the system advances into the **time domain**, introducing the **Potential Astronomical Tidal Exposure Duration Engine for Tidal Flats and Beaches**, **strictly unified half-open interval `[start, end)` temporal slicing semantics**, and **Tide Cache Schema 1.2 (with terminal water level sampling)**.
 
 > [!NOTE]
-> Current project status: **CoastTideX v1.6 Beta / Feature Branch**. It is fully covered by 136 automated unit tests and is suitable for rigorous research and production evaluation.
+> Current project status: **CoastTideX v1.6 Beta / Feature Branch**. It is supported by comprehensive automated unit test suites and is suitable for controlled research and evaluation.
 
 ---
 
@@ -126,7 +125,7 @@ To evaluate annual potential inundation frequency over tens of millions of pixel
 | `*_exposure_duration_h.tif` | Float32 | hours | Total cumulative potential exposure duration in hours |
 | `*_exposure_max_continuous_h.tif` | Float32 | hours | Maximum single continuous potential exposure event duration |
 | `*_exposure_mean_event_h.tif` | Float32 | hours | Mean continuous exposure event duration: $\frac{\text{Total Duration}}{\text{Event Count}}$ |
-| `*_exposure_event_count.tif` | UInt32 | count | Complete count of distinct tidal exposure events |
+| `*_exposure_event_count.tif` | UInt32 | count | Number of continuous potential tidal exposure event segments identified within the requested time window |
 | `*_exposure_valid_time_fraction.tif` | Float32 | % | Temporal valid data coverage ratio over the requested window |
 | `*_exposure_qc.tif` | UInt16 | bitmask | Dedicated exposure quality control bitmask (0 = Valid) |
 
@@ -305,28 +304,24 @@ CoastTideX is architected for large-scale coastal remote sensing scenes and long
    - Rather than evaluating full FES harmonic expansions across tens of millions of DEM pixels, CoastTideX adaptively concentrates tidal evaluations on sparse quadtree control nodes (hundreds to thousands of nodes per scene);
    - Inundation frequency is rapidly inverted via empirical CCDF search at each pixel, bypassing over 99% of redundant FES calculations while bounding the spatial error to the configured tolerance (default < 1.0%).
 
-2. **2D Vectorized Streaming State Machine (< 2.5 GB RAM)**:
+2. **2D Vectorized Streaming State Machine with Bounded Memory**:
    - Completely eliminates 3D `(rows, cols, time_chunk)` pixel tensor allocations in memory;
    - Streaming updates occur within a 512×512 spatial block window along the time dimension;
-   - Peak core memory usage remains strictly below 2.5 GB on standard 8-core, 16GB scientific workstations during full-year 17,568-step evaluations.
+   - Memory usage depends predictably on block_size, local control node density, and streaming buffer chunks, providing scalable execution during full-year 17,568-step evaluations.
 
 ---
 
 ## 19. Unit Testing & Quality Verification
 
-CoastTideX passes **136 rigorous automated unit tests**:
+CoastTideX is supported by a comprehensive tiered automated test architecture, consisting of a lightweight portable CI test suite and a local full validation harness with real FES2022b:
 ```bash
 & "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
 ```
-```text
-Ran 136 tests in ~43.8s
-OK
-```
 
 ### Testing Strategy & Isolation:
-1. **GitHub Actions Remote CI**: Runs in a headless Linux environment without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics;
+1. **GitHub Actions Remote CI**: Runs in a headless Linux runner without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics (live status reflected by the GitHub Actions CI badge above);
 2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs;
-3. **v1.6 Production Hardening Suite**: 9 production-grade scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
+3. **v1.6 Production Hardening Suite**: Production-grade scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
 
 ---
 

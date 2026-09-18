@@ -3,7 +3,6 @@
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
   <img src="https://img.shields.io/badge/Release-v1.6--beta-0284c7.svg" alt="Release v1.6-beta">
-  <img src="https://img.shields.io/badge/Tests-143%20Passing-10b981.svg" alt="143 Tests Passing">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -22,12 +21,12 @@
 
 **CoastTideX** 是一款面向**海岸带遥感、海洋测绘、沿海潮滩生态演变与水下水文建模**研发的高性能空间潮位模拟与大地测量垂直基准严密转换系统。
 
-系统以法国 CNES/AVISO 国际权威的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，攻克了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由“阶梯锯齿逼近”引发的严重近岸潮位畸变。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部瞬时平均海平面 (MSL)、大地水准面正高与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
+系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，有效降低了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由网格台阶逼近带来的近岸潮位误差。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部瞬时平均海平面 (MSL)、大地水准面正高与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
 
 在 **CoastTideX v1.6** 中，系统全面拓展至**时间域分析**，正式引入**潮滩/沙滩潜在天文潮露出时长 (Exposure Duration) 分析引擎**、**严格统一的半开区间 `[start, end)` 采样语义** 以及升级的 **Tide Cache Schema 1.2（含终端时刻采样）**，实现面向千万级像元海岸带高分辨率 DEM 的高保真、零 FES 重复开销时空反演。
 
 > [!NOTE]
-> 当前阶段定义为 **CoastTideX v1.6 Beta / Feature 分支阶段**。系统具备完整工业级防御架构与验证套件，可直接用于科研分析与业务原型生产。
+> 当前阶段定义为 **CoastTideX v1.6 Beta / Feature 分支阶段**。系统具备分层防御架构与自动化验证套件，可直接用于科研分析与业务原型生产。
 
 ---
 
@@ -125,16 +124,16 @@ CoastTideX 创新实现了**自适应四叉树控制网格与经验互补分布 
 | :--- | :---: | :---: | :--- |
 | `*_exposure_fraction.tif` | Float32 | % | 累计潜在露出时间百分比：$\frac{\text{累计露出秒数}}{\text{有效时间秒数}} \times 100\%$ |
 | `*_exposure_duration_h.tif` | Float32 | hours | 累计有效潜在露出总时长 (小时) |
-| `*_exposure_max_continuous_h.tif` | Float32 | hours | 单次最长连续潜在露出时长 (反映滩涂生物耐干旱极限与作业窗口) |
-| `*_exposure_mean_event_h.tif` | Float32 | hours | 平均单次露出事件时长：$\frac{\text{累计露出时长}}{\text{完整露出事件发生次数}}$ |
-| `*_exposure_event_count.tif` | UInt32 | 次 (count) | 周期内露出事件完整发生频次 (潮周期交替次数) |
+| `*_exposure_max_continuous_h.tif` | Float32 | hours | 最长单次连续潜在露出时长 (可作为滨海湿地生态与作业窗口分析指标) |
+| `*_exposure_mean_event_h.tif` | Float32 | hours | 平均单次连续潜在露出时长：$\frac{\text{累计露出时长}}{\text{连续露出事件段数量}}$ |
+| `*_exposure_event_count.tif` | UInt32 | 次 (count) | 请求时间窗口内识别到的连续潜在露出事件段数量 |
 | `*_exposure_valid_time_fraction.tif` | Float32 | % | 有效时序数据时间覆盖率 (检验时间序列是否存在 NaN 断缺) |
 | `*_exposure_qc.tif` | UInt16 | bitmask | 露出分析专属质量控制位掩膜 (0 表示高保真解算) |
 
 ### 跨界线性插值 (Linear Crossing Interpolation)：
 在离散采样步 $[t_0, t_1]$（如步长 $\Delta t = 30\text{min}$）间，当水面高程跨越高程 $z$ 时，系统通过精确一阶线性插值求解交点时刻 $t^*$：
 $$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
-杜绝了将 30 分钟粗暴截断为整点台阶所带来的离散量化失真。
+避免了整步长阶梯截断带来的离散量化误差。
 
 ---
 
@@ -348,33 +347,29 @@ CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模
    - CoastTideX 采用自适应四叉树稀疏控制网格与 CCDF 向量化检索，仅需在数百至数千个关键控制节点解算 FES 潮位，像元级淹没频率通过四角节点经验累计分布高效插值求得；
    - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时将空间反演误差严格控制在设置的容差（默认 < 1.0%）以内。
 
-2. **时间域流式 2D 状态机与超低内存驻留**：
-   - 露出时间域分析引擎彻底杜绝 $(rows, cols, time\_chunk)$ 3D 像元张量分配；
-   - 在 512×512 空间计算窗口内，仅维护 2D 像元高程与标量状态，时间轴按时间步纯矢量化流式推进；
-   - 全年 17,568 个时间步流式解算过程中，单景瓦片核心解算内存峰值严格受控在 < 2.5 GB 物理内存以内（基于标准 8 核 16GB 典型科研工作站评估）。
+2. **时间域流式 2D 状态机与可控内存驻留**：
+   - 露出时间域分析引擎避免分配 $(rows, cols, time\_chunk)$ 规模的像元潮位三维立方体；
+   - 在 512×512 空间计算窗口内，仅维护 2D 像元高程与流式累积状态，时间轴按时间步流式推进；
+   - 全年 17,568 个时间步流式解算过程中，内存开销主要取决于分块窗口大小 (block_size)、局部控制节点数与时间切片缓冲，具备良好的内存可控性与可扩展性。
 
 ---
 
 ## 19. 单元测试与质量验证 (Unit Testing & Verification)
 
-CoastTideX 拥有完备的分层自动化测试体系，全工程累计通过 **136 项严谨单元测试**：
+CoastTideX 拥有完备的分层自动化测试体系，测试集包括适用于轻量便携 CI 环境的自动化回归测试集与本地全要素 real-FES 科学验证集：
 ```bash
 & "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
-```
-```text
-Ran 136 tests in ~43.8s
-OK
 ```
 
 ### 测试层次与执行边界说明：
 1. **GitHub Actions 远端 CI 流水线 (自动化构建与回归防护)**：
    - 在无图形界面、无真实 `pyfes` C/C++ 扩展编译环境的纯净 Linux runner 上运行；
-   - 依靠测试替身（Mock Predictors）、合成潮汐动力学场与数学解析解桩，全面覆盖 4 大高程基准闭合性、四叉树网格拓扑连通防护、Tide Cache NetCDF 流式读写、断点恢复、异常回滚及 2D 向量化状态机。
+   - 依靠测试替身（Mock Predictors）、合成潮汐动力学场与数学解析解桩，全面覆盖 4 大高程基准闭合性、四叉树网格拓扑连通防护、Tide Cache NetCDF 流式读写、断点恢复、异常回滚及 2D 向量化状态机（实时状态以顶部 GitHub Actions CI 徽章为准）；
 2. **本地全要素真实科学验证 (Local Full Validation Harness)**：
    - 位于 `tests/test_v15_beta_validation_harness.py`；
    - 专用于在配置有真实 FES2022b 原生非结构网格 (`fes2022b/` 3.77 GB) 与崇明东滩/长兴岛真实 DEM 的本地工作站环境下执行物理真实性端到端校验。
 3. **v1.6 生产场景严密覆盖 (Production Scenarios)**：
-   - 涵盖时序分块切片读取器 vs 全量 Oracle 0 误差等价性、切片时间跨度上界约束、双盆地山脊拓扑屏障隔离、失效角点权重自动重新归一化、多时区转换与缺失终端潮位分母守恒、`_AtomicExposureWriter` 异常临时文件零残留、陈旧 DEM 修改拦截、Stage 2 零 FES 物理调用不变量以及 NetCDF 节点越界完整性校验等 9 大生产级专项测试。
+   - 涵盖时序分块切片读取器 vs 全量 Oracle 高保真等价性、切片时间跨度上界约束、双盆地山脊拓扑屏障隔离、失效角点权重自动重新归一化、多时区转换与缺失终端潮位分母守恒、`_AtomicExposureWriter` 异常临时文件零残留、陈旧 DEM 修改拦截、Stage 2 零 FES 物理调用不变量以及 NetCDF 节点越界完整性校验等专项测试。
 
 ---
 

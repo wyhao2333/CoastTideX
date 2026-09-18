@@ -5,6 +5,7 @@ CoastTideX 桌面主窗口 (Main Window)
 
 import os
 import re
+from typing import Optional, Any, Dict, List
 import numpy as np
 import pandas as pd
 import dateutil.tz
@@ -231,16 +232,17 @@ class BatchTideWorker(QThread):
 
 
 class RasterTideWorker(QThread):
-    """空间栅格解算后台工作线程 (Snapshot / Inundation)"""
+    """空间栅格解算后台工作线程 (Snapshot / Inundation / Exposure)"""
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(object)  # RasterResultSummary
+    finished = pyqtSignal(object)  # RasterResultSummary or dict
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, mode: str, params: dict):
+    def __init__(self, mode: str, params: dict, engine: Optional[Any] = None):
         super().__init__()
         self.mode = mode
         self.params = params
+        self.engine = engine
         self.cancel_event = threading.Event()
         self._is_cancelled = False
 
@@ -250,7 +252,7 @@ class RasterTideWorker(QThread):
 
     def run(self):
         try:
-            engine = RasterTideEngine()
+            engine = self.engine or RasterTideEngine()
 
             def p_cb(percent, msg):
                 if not self._is_cancelled:
@@ -288,6 +290,27 @@ class RasterTideWorker(QThread):
                     strict=self.params.get('strict', True),
                     progress_callback=p_cb,
                     cancel_event=self.cancel_event
+                )
+            elif self.mode == 'exposure':
+                summary = engine.calculate_exposure_raster(
+                    dem_path=self.params['input_path'],
+                    output_dir=self.params.get('output_dir'),
+                    output_paths=self.params.get('output_paths'),
+                    year=self.params.get('year', 2024),
+                    start_time=self.params.get('start_time'),
+                    end_time=self.params.get('end_time'),
+                    freq=self.params.get('freq', '30min'),
+                    dem_datum=self.params.get('dem_datum', 'egm2008'),
+                    constituents=self.params.get('constituents', 'all'),
+                    source_tz=self.params.get('source_tz', 'UTC'),
+                    initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
+                    min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
+                    inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
+                    block_size=self.params.get('block_size', 512),
+                    strict=self.params.get('strict', True),
+                    progress_callback=p_cb,
+                    cancel_event=self.cancel_event,
+                    export_tide_cache_path=self.params.get('export_tide_cache_path')
                 )
             else:
                 raise ValueError(f"未知栅格模式: {self.mode}")
@@ -933,15 +956,16 @@ class MainWindow(QMainWindow):
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
         layout_inund.addWidget(self.combo_inund_datum, 2, 3)
 
-        layout_inund.addWidget(QLabel("QC掩膜输出:"), 3, 0)
+        self.lbl_inund_qc = QLabel("QC掩膜输出:")
+        layout_inund.addWidget(self.lbl_inund_qc, 3, 0)
         self.edit_inund_qc = QLineEdit()
         self.edit_inund_qc.setPlaceholderText("留空则自动保存为 <主输出>_qc.tif")
         layout_inund.addWidget(self.edit_inund_qc, 3, 1, 1, 2)
 
-        btn_browse_qc = QPushButton("浏览...")
-        btn_browse_qc.setObjectName("btn_secondary")
-        btn_browse_qc.clicked.connect(self._browse_inund_qc)
-        layout_inund.addWidget(btn_browse_qc, 3, 3)
+        self.btn_browse_qc = QPushButton("浏览...")
+        self.btn_browse_qc.setObjectName("btn_secondary")
+        self.btn_browse_qc.clicked.connect(self._browse_inund_qc)
+        layout_inund.addWidget(self.btn_browse_qc, 3, 3)
 
         layout_params.addWidget(self.container_inund)
         self.container_inund.setVisible(False)
@@ -1002,7 +1026,8 @@ class MainWindow(QMainWindow):
         layout_exec = QGridLayout(grp_exec)
         layout_exec.setSpacing(8)
 
-        layout_exec.addWidget(QLabel("输出 GeoTIFF 文件:"), 0, 0)
+        self.lbl_raster_output = QLabel("输出 GeoTIFF 文件:")
+        layout_exec.addWidget(self.lbl_raster_output, 0, 0)
         self.edit_raster_output = QLineEdit()
         self.edit_raster_output.setPlaceholderText("输出 GeoTIFF 路径...")
         layout_exec.addWidget(self.edit_raster_output, 0, 1)
@@ -1572,7 +1597,7 @@ class MainWindow(QMainWindow):
             export_dataframe(self.batch_result_df, path)
             QMessageBox.information(self, "导出成功", f"批量结果已导出至:\n{path}")
 
-    # ================= 空间栅格解算逻辑 (Raster Engine v1.4) =================
+    # ================= 空间栅格解算逻辑 (Raster Engine) =================
     def _on_raster_input_changed(self, text):
         path = text.strip()
         if os.path.exists(path) and os.path.isfile(path):
@@ -1584,6 +1609,9 @@ class MainWindow(QMainWindow):
         mode = self.combo_raster_mode.currentData()
         if mode == 'snapshot':
             self.edit_raster_output.setText(f"{base}_tide_snapshot{ext}")
+        elif mode == 'exposure':
+            exp_dir = f"{base}_CoastTideX_exposure"
+            self.edit_raster_output.setText(exp_dir)
         else:
             year = self.spin_inund_year.value() if self.combo_inund_time_mode.currentData() == 'year' else 'period'
             self.edit_raster_output.setText(f"{base}_inundation_{year}{ext}")
@@ -1595,9 +1623,15 @@ class MainWindow(QMainWindow):
             self.edit_raster_input.setText(f)
 
     def _browse_raster_output(self):
-        f, _ = QFileDialog.getSaveFileName(self, "指定输出 GeoTIFF 路径", self.edit_raster_output.text().strip() or "output.tif", "GeoTIFF (*.tif *.tiff)")
-        if f:
-            self.edit_raster_output.setText(f)
+        mode = self.combo_raster_mode.currentData()
+        if mode == 'exposure':
+            d = QFileDialog.getExistingDirectory(self, "指定 Exposure 7 项产物输出目录", self.edit_raster_output.text().strip() or "")
+            if d:
+                self.edit_raster_output.setText(d)
+        else:
+            f, _ = QFileDialog.getSaveFileName(self, "指定输出 GeoTIFF 路径", self.edit_raster_output.text().strip() or "output.tif", "GeoTIFF (*.tif *.tiff)")
+            if f:
+                self.edit_raster_output.setText(f)
 
     def _browse_inund_qc(self):
         f, _ = QFileDialog.getSaveFileName(self, "指定 QC 质量掩膜路径", self.edit_inund_qc.text().strip() or "output_qc.tif", "GeoTIFF (*.tif *.tiff)")
@@ -1632,9 +1666,27 @@ class MainWindow(QMainWindow):
     def _on_raster_mode_changed(self):
         mode = self.combo_raster_mode.currentData()
         is_snap = (mode == 'snapshot')
+        is_exp = (mode == 'exposure')
         self.container_snapshot.setVisible(is_snap)
         self.container_inund.setVisible(not is_snap)
         self.grp_grid.setVisible(not is_snap)
+
+        # 隐藏/显示 Inundation 独有的 QC 独立文件框
+        self.lbl_inund_qc.setVisible(not is_snap and not is_exp)
+        self.edit_inund_qc.setVisible(not is_snap and not is_exp)
+        self.btn_browse_qc.setVisible(not is_snap and not is_exp)
+
+        # 动态更新输出目标标签与占位提示
+        if is_exp:
+            self.lbl_raster_output.setText("输出产品目录 (Output Directory):")
+            self.edit_raster_output.setPlaceholderText("指定 Exposure 7 项产物输出目录 (如 <DEM_DIR>/<DEM_STEM>_CoastTideX_exposure)...")
+        elif is_snap:
+            self.lbl_raster_output.setText("输出 GeoTIFF 文件:")
+            self.edit_raster_output.setPlaceholderText("输出单时刻潮位 GeoTIFF 路径...")
+        else:
+            self.lbl_raster_output.setText("输出淹没频率 GeoTIFF:")
+            self.edit_raster_output.setPlaceholderText("输出潜在天文潮淹没频率 GeoTIFF 路径 (*_inundation_2024.tif)...")
+
         inp = self.edit_raster_input.text().strip()
         if inp:
             self._propose_raster_output(inp)
@@ -1659,7 +1711,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输入错误", "请输入并确认有效的 GeoTIFF 栅格路径！")
             return
         if not out_path:
-            QMessageBox.warning(self, "输入错误", "请指定输出 GeoTIFF 文件路径！")
+            QMessageBox.warning(self, "输入错误", "请指定输出 GeoTIFF 文件或产品目录路径！")
             return
 
         mode = self.combo_raster_mode.currentData()
@@ -1677,6 +1729,32 @@ class MainWindow(QMainWindow):
                 'block_size': self.spin_grid_block.value(),
                 'strict': strict
             }
+        elif mode == 'exposure':
+            time_mode = self.combo_inund_time_mode.currentData()
+            params = {
+                'input_path': inp_path,
+                'output_dir': out_path,
+                'freq': self.combo_inund_freq.currentData(),
+                'dem_datum': self.combo_inund_datum.currentData(),
+                'constituents': 'all',
+                'source_tz': 'UTC',
+                'initial_control_spacing_m': self.spin_grid_init.value(),
+                'min_control_spacing_m': self.spin_grid_min.value(),
+                'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
+                'block_size': self.spin_grid_block.value(),
+                'strict': strict
+            }
+            if time_mode == 'year':
+                params['year'] = self.spin_inund_year.value()
+                params['start_time'] = None
+                params['end_time'] = None
+            else:
+                params['year'] = None
+                params['start_time'] = self.time_inund_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                params['end_time'] = self.time_inund_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                if self.time_inund_start.dateTime() >= self.time_inund_end.dateTime():
+                    QMessageBox.warning(self, "时间错误", "起始时间必须早于结束时间！")
+                    return
         else:
             time_mode = self.combo_inund_time_mode.currentData()
             qc_out = self.edit_inund_qc.text().strip() or None
@@ -1742,45 +1820,91 @@ class MainWindow(QMainWindow):
             self.btn_run_raster.setEnabled(True)
             self.btn_cancel_raster.setEnabled(False)
             self.prog_raster.setValue(100)
-            self.lbl_raster_status.setText(f"解算圆满完成！耗时 {summary.elapsed_seconds:.2f} 秒。")
+
+            is_dict = isinstance(summary, dict)
+            mode = summary.get('mode', self.combo_raster_mode.currentData()) if is_dict else getattr(summary, 'mode', 'snapshot')
+            elapsed = summary.get('elapsed_seconds', 0.0) if is_dict else getattr(summary, 'elapsed_seconds', 0.0)
+            self.lbl_raster_status.setText(f"解算圆满完成！耗时 {elapsed:.2f} 秒。")
             self.status_bar.showMessage("空间栅格解算圆满完成！")
 
-            mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
-            qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
-            nodes_cnt = summary.control_nodes_count
-            if nodes_cnt is not None and nodes_cnt > 0:
-                nodes_line = f"<li><b>控制节点总数</b>: {nodes_cnt:,} 个</li>"
+            if mode == 'exposure':
+                prods = summary.get('products')
+                out_dir = summary.get('output_dir', '')
+                if not out_dir and prods:
+                    out_dir = os.path.dirname(os.path.abspath(prods.exposure_fraction_path))
+                cache_p = summary.get('export_tide_cache_path')
+                cache_line = f"<li><b>Tide Cache 缓存</b>: <code>{cache_p}</code></li>" if cache_p else ""
+
+                prod_items = ""
+                if prods:
+                    prod_items = (
+                        f"<li><b>暴露比例 (Fraction)</b>: <code>{os.path.basename(prods.exposure_fraction_path)}</code></li>"
+                        f"<li><b>累积时长 (Duration)</b>: <code>{os.path.basename(prods.exposure_duration_h_path)}</code></li>"
+                        f"<li><b>最大单次时长 (Max Cont)</b>: <code>{os.path.basename(prods.exposure_max_continuous_h_path)}</code></li>"
+                        f"<li><b>平均事件时长 (Mean Event)</b>: <code>{os.path.basename(prods.exposure_mean_event_h_path)}</code></li>"
+                        f"<li><b>事件发生次数 (Event Count)</b>: <code>{os.path.basename(prods.exposure_event_count_path)}</code></li>"
+                        f"<li><b>有效时间比例 (Valid Time Frac)</b>: <code>{os.path.basename(prods.exposure_valid_time_fraction_path)}</code></li>"
+                        f"<li><b>质量控制掩膜 (QC Mask)</b>: <code>{os.path.basename(prods.exposure_qc_path)}</code></li>"
+                    )
+
+                info_box = QMessageBox(self)
+                info_box.setWindowTitle("露出时间域解算完成")
+                info_box.setIcon(QMessageBox.Icon.Information)
+                info_box.setText("<h3>🎉 潜在天文潮露出时间域 7 项空间栅格解算成功！</h3>")
+                info_box.setInformativeText(
+                    f"<p><b>任务模式</b>: 潜在天文潮露出时间域分析 (7 项科学产物)</p>"
+                    f"<p><b>产物保存目录</b>: <code>{out_dir}</code></p>"
+                    f"<ul>"
+                    f"{prod_items}"
+                    f"{cache_line}"
+                    f"<li><b>解算总耗时</b>: {elapsed:.2f} 秒</li>"
+                    f"</ul>"
+                )
+                btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+                info_box.addButton(QMessageBox.StandardButton.Ok)
+                info_box.exec()
+                if info_box.clickedButton() == btn_open_dir:
+                    if os.path.exists(out_dir):
+                        import subprocess
+                        subprocess.Popen(f'explorer "{out_dir}"')
             else:
-                nodes_line = ""
+                mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
+                qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
+                nodes_cnt = summary.control_nodes_count
+                if nodes_cnt is not None and nodes_cnt > 0:
+                    nodes_line = f"<li><b>控制节点总数</b>: {nodes_cnt:,} 个</li>"
+                else:
+                    nodes_line = ""
 
-            info_box = QMessageBox(self)
-            info_box.setWindowTitle("解算完成")
-            info_box.setIcon(QMessageBox.Icon.Information)
-            info_box.setText(f"<h3>🎉 空间栅格解算成功！</h3>")
-            info_box.setInformativeText(
-                f"<p><b>任务模式</b>: {mode_name}</p>"
-                f"<ul>"
-                f"<li><b>影像规格</b>: {summary.width} × {summary.height} ({summary.total_pixels:,} 像元)</li>"
-                f"<li><b>有效解算像元</b>: {summary.valid_pixels:,}</li>"
-                f"{nodes_line}"
-                f"<li><b>解算总耗时</b>: {summary.elapsed_seconds:.2f} 秒</li>"
-                f"<li><b>输出文件路径</b>: <code>{summary.output_path}</code></li>"
-                f"{qc_line}"
-                f"</ul>"
-            )
-            btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
-            info_box.addButton(QMessageBox.StandardButton.Ok)
-            info_box.exec()
+                info_box = QMessageBox(self)
+                info_box.setWindowTitle("解算完成")
+                info_box.setIcon(QMessageBox.Icon.Information)
+                info_box.setText(f"<h3>🎉 空间栅格解算成功！</h3>")
+                info_box.setInformativeText(
+                    f"<p><b>任务模式</b>: {mode_name}</p>"
+                    f"<ul>"
+                    f"<li><b>影像规格</b>: {summary.width} × {summary.height} ({summary.total_pixels:,} 像元)</li>"
+                    f"<li><b>有效解算像元</b>: {summary.valid_pixels:,}</li>"
+                    f"{nodes_line}"
+                    f"<li><b>解算总耗时</b>: {summary.elapsed_seconds:.2f} 秒</li>"
+                    f"<li><b>输出文件路径</b>: <code>{summary.output_path}</code></li>"
+                    f"{qc_line}"
+                    f"</ul>"
+                )
+                btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+                info_box.addButton(QMessageBox.StandardButton.Ok)
+                info_box.exec()
 
-            if info_box.clickedButton() == btn_open_dir:
-                out_dir = os.path.dirname(os.path.abspath(summary.output_path))
-                if os.path.exists(out_dir):
-                    import subprocess
-                    subprocess.Popen(f'explorer "{out_dir}"')
+                if info_box.clickedButton() == btn_open_dir:
+                    out_dir = os.path.dirname(os.path.abspath(summary.output_path))
+                    if os.path.exists(out_dir):
+                        import subprocess
+                        subprocess.Popen(f'explorer "{out_dir}"')
         except Exception as e:
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{summary.output_path}\n\n但弹窗提示异常: {e}")
+            out_p = getattr(summary, 'output_path', summary.get('output_dir', '')) if hasattr(summary, 'output_path') or isinstance(summary, dict) else ''
+            QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{out_p}\n\n但弹窗提示异常: {e}")
 
     def _on_raster_error(self, err_msg):
         self.btn_run_raster.setEnabled(True)
@@ -2074,9 +2198,9 @@ class MainWindow(QMainWindow):
         vbox_right = QVBoxLayout(grp_right)
 
         self.table_batch_rasters = QTableWidget()
-        self.table_batch_rasters.setColumnCount(8)
+        self.table_batch_rasters.setColumnCount(9)
         self.table_batch_rasters.setHorizontalHeaderLabels([
-            "相对路径 / Relative Path", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出"
+            "相对路径 / Relative Path", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出", "潜在露出产物 / Exposure"
         ])
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
@@ -2108,36 +2232,69 @@ class MainWindow(QMainWindow):
 
     def _on_batch_job_mode_changed(self):
         job_mode = self.cmb_batch_job_mode.currentData()
-        if job_mode == "inundation-from-cache":
-            # Mode 3: Tide Cache 是只读输入，禁用生成参数
-            self.grp_batch_time.setEnabled(False)
-            self.grp_batch_sci.setEnabled(False)
-            self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 3 从已有 Tide Cache 解算淹没频率：*_tide.nc 作为严格只读输入，不调用 FES 潮汐模型，绝不覆写或修改缓存！"
-            )
-            self.lbl_batch_job_mode_tip.setStyleSheet(
-                "color: #1565C0; font-weight: bold; background-color: #E3F2FD; padding: 6px; border-radius: 4px; border: 1px solid #90CAF9;"
-            )
-        elif job_mode == "tide":
-            # Mode 2: 仅生成 Cache
+        if job_mode == "tide":
+            # 仅解算控制节点潮位 (生成 Cache)
             self.grp_batch_time.setEnabled(True)
             self.grp_batch_sci.setEnabled(True)
             self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 2 仅解算自适应控制网格潮位时序并导出 *_tide.nc，不生成 2D 像元淹没频率 GeoTIFF。"
+                "💡 仅解算控制网格潮位 (tide)：仅构建自适应控制网格与潮位时序并导出 *_tide.nc，不生成 Inundation 或 Exposure 空间栅格产品。"
             )
             self.lbl_batch_job_mode_tip.setStyleSheet(
                 "color: #2E7D32; font-weight: bold; background-color: #E8F5E9; padding: 6px; border-radius: 4px; border: 1px solid #A5D6A7;"
             )
-        else:
-            # Mode 1: 完整两阶段流程
+        elif job_mode == "tide-inundation":
+            # 完整两阶段淹没流程
             self.grp_batch_time.setEnabled(True)
             self.grp_batch_sci.setEnabled(True)
             self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 1 完整两阶段：先生成并保存 Tide Cache (*_tide.nc)，再基于缓存解算淹没频率 GeoTIFF。"
+                "💡 完整两阶段淹没流程 (tide-inundation)：Stage 1 解算并生成 Tide Cache (*_tide.nc)，Stage 2a 基于缓存解算潜在天文潮淹没频率与 QC GeoTIFF。"
             )
             self.lbl_batch_job_mode_tip.setStyleSheet(
                 "color: #00796B; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #80CBC4;"
             )
+        elif job_mode == "inundation-from-cache":
+            # 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 从已有 Tide Cache 解算淹没频率 (inundation-from-cache)：复用已存在的 *_tide.nc 科学配置与时间序列，Stage 2 零 FES 外部调用，不覆写潮位缓存。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #1565C0; font-weight: bold; background-color: #E3F2FD; padding: 6px; border-radius: 4px; border: 1px solid #90CAF9;"
+            )
+        elif job_mode == "tide-exposure":
+            # 完整两阶段露出流程
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 完整两阶段露出流程 (tide-exposure)：Stage 1 解算并生成 Tide Cache (*_tide.nc)，Stage 2b 基于缓存解算潜在天文潮露出时间域 7 项空间栅格产品。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #6A1B9A; font-weight: bold; background-color: #F3E5F5; padding: 6px; border-radius: 4px; border: 1px solid #CE93D8;"
+            )
+        elif job_mode == "exposure-from-cache":
+            # 基于已有 Tide Cache 解算潜在露出 (零 FES 开销)
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 从已有 Tide Cache 解算潜在露出 (exposure-from-cache)：复用已存在的 *_tide.nc 科学配置与时间序列，Stage 2 零 FES 外部调用，输出 7 项 Exposure GeoTIFF。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #E65100; font-weight: bold; background-color: #FFF3E0; padding: 6px; border-radius: 4px; border: 1px solid #FFCC80;"
+            )
+        elif job_mode == "all":
+            # 全要素产物包
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 全要素产物包 (all)：Stage 1 解算并保存 Tide Cache (*_tide.nc)，随后 Stage 2a (淹没频率) 与 Stage 2b (露出时间域 7 项产品) 共同复用该缓存。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #00695C; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #4DB6AC;"
+            )
+        else:
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
 
     def _get_effective_batch_output_dir(self) -> str:
         """获取当前有效的输出目录（用户指定优先，默认回退至 <input>/CoastTideX_output）"""
@@ -2312,6 +2469,7 @@ class MainWindow(QMainWindow):
             self.table_batch_rasters.setItem(r_idx, 5, status_item)
             self.table_batch_rasters.setItem(r_idx, 6, QTableWidgetItem("-"))
             self.table_batch_rasters.setItem(r_idx, 7, QTableWidgetItem("-"))
+            self.table_batch_rasters.setItem(r_idx, 8, QTableWidgetItem("-"))
 
         self.lbl_batch_status.setText(f"扫描完成: 发现 {len(discovered_list)} 个 GeoTIFF (有效 {valid_count}, 无效 {invalid_count})。")
         self.lbl_batch_counts.setText(f"总文件: {len(discovered_list)} | 完成: 0 | 失败: 0 | 跳过: 0")
@@ -2416,19 +2574,32 @@ class MainWindow(QMainWindow):
 
             cache_item = self.table_batch_rasters.item(r_idx, 6)
             inund_item = self.table_batch_rasters.item(r_idx, 7)
+            exp_item = self.table_batch_rasters.item(r_idx, 8)
             if "Stage 1" in msg or "Tide Cache" in msg:
                 if cache_item:
                     cache_item.setText("COMPUTING")
-            elif "Stage 2" in msg:
+            elif "Stage 2a" in msg:
                 if cache_item:
                     cache_item.setText("READY")
                 if inund_item:
                     inund_item.setText("COMPUTING")
-            elif "完成" in msg:
-                if cache_item and cache_item.text() == "-":
+            elif "Stage 2b" in msg or "露出" in msg or "Exposure" in msg:
+                if cache_item:
                     cache_item.setText("READY")
-                if inund_item:
+                if exp_item:
+                    exp_item.setText("COMPUTING")
+            elif "Stage 2" in msg:
+                if cache_item:
+                    cache_item.setText("READY")
+                if inund_item and inund_item.text() == "-":
+                    inund_item.setText("COMPUTING")
+            elif "完成" in msg or "PROCESSED" in msg:
+                if cache_item and cache_item.text() in ("-", "COMPUTING"):
+                    cache_item.setText("READY")
+                if inund_item and inund_item.text() == "COMPUTING":
                     inund_item.setText("DONE")
+                if exp_item and exp_item.text() == "COMPUTING":
+                    exp_item.setText("DONE (7 prod)")
 
     def _on_batch_finished(self, res):
         self._set_batch_controls_running(False)
