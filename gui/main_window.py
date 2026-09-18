@@ -283,6 +283,7 @@ class RasterTideWorker(QThread):
                     dem_datum=self.params.get('dem_datum', 'egm2008'),
                     constituents=self.params.get('constituents', 'all'),
                     source_tz=self.params.get('source_tz', 'UTC'),
+                    target_mode=self.params.get('target_mode', 'intertidal'),
                     initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
                     min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
                     inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
@@ -303,11 +304,13 @@ class RasterTideWorker(QThread):
                     dem_datum=self.params.get('dem_datum', 'egm2008'),
                     constituents=self.params.get('constituents', 'all'),
                     source_tz=self.params.get('source_tz', 'UTC'),
+                    target_mode=self.params.get('target_mode', 'intertidal'),
                     initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
                     min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
                     inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
                     block_size=self.params.get('block_size', 512),
                     strict=self.params.get('strict', True),
+                    allow_overwrite=self.params.get('allow_overwrite', True),
                     progress_callback=p_cb,
                     cancel_event=self.cancel_event,
                     export_tide_cache_path=self.params.get('export_tide_cache_path')
@@ -956,16 +959,22 @@ class MainWindow(QMainWindow):
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
         layout_inund.addWidget(self.combo_inund_datum, 2, 3)
 
+        layout_inund.addWidget(QLabel("目标区域:"), 3, 0)
+        self.combo_inund_target_mode = QComboBox()
+        self.combo_inund_target_mode.addItem("潮间带模式 (intertidal - 推荐)", "intertidal")
+        self.combo_inund_target_mode.addItem("全域网格模式 (standard)", "standard")
+        layout_inund.addWidget(self.combo_inund_target_mode, 3, 1, 1, 3)
+
         self.lbl_inund_qc = QLabel("QC掩膜输出:")
-        layout_inund.addWidget(self.lbl_inund_qc, 3, 0)
+        layout_inund.addWidget(self.lbl_inund_qc, 4, 0)
         self.edit_inund_qc = QLineEdit()
         self.edit_inund_qc.setPlaceholderText("留空则自动保存为 <主输出>_qc.tif")
-        layout_inund.addWidget(self.edit_inund_qc, 3, 1, 1, 2)
+        layout_inund.addWidget(self.edit_inund_qc, 4, 1, 1, 2)
 
         self.btn_browse_qc = QPushButton("浏览...")
         self.btn_browse_qc.setObjectName("btn_secondary")
         self.btn_browse_qc.clicked.connect(self._browse_inund_qc)
-        layout_inund.addWidget(self.btn_browse_qc, 3, 3)
+        layout_inund.addWidget(self.btn_browse_qc, 4, 3)
 
         layout_params.addWidget(self.container_inund)
         self.container_inund.setVisible(False)
@@ -1730,7 +1739,27 @@ class MainWindow(QMainWindow):
                 'strict': strict
             }
         elif mode == 'exposure':
+            # 检查输出目录下是否已存在 7 项 Exposure 产物，避免静默覆盖
+            from core.exposure_engine import ExposureProductPaths
+            stem = Path(inp_path).stem
+            exp_paths = ExposureProductPaths.from_directory(out_path, stem)
+            existing_conflicts = [p for p in exp_paths.all_paths if os.path.exists(p)]
+            if existing_conflicts:
+                res = QMessageBox.question(
+                    self,
+                    "产物已存在确认",
+                    f"检测到输出目录下已存在 {len(existing_conflicts)} 个露出分析产物：\n" +
+                    "\n".join([os.path.basename(p) for p in existing_conflicts[:5]]) +
+                    ("\n..." if len(existing_conflicts) > 5 else "") +
+                    "\n\n是否确认覆盖已有产物？若取消将中止本次解算。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if res != QMessageBox.StandardButton.Yes:
+                    return
+
             time_mode = self.combo_inund_time_mode.currentData()
+            target_mode = self.combo_inund_target_mode.currentData() if hasattr(self, 'combo_inund_target_mode') else 'intertidal'
             params = {
                 'input_path': inp_path,
                 'output_dir': out_path,
@@ -1738,11 +1767,13 @@ class MainWindow(QMainWindow):
                 'dem_datum': self.combo_inund_datum.currentData(),
                 'constituents': 'all',
                 'source_tz': 'UTC',
+                'target_mode': target_mode,
                 'initial_control_spacing_m': self.spin_grid_init.value(),
                 'min_control_spacing_m': self.spin_grid_min.value(),
                 'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
                 'block_size': self.spin_grid_block.value(),
-                'strict': strict
+                'strict': strict,
+                'allow_overwrite': True
             }
             if time_mode == 'year':
                 params['year'] = self.spin_inund_year.value()
@@ -1758,6 +1789,7 @@ class MainWindow(QMainWindow):
         else:
             time_mode = self.combo_inund_time_mode.currentData()
             qc_out = self.edit_inund_qc.text().strip() or None
+            target_mode = self.combo_inund_target_mode.currentData() if hasattr(self, 'combo_inund_target_mode') else 'intertidal'
             params = {
                 'input_path': inp_path,
                 'output_path': out_path,
@@ -1766,6 +1798,7 @@ class MainWindow(QMainWindow):
                 'dem_datum': self.combo_inund_datum.currentData(),
                 'constituents': 'all',
                 'source_tz': 'UTC',
+                'target_mode': target_mode,
                 'initial_control_spacing_m': self.spin_grid_init.value(),
                 'min_control_spacing_m': self.spin_grid_min.value(),
                 'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
@@ -1864,9 +1897,7 @@ class MainWindow(QMainWindow):
                 info_box.addButton(QMessageBox.StandardButton.Ok)
                 info_box.exec()
                 if info_box.clickedButton() == btn_open_dir:
-                    if os.path.exists(out_dir):
-                        import subprocess
-                        subprocess.Popen(f'explorer "{out_dir}"')
+                    self._open_directory(out_dir)
             else:
                 mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
                 qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
@@ -1896,14 +1927,15 @@ class MainWindow(QMainWindow):
                 info_box.exec()
 
                 if info_box.clickedButton() == btn_open_dir:
-                    out_dir = os.path.dirname(os.path.abspath(summary.output_path))
-                    if os.path.exists(out_dir):
-                        import subprocess
-                        subprocess.Popen(f'explorer "{out_dir}"')
+                    out_p = getattr(summary, 'output_path', '')
+                    self._open_directory(out_p)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            out_p = getattr(summary, 'output_path', summary.get('output_dir', '')) if hasattr(summary, 'output_path') or isinstance(summary, dict) else ''
+            if isinstance(summary, dict):
+                out_p = summary.get('output_path') or summary.get('output_dir') or ''
+            else:
+                out_p = getattr(summary, 'output_path', getattr(summary, 'output_dir', ''))
             QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{out_p}\n\n但弹窗提示异常: {e}")
 
     def _on_raster_error(self, err_msg):
@@ -1916,6 +1948,21 @@ class MainWindow(QMainWindow):
         self.lbl_raster_status.setText("解算失败")
         self.status_bar.showMessage("栅格解算发生错误")
         QMessageBox.critical(self, "解算错误", f"空间栅格解算失败:\n{err_msg}")
+
+    def _open_directory(self, path: str):
+        """跨平台打开本地文件或目录（兼容 Windows、macOS 与 Linux）"""
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "提示", "指定的输出目录或文件尚未生成或不存在。")
+            return
+        abs_p = os.path.abspath(path)
+        if not os.path.isdir(abs_p):
+            abs_p = os.path.dirname(abs_p)
+        if not os.path.exists(abs_p):
+            QMessageBox.information(self, "提示", "指定的输出目录尚未生成或不存在。")
+            return
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(abs_p))
 
     def _open_settings(self):
         dialog = SettingsDialog(self)
@@ -2230,8 +2277,17 @@ class MainWindow(QMainWindow):
         self.wgt_batch_period.setVisible(not is_year)
         self._update_batch_expected_samples()
 
+    def _apply_batch_mode_constraints(self, job_mode: Optional[str] = None):
+        """根据当前选择的批量模式动态约束参数控件启用状态"""
+        if job_mode is None:
+            job_mode = self.cmb_batch_job_mode.currentData()
+        is_from_cache = (job_mode in ("inundation-from-cache", "exposure-from-cache"))
+        self.grp_batch_time.setEnabled(not is_from_cache)
+        self.grp_batch_sci.setEnabled(not is_from_cache)
+
     def _on_batch_job_mode_changed(self):
         job_mode = self.cmb_batch_job_mode.currentData()
+        self._apply_batch_mode_constraints(job_mode)
         if job_mode == "tide":
             # 仅解算控制节点潮位 (生成 Cache)
             self.grp_batch_time.setEnabled(True)
@@ -2490,13 +2546,18 @@ class MainWindow(QMainWindow):
         self.btn_browse_batch_out.setEnabled(not is_running)
         self.chk_batch_recursive.setEnabled(not is_running)
         self.btn_scan_batch.setEnabled(not is_running)
-        self.grp_batch_time.setEnabled(not is_running)
-        self.grp_batch_sci.setEnabled(not is_running)
         self.cmb_batch_job_mode.setEnabled(not is_running)
         self.cmb_batch_existing_policy.setEnabled(not is_running)
 
-        self.btn_start_batch.setEnabled(not is_running)
-        self.btn_cancel_batch.setEnabled(is_running)
+        if is_running:
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.btn_start_batch.setEnabled(False)
+            self.btn_cancel_batch.setEnabled(True)
+        else:
+            self._apply_batch_mode_constraints()
+            self.btn_start_batch.setEnabled(True)
+            self.btn_cancel_batch.setEnabled(False)
 
     def _on_start_batch(self):
         in_dir = self.txt_batch_in_dir.text().strip()
@@ -2636,8 +2697,4 @@ class MainWindow(QMainWindow):
 
     def _on_open_batch_output_folder(self):
         out_dir = self._get_effective_batch_output_dir()
-        if out_dir and os.path.exists(out_dir):
-            import subprocess
-            subprocess.Popen(f'explorer "{os.path.abspath(out_dir)}"')
-        else:
-            QMessageBox.information(self, "提示", "输出目录尚未生成或不存在。")
+        self._open_directory(out_dir)

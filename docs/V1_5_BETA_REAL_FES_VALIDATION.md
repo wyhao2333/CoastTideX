@@ -32,6 +32,11 @@ CoastTideX 在经历 v1.5 Alpha 阶段的基础框架构建与两轮 Hardening �
 > [!IMPORTANT]
 > **版本声明**：当前系统处于 **v1.5 Beta** 阶段，代表系统已在典型近岸地形上打通真实 FES2022b 动力学模拟全流程，并证明了自适应控制网格与二阶段 NetCDF Cache 架构的数值精度与内存安全性。**严禁在未经全球多地形海区实测验潮站大规模验证前宣称为 Global Production Ready**。
 
+> [!NOTE]
+> **基准参考系与物理观测区别说明**：
+> 本报告中的所有“Oracle”对比及精度评测指标（如 MAE 0.1274 pp 等），均指 CoastTideX 自适应四叉树控制网格加速算法与“逐像元直接运行 Native-FES2022b 完整调和时序解算”之间的**算法等价性与空间数值逼近验证**。
+> 该验证证明了加速算法在数值层面逼近 FES2022b 理论模型的忠实度，**并非直接等同于全球物理实测验潮站（In-situ Tide Gauge Observation）的观测比测**。FES2022b 模型自身在复杂近岸、河口与极浅水滩涂的真实物理精度受制于全球潮汐模式本身的网格分辨率与流体动力学边界。
+
 ---
 
 ## B. 环境与配置审计 (Environmental & Configuration Audit)

@@ -49,8 +49,8 @@ from core.raster_engine import RasterTideEngine
 from core.utils import export_dataframe
 
 
-def main(args_list: Optional[List[str]] = None):
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.6 Beta")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.6 Beta")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
 
@@ -82,8 +82,8 @@ def main(args_list: Optional[List[str]] = None):
     p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
 
     # 3. 空间栅格模式参数
-    p_raster = subparsers.add_parser("raster", help="空间栅格解算模式 (snapshot 单时刻空间潮位 / inundation 潜在淹没频率)")
-    raster_subparsers = p_raster.add_subparsers(dest="raster_submode", help="栅格子模式: snapshot 或 inundation")
+    p_raster = subparsers.add_parser("raster", help="空间栅格解算模式 (snapshot 单时刻空间潮位 / inundation 潜在淹没频率 / exposure 潜在露出分析)")
+    raster_subparsers = p_raster.add_subparsers(dest="raster_submode", help="栅格子模式: snapshot, inundation, exposure, 或 batch")
 
     # 3.1 栅格单时刻快照
     p_snap = raster_subparsers.add_parser("snapshot", help="单时刻空间潮位 / 水面高程 GeoTIFF 解算")
@@ -117,7 +117,7 @@ def main(args_list: Optional[List[str]] = None):
     p_inund.add_argument("--export-cache", type=str, default=None, help="可选导出 Tide Cache (*_tide.nc)")
 
     # 3.3 栅格潜在天文潮露出时间域分析 (v1.6 Beta)
-    p_exposure = raster_subparsers.add_parser("exposure", help="潜在天文潮露出时间域产品计算 (露出时长/频率/事件分析)")
+    p_exposure = raster_subparsers.add_parser("exposure", help="潜在天文潮露出时间域产品计算 (露出比例、累计时长与连续事件分析)")
     p_exposure.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
     p_exposure.add_argument("--output-dir", "-o", type=str, default=None, help="输出产品目录 (默认与 DEM 同级)")
     p_exposure.add_argument("--cache", type=str, default=None, help="可选已有 Tide Cache (*_tide.nc)，若提供则零 FES 计算")
@@ -159,6 +159,11 @@ def main(args_list: Optional[List[str]] = None):
     p_batch_raster.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
     p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
+    return parser
+
+
+def main(args_list: Optional[List[str]] = None):
+    parser = build_parser()
     args = parser.parse_args(args_list)
 
     if not args.mode:
@@ -316,7 +321,7 @@ def main(args_list: Optional[List[str]] = None):
         export_dataframe(df_out, args.output)
         print(f"[OK] 批量解算完成，共生成 {len(df_out):,} 行记录，已导出至: {args.output}")
 
-    elif args.mode == "raster":
+    elif args.mode == "raster" or getattr(args, 'raster_submode', None) is not None:
         if not getattr(args, 'raster_submode', None):
             p_raster.print_help()
             sys.exit(0)

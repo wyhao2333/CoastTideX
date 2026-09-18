@@ -68,7 +68,7 @@ def validate_constituents(constituents: str | list | tuple | None) -> list[str]:
 class FESTidePredictor:
     """
     FES2022b 潮位预测引擎。
-    采用自适应空间包围框与全球散点空间分块聚类技术，兼备极高精度与极致解算速度。
+    采用自适应空间包围框与全球散点空间分块聚类技术。
     """
 
     def __init__(self, ns_grid_path: str = None):
@@ -202,7 +202,7 @@ class FESTidePredictor:
 
         if n_dates <= chunk_size:
             if progress_callback:
-                progress_callback(70, "执行高精度调和潮位解算...")
+                progress_callback(70, "执行空间调和常数潮位解算...")
             lons_np = np.full(n_dates, lon_norm)
             lats_np = np.full(n_dates, lat_norm)
             short_period, long_period, flags = pyfes.evaluate_tide(
@@ -596,7 +596,7 @@ class FESTidePredictor:
         buffer_deg: float = None
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        对指定单时刻在多个空间经纬度位置执行高精度瞬时潮位解算。
+        对指定单时刻在多个空间经纬度位置执行瞬时潮位解算。
 
         参数:
             lons: 经度数组 (长度 N)

@@ -98,11 +98,11 @@ CoastTideX 核心解算器直接驱动 **FES2022b 原生非结构网格 (3.77 GB
 
 对于千万级像元的 10m/30m DEM，若对全图所有像元逐一进行 17,568 个时间步的 FES 调和分析，单幅影像计算需耗时数天且消耗数百 GB 内存。
 
-CoastTideX 创新实现了**自适应四叉树控制网格与经验互补分布 (CCDF) 解耦反演**：
-1. **控制网格自适应加密**：在地形变化剧烈与水陆交界带，网格从初始 4000m 递归细分至 500m；平缓大洋保持稀疏；
-2. **时序就地排序与 CCDF 向量化检索**：在控制节点计算完全年时序后立即原地排序 (`node.water_levels_sorted.sort()`)，释放未排序大数组；
-3. **像元快速二分插值**：像元水位通过四角节点双线性插值获取，像元高程 $z$ 直接在四角节点 CCDF 中通过 `np.searchsorted` 快速索引求得淹没频率 $P(H(t) > z)$；
-4. **单景 DEM 运算提速 100~500 倍**，且精度与逐像元直接反演相比误差严格控制在 $< 1.0\%$。
+CoastTideX 实现了**自适应四叉树控制网格与经验互补累积分布 (CCDF) 解耦反演**：
+1. **控制网格自适应加密**：基于地形梯度与水陆相交区域自适应剖分（初始间距默认 4000m，沿梯度区域递归细分至最小间距 500m）；
+2. **时序就地排序与 CCDF 向量化检索**：在控制节点计算完全年时序后原地排序，构建节点经验互补累积分布函数 (CCDF)；
+3. **像元空间概率插值**：对 DEM 各像元高程 $z$，先在网格单元四角节点的 CCDF 中通过二分检索 (`np.searchsorted`) 获取各节点淹没概率，再通过局部双线性插值获得像元潜在淹没频率 $P(H(t) > z)$；
+4. **计算复杂度空间解耦**：将时序调和分析计算量从全像元规模 $\mathcal{O}(W \times H \times K)$ 解耦至控制节点规模 $\mathcal{O}(M \times K) + \mathcal{O}(W \times H)$（控制节点数 $M \ll W \times H$），容错阈值（默认 1.0%）作为四叉树加密精细化的控制标准，在保证空间连续性的同时显著降低计算耗时。注意：淹没频率基于静态高程在控制网格 CCDF 上的累积分布反演，而潜在露出时间域分析（Exposure）则必须保持时序年代严格顺序并在像元尺度重构时间轨迹。
 
 ---
 
@@ -160,11 +160,12 @@ $$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
              ▼                                           ▼
       持久化 NetCDF Tide Cache (*_tide.nc, Schema 1.2, 包含 terminal_tide)
              │
-             ├──────────────────────────┬──────────────────────────┐
-             ▼                          ▼                          ▼
-      [ Stage 2a ]               [ Stage 2b ]               [ Stage 2c ]
-   潜在天文潮淹没频率          潜在天文潮露出时间域       后续水动力/遥感多期校准
-   (*_inundation.tif)          (7大 Exposure GeoTIFF)      (零 FES 重复调用)
+             ├───────────────────────────────────────────┐
+             ▼                                           ▼
+      [ Stage 2a ]                                [ Stage 2b ]
+   潜在天文潮淹没频率                           潜在天文潮露出时间域
+   (*_inundation.tif)                           (7 大 Exposure GeoTIFF)
+   (零 FES 重复调用)                            (零 FES 重复调用)
 ```
 
 ### Tide Cache Schema 1.2 关键规范：
@@ -248,7 +249,7 @@ CoastTideX 引入了**物理尺度拓扑连通防护 (Topology Guard)**：
 
 ### 推荐 Python 环境：
 - **Python 版本**: 3.11 64-bit
-- **项目专属虚拟环境**: `I:\Test_tide_model\.venv` (开发环境) 或本地标准 venv
+- **推荐虚拟环境**: 本地标准 `.venv` 环境
 
 ### 安装依赖：
 ```bash
@@ -358,7 +359,7 @@ CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模
 
 CoastTideX 拥有完备的分层自动化测试体系，测试集包括适用于轻量便携 CI 环境的自动化回归测试集与本地全要素 real-FES 科学验证集：
 ```bash
-& "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ### 测试层次与执行边界说明：

@@ -1,12 +1,20 @@
 """
-CoastTideX 核心计算包
-包含 FES2022 潮位解算引擎、MDT/EGM2008 基准转换引擎及通用工具函数。
+CoastTideX 核心计算包 / Core Computation Package (v1.6 Beta)
+包含全球潮汐模型解算 (FES2022b)、垂直高程基准转换 (MDT/EGM2008/WGS84)、
+空间栅格解算调度 (Raster Engine)、Tide Cache 缓存管理体系、
+潜在天文潮淹没频率反演 (Inundation)、潜在天文潮露出时间域全要素分析 (Exposure)
+以及文件夹级自动化批处理调度引擎 (Batch Raster Engine)。
+
+Provides core computational components for global ocean tide modeling (FES2022b),
+vertical datum transformations (MDT/EGM2008/WGS84), spatial raster simulation,
+Tide Cache management, potential astronomical tide inundation frequency calculation,
+potential tidal exposure duration and events analysis, and batch processing.
 """
 
 from .datum_engine import DatumTransformer
 from .raster_engine import (
     RasterTideEngine, RasterInfo, RasterResultSummary,
-    RasterMemoryLimitError, estimate_control_node_memory
+    RasterMemoryLimitError, estimate_control_node_memory, LeafCellSpatialIndex
 )
 from .exposure_engine import ExposureProductPaths
 from .tide_cache import (
@@ -39,6 +47,7 @@ __all__ = [
     'RasterResultSummary',
     'RasterMemoryLimitError',
     'estimate_control_node_memory',
+    'LeafCellSpatialIndex',
     'ExposureProductPaths',
     'write_tide_cache',
     'read_tide_cache',

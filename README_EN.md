@@ -99,9 +99,9 @@ In Snapshot Mode, CoastTideX processes user-supplied GeoTIFF DEMs or satellite i
 
 To evaluate annual potential inundation frequency over tens of millions of pixels without evaluating full FES harmonic timeseries per pixel, CoastTideX implements an **Adaptive Quadtree Control Grid with Empirical CCDF Search**:
 1. **Adaptive Refinement**: Begins with a macro grid (default 4000m) and adaptively subdivides down to 500m along steep topography and water-land interfaces;
-2. **In-Place Sorted Timeseries**: Nodes compute full annual timeseries and immediately sort them (`water_levels_sorted.sort()`), freeing raw matrices;
-3. **Bilinear Interpolation & Binary Search**: Pixel inundation frequency $P(H(t) > z)$ is calculated via vectorized `np.searchsorted` within quad cells;
-4. **Speedup**: Accelerates computation by 100× to 500× while keeping maximum error strictly below 1.0%.
+2. **In-Place Sorted Timeseries**: Nodes compute full annual timeseries and immediately sort them to construct empirical complementary cumulative distribution functions (CCDF);
+3. **Spatial CCDF Search & Bilinear Interpolation**: Pixel elevation $z$ is evaluated against quad cell corner CCDFs via vectorized `np.searchsorted`, followed by local bilinear spatial interpolation;
+4. **Computational Decoupling**: Decouples computation from pixel scale $\mathcal{O}(W \times H \times K)$ down to sparse control nodes $\mathcal{O}(M \times K) + \mathcal{O}(W \times H)$ ($M \ll W \times H$). The error tolerance threshold (default 1.0%) acts as an adaptive quadtree subdivision convergence criterion rather than a sensor ground-truth metric. Note that while inundation frequency calculates static cumulative probabilities on CCDFs, Exposure analysis strictly reconstructs chronological time-domain trajectories per pixel.
 
 ---
 
@@ -315,7 +315,7 @@ CoastTideX is architected for large-scale coastal remote sensing scenes and long
 
 CoastTideX is supported by a comprehensive tiered automated test architecture, consisting of a lightweight portable CI test suite and a local full validation harness with real FES2022b:
 ```bash
-& "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ### Testing Strategy & Isolation:

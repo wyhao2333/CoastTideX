@@ -37,6 +37,15 @@ JOB_MODE_EXPOSURE_FROM_CACHE = "exposure-from-cache"        # 从已有 Tide Cac
 JOB_MODE_TIDE_AND_EXPOSURE = "tide-exposure"                # 先生成 Tide Cache，再解算潜在天文潮露出时间域产品
 JOB_MODE_ALL = "all"                                        # 全要素产品包: Tide Cache + 淹没频率 + 潜在天文潮露出时间域产品
 
+VALID_JOB_MODES = {
+    JOB_MODE_TIDE_ONLY,
+    JOB_MODE_TIDE_AND_INUNDATION,
+    JOB_MODE_INUNDATION_FROM_CACHE,
+    JOB_MODE_TIDE_AND_EXPOSURE,
+    JOB_MODE_EXPOSURE_FROM_CACHE,
+    JOB_MODE_ALL
+}
+
 # 现有输出处理策略 (ExistingOutputPolicy)
 class ScanSnapshotStaleError(ValueError):
     """扫描快照已失效 (文件已被移动、删除或修改) 异常"""
@@ -445,15 +454,26 @@ class BatchRasterEngine:
             resume=resume,
             overwrite=overwrite
         )
-        # 统一规范化历史别名
-        if job_mode in ("exposure", "tide_exposure", "tide-exposure"):
+        orig_job_mode = str(job_mode).strip().lower()
+        if orig_job_mode in ("tide", "tide_only"):
+            job_mode = JOB_MODE_TIDE_ONLY
+        elif orig_job_mode in ("exposure", "tide_exposure", "tide-exposure"):
             job_mode = JOB_MODE_TIDE_AND_EXPOSURE
-        elif job_mode in ("exposure_duration", "exposure-from-cache", "exposure_from_cache"):
+        elif orig_job_mode in ("exposure_duration", "exposure-from-cache", "exposure_from_cache"):
             job_mode = JOB_MODE_EXPOSURE_FROM_CACHE
-        elif job_mode in ("tide_inundation", "tide-inundation", "inundation"):
+        elif orig_job_mode in ("tide_inundation", "tide-inundation", "inundation"):
             job_mode = JOB_MODE_TIDE_AND_INUNDATION
-        elif job_mode in ("inundation_from_cache", "inundation-from-cache"):
+        elif orig_job_mode in ("inundation_from_cache", "inundation-from-cache"):
             job_mode = JOB_MODE_INUNDATION_FROM_CACHE
+        elif orig_job_mode in ("all", "full", "all_products"):
+            job_mode = JOB_MODE_ALL
+        else:
+            job_mode = orig_job_mode
+
+        if job_mode not in VALID_JOB_MODES:
+            raise ValueError(
+                f"未知的批量解算模式: '{orig_job_mode}'。合法模式包括: {sorted(list(VALID_JOB_MODES))}"
+            )
 
         in_p = Path(input_folder)
         if not in_p.exists():
@@ -583,43 +603,153 @@ class BatchRasterEngine:
             need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_ALL])
             need_freq = (job_mode in [JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL])
             need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL])
+            is_from_cache = (job_mode in (JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_EXPOSURE_FROM_CACHE))
 
-            # 构建本任务对应的预期缓存规格 (Expected Spec)
             dem_info = self.raster_engine.inspect_raster(input_path, compute_valid_count=False)
-            st_val = start_time if start_time is not None else f"{year:04d}-01-01 00:00:00"
-            et_val = end_time if end_time is not None else f"{year+1:04d}-01-01 00:00:00"
+
+            # ---------------- FROM_CACHE 模式前置检查与权威缓存元数据提取 ----------------
+            cache_ok = False
+            actual_cache_sig = ""
 
             eff_init_sp = initial_control_spacing_m if initial_control_spacing_m is not None else getattr(self.raster_engine, 'initial_control_spacing_m', 4000.0)
             eff_min_sp = min_control_spacing_m if min_control_spacing_m is not None else getattr(self.raster_engine, 'min_control_spacing_m', 500.0)
             eff_tol = inundation_error_tolerance_pct if inundation_error_tolerance_pct is not None else getattr(self.raster_engine, 'inundation_error_tolerance_pct', 1.0)
+            eff_inclusive = inclusive if inclusive is not None else "left"
 
-            if inclusive is not None:
-                eff_inclusive = inclusive
-            elif start_time is None or end_time is None:
-                eff_inclusive = "left"
+            if is_from_cache:
+                # 1. 检查 Tide Cache 是否存在
+                if not os.path.exists(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 2. 检查 Tide Cache 完整性标记
+                if not is_cache_complete(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 3. 检查元数据与节点/单元数
+                try:
+                    cache_meta_info = inspect_tide_cache_metadata(tide_cache_path)
+                except Exception as ex:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"读取 Tide Cache 元数据失败: {ex}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                if cache_meta_info.get("num_nodes", 0) <= 0 or cache_meta_info.get("num_cells", 0) <= 0:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"Tide Cache 节点或网格单元为空 (nodes={cache_meta_info.get('num_nodes')}, cells={cache_meta_info.get('num_cells')}): {tide_cache_path}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 4. 严格校验 DEM 几何/标识兼容性 (只校验 DEM 几何与文件身份，不比对 GUI/CLI 传入的潮位时空参数)
+                fsize = getattr(dem_info, "file_size_bytes", None)
+                mtime = getattr(dem_info, "mtime_ns", None)
+                if (fsize is None or mtime is None) and os.path.exists(input_path):
+                    try:
+                        st = os.stat(input_path)
+                        fsize = st.st_size
+                        mtime = st.st_mtime_ns
+                    except Exception:
+                        pass
+
+                dem_compat_spec = {
+                    "width": dem_info.width,
+                    "height": dem_info.height,
+                    "crs": dem_info.crs,
+                    "transform": dem_info.transform,
+                    "bounds": dem_info.bounds,
+                    "nodata": dem_info.nodata,
+                    "file_size_bytes": fsize,
+                    "mtime_ns": mtime,
+                }
+                c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, dem_compat_spec)
+                if not c_compat:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式 Tide Cache 与目标 DEM 几何/标识不兼容: {'; '.join(c_reasons)}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                actual_cache_sig = cache_meta_info.get("signature", "")
+                cache_ok = True
+
+                # 同步 Cache 中的权威时间与控制网格参数至 manifest
+                c_attrs = cache_meta_info.get("metadata", {})
+                manifest.upsert(
+                    input_path,
+                    time_start=str(c_attrs.get("TIME_START", "")),
+                    time_end=str(c_attrs.get("TIME_END", "")),
+                    time_step=str(c_attrs.get("TIME_STEP", freq)),
+                    time_samples=cache_meta_info.get("time_samples", 0),
+                    control_node_count=cache_meta_info.get("num_nodes", 0),
+                )
+
             else:
-                st_s = str(start_time)
-                et_s = str(end_time)
-                eff_inclusive = "left"  # v1.6 统一默认半开区间 [start, end)
+                # ---------------- 非 FROM_CACHE 模式：按本任务配置构建 Expected Spec ----------------
+                st_val = start_time if start_time is not None else f"{year:04d}-01-01 00:00:00"
+                et_val = end_time if end_time is not None else f"{year+1:04d}-01-01 00:00:00"
 
-            expected_spec = build_expected_cache_spec(
-                info=dem_info,
-                start_time=st_val,
-                end_time=et_val,
-                freq=freq,
-                dem_datum=dem_datum,
-                constituents=constituents,
-                target_mode=target_mode,
-                initial_control_spacing_m=eff_init_sp,
-                min_control_spacing_m=eff_min_sp,
-                inundation_error_tolerance_pct=eff_tol,
-                topology_max_resolution_m=self.raster_engine.topology_max_resolution_m,
-                topology_valid_fraction_threshold=self.raster_engine.topology_valid_fraction_threshold,
-                fes_model="FES2022b",
-                fes_source_type="native_lgp2",
-                source_tz="UTC",
-                inclusive=eff_inclusive
-            )
+                expected_spec = build_expected_cache_spec(
+                    info=dem_info,
+                    start_time=st_val,
+                    end_time=et_val,
+                    freq=freq,
+                    dem_datum=dem_datum,
+                    constituents=constituents,
+                    target_mode=target_mode,
+                    initial_control_spacing_m=eff_init_sp,
+                    min_control_spacing_m=eff_min_sp,
+                    inundation_error_tolerance_pct=eff_tol,
+                    topology_max_resolution_m=self.raster_engine.topology_max_resolution_m,
+                    topology_valid_fraction_threshold=self.raster_engine.topology_valid_fraction_threshold,
+                    fes_model="FES2022b",
+                    fes_source_type="native_lgp2",
+                    source_tz="UTC",
+                    inclusive=eff_inclusive
+                )
+                actual_cache_sig = expected_spec["signature"]
+
+                if os.path.exists(tide_cache_path):
+                    if is_cache_complete(tide_cache_path):
+                        c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, expected_spec)
+                        if c_compat:
+                            cache_ok = True
+                        elif policy == ExistingOutputPolicy.RESUME:
+                            # 严谨科学防御: 缓存属于不同参数集时严禁错误复用或静默跳过！
+                            err_msg = f"Existing cache belongs to another parameter set: {'; '.join(c_reasons)}. Use OVERWRITE to rebuild."
+                            manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
+                            manifest.save()
+                            summary_counts["failed"] += 1
+                            continue
 
             # ---------------- ERROR_IF_EXISTS 策略防线 ----------------
             if policy == ExistingOutputPolicy.ERROR_IF_EXISTS:
@@ -651,21 +781,7 @@ class BatchRasterEngine:
                     summary_counts["failed"] += 1
                     continue
 
-            # ---------------- RESUME 策略深层兼容性与断点跳过检查 ----------------
-            cache_ok = False
-            if os.path.exists(tide_cache_path):
-                if is_cache_complete(tide_cache_path):
-                    c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, expected_spec)
-                    if c_compat:
-                        cache_ok = True
-                    elif policy == ExistingOutputPolicy.RESUME:
-                        # 严谨科学防御: 缓存属于不同参数集时严禁错误复用或静默跳过！
-                        err_msg = f"Existing cache belongs to another parameter set: {'; '.join(c_reasons)}. Use OVERWRITE to rebuild."
-                        manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
-                        manifest.save()
-                        summary_counts["failed"] += 1
-                        continue
-
+            # ---------------- RESUME 策略深层兼容性与断点跳过检查 (权威 actual_cache_sig) ----------------
             if policy == ExistingOutputPolicy.RESUME:
                 if job_mode == JOB_MODE_TIDE_ONLY:
                     if cache_ok:
@@ -675,28 +791,28 @@ class BatchRasterEngine:
                         continue
 
                 elif job_mode == JOB_MODE_TIDE_AND_INUNDATION:
-                    if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
+                    if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
-                    if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
+                    if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_TIDE_AND_EXPOSURE:
-                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
+                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_EXPOSURE_FROM_CACHE:
-                    if _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"]):
+                    if _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
@@ -704,35 +820,12 @@ class BatchRasterEngine:
 
                 elif job_mode == JOB_MODE_ALL:
                     if (cache_ok and
-                        _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]) and
-                        _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=expected_spec["signature"])):
+                        _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig) and
+                        _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig)):
                         manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
-
-            # ---------------- FROM_CACHE 模式前置检查 ----------------
-            if job_mode in (JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_EXPOSURE_FROM_CACHE):
-                if not os.path.exists(tide_cache_path):
-                    manifest.upsert(
-                        input_path,
-                        status=STATUS_FAILED,
-                        run_action="FAILED",
-                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
-                    )
-                    manifest.save()
-                    summary_counts["failed"] += 1
-                    continue
-                if not is_cache_complete(tide_cache_path):
-                    manifest.upsert(
-                        input_path,
-                        status=STATUS_FAILED,
-                        run_action="FAILED",
-                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
-                    )
-                    manifest.save()
-                    summary_counts["failed"] += 1
-                    continue
 
             overall_pct = int(100 * idx / max(1, total_files))
 
@@ -854,6 +947,8 @@ class BatchRasterEngine:
                         cancel_event=cancel_event
                     )
                     elapsed_exp = time.time() - t_exp_start
+                    if not need_freq and isinstance(exp_res, dict):
+                        valid_pixels_cnt = exp_res.get("input_valid_pixels", 0)
 
                 manifest.upsert(
                     input_path,

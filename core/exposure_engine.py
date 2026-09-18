@@ -55,7 +55,7 @@ from rasterio.windows import Window
 
 from .raster_engine import (
     RasterInfo, ControlNode, QuadCell, RasterCalculationCancelled, ExistingOutputError,
-    compute_cell_membership, resolve_topology_compatible_corners
+    compute_cell_membership, resolve_topology_compatible_corners, LeafCellSpatialIndex
 )
 from .tide_cache import TideCacheIntegrityError, TideCacheTimeSeriesReader
 
@@ -830,6 +830,10 @@ def stream_exposure_metrics_interpolation(
                 raise TideCacheIntegrityError(f"QuadCell 引用了不存在的控制节点 ID {nid}，严禁降级回退！")
         return tuple(node_id_to_idx[nid] for nid in raw_ids)
 
+    spatial_index = LeafCellSpatialIndex(cells, bounds=raster_bounds)
+    total_input_valid_pixels = 0
+    total_solved_pixels = 0
+
     try:
         with rasterio.open(dem_path) as src_dem:
             for r_off in range(0, h, block_size):
@@ -847,6 +851,8 @@ def stream_exposure_metrics_interpolation(
                         valid_dem_mask = np.isfinite(dem_block) & ~np.isclose(dem_block, nodata_val)
                     else:
                         valid_dem_mask = np.isfinite(dem_block)
+
+                    total_input_valid_pixels += int(np.count_nonzero(valid_dem_mask))
 
                     # 初始化当前块的输出与状态数组
                     out_frac = np.full((r_len, c_len), NODATA_FLOAT32, dtype=np.float32)
@@ -885,17 +891,13 @@ def stream_exposure_metrics_interpolation(
                         prev_wl = np.full((r_len, c_len), np.nan, dtype=np.float32)
                         prev_ts = 0.0
 
-                        # 检索落在当前块中的四叉树叶单元
+                        # 检索落在当前块中的四叉树叶单元 (利用空间桶索引加速)
                         b_x0, b_y1 = rasterio.transform.xy(trans, r_off, c_off, offset='ul')
                         b_x1, b_y0 = rasterio.transform.xy(trans, r_off + r_len, c_off + c_len, offset='lr')
                         min_x, max_x = min(b_x0, b_x1), max(b_x0, b_x1)
                         min_y, max_y = min(b_y0, b_y1), max(b_y0, b_y1)
 
-                        block_cells = []
-                        for c in cells:
-                            cx0, cx1, cy0, cy1 = _get_cell_bounds(c)
-                            if not (cx1 < min_x or cx0 > max_x or cy1 < min_y or cy0 > max_y):
-                                block_cells.append(c)
+                        block_cells = spatial_index.query_intersecting_cells((min_x, min_y, max_x, max_y))
 
                         # 预计算当前窗口内像元的几何插值与拓扑连通映射 (Precompute cell-pixel mapping)
                         cell_mappings = []
@@ -1231,6 +1233,10 @@ def stream_exposure_metrics_interpolation(
                         qc=out_qc
                     )
 
+                    # 记录成功解算的有效像元
+                    solved_in_block = int(np.count_nonzero(valid_dem_mask & (out_frac != NODATA_FLOAT32) & np.isfinite(out_frac)))
+                    total_solved_pixels += solved_in_block
+
                     processed_blocks += 1
                     if progress_callback:
                         pct = int(processed_blocks / total_blocks * 100)
@@ -1257,5 +1263,8 @@ def stream_exposure_metrics_interpolation(
     return {
         "status": "COMPLETED",
         "elapsed_seconds": round(elapsed, 2),
-        "products": output_paths
+        "products": output_paths,
+        "input_valid_pixels": int(total_input_valid_pixels),
+        "solved_pixels": int(total_solved_pixels),
+        "unsolved_pixels": int(max(0, total_input_valid_pixels - total_solved_pixels))
     }

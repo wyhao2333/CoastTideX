@@ -352,6 +352,101 @@ class QuadCell:
         return (self.node_a.node_id, self.node_b.node_id, self.node_c.node_id, self.node_d.node_id)
 
 
+class LeafCellSpatialIndex:
+    """
+    轻量级四叉树叶单元空间桶索引 / Lightweight QuadCell Spatial Bucket Index.
+
+    将空间离散的四叉树叶单元 (QuadCell / cell dict) 映射至二维规则空间桶网格中，
+    将逐块相交检索复杂度由 O(N_blocks * N_cells) 降低至接近 O(N_blocks)。
+    用于在大型栅格流式反演中快速筛选与分块窗口相交的候选单元，并实施精确的轴对齐包围盒 (AABB) 相交测试。
+
+    Maps spatially distributed QuadCells into a 2D regular bucket grid, reducing
+    per-block cell intersection query complexity from O(N_blocks * N_cells) to
+    near O(N_blocks). Used in large-scale raster streaming to rapidly retrieve
+    candidate cells overlapping the window and perform exact AABB intersection filtering.
+    """
+
+    def __init__(
+        self,
+        leaf_cells: Sequence[Any],
+        bounds: Tuple[float, float, float, float],
+        num_buckets_per_dim: int = 32
+    ):
+        min_x, min_y, max_x, max_y = bounds
+        self.min_x = float(min(min_x, max_x))
+        self.min_y = float(min(min_y, max_y))
+        self.max_x = float(max(min_x, max_x))
+        self.max_y = float(max(min_y, max_y))
+        span_x = max(1e-6, self.max_x - self.min_x)
+        span_y = max(1e-6, self.max_y - self.min_y)
+        self.bucket_size_x = max(100.0, span_x / float(max(1, num_buckets_per_dim)))
+        self.bucket_size_y = max(100.0, span_y / float(max(1, num_buckets_per_dim)))
+        self.buckets: Dict[Tuple[int, int], List[Any]] = defaultdict(list)
+        self.leaf_cells = list(leaf_cells)
+
+        for cell in self.leaf_cells:
+            cx0, cx1, cy0, cy1 = self._get_cell_bounds(cell)
+            bx0 = int((cx0 - self.min_x) // self.bucket_size_x)
+            bx1 = int((cx1 - self.min_x) // self.bucket_size_x)
+            by0 = int((cy0 - self.min_y) // self.bucket_size_y)
+            by1 = int((cy1 - self.min_y) // self.bucket_size_y)
+            for bx in range(bx0, bx1 + 1):
+                for by in range(by0, by1 + 1):
+                    self.buckets[(bx, by)].append(cell)
+
+    @staticmethod
+    def _get_cell_bounds(c: Any) -> Tuple[float, float, float, float]:
+        if hasattr(c, "x_min"):
+            return float(c.x_min), float(c.x_max), float(c.y_min), float(c.y_max)
+        if isinstance(c, dict):
+            if "bounds" in c:
+                b = c["bounds"]
+                return float(b[0]), float(b[2]), float(b[1]), float(b[3])
+            return float(c.get("x_min", c.get("x0", 0.0))), float(c.get("x_max", c.get("x1", 0.0))), float(c.get("y_min", c.get("y0", 0.0))), float(c.get("y_max", c.get("y1", 0.0)))
+        if hasattr(c, "bounds"):
+            b = getattr(c, "bounds")
+            return float(b[0]), float(b[2]), float(b[1]), float(b[3])
+        return float(getattr(c, "x0", 0.0)), float(getattr(c, "x1", 0.0)), float(getattr(c, "y0", 0.0)), float(getattr(c, "y1", 0.0))
+
+    def query_intersecting_cells(self, query_bounds: Tuple[float, float, float, float]) -> List[Any]:
+        """
+        检索与指定查询包围盒 (query_bounds: min_x, min_y, max_x, max_y) 相交的所有叶单元。
+        保证候选去重，并严格执行精确 AABB 相交过滤。
+
+        Query all leaf cells overlapping the given bounding box (min_x, min_y, max_x, max_y).
+        Ensures deduplicated candidates and enforces exact AABB intersection filtering.
+        """
+        qx0, qy0, qx1, qy1 = query_bounds
+        min_qx = min(qx0, qx1)
+        max_qx = max(qx0, qx1)
+        min_qy = min(qy0, qy1)
+        max_qy = max(qy0, qy1)
+
+        wbx0 = int((min_qx - self.min_x) // self.bucket_size_x)
+        wbx1 = int((max_qx - self.min_x) // self.bucket_size_x)
+        wby0 = int((min_qy - self.min_y) // self.bucket_size_y)
+        wby1 = int((max_qy - self.min_y) // self.bucket_size_y)
+
+        candidate_cells = []
+        seen_cids = set()
+        for bx in range(wbx0, wbx1 + 1):
+            for by in range(wby0, wby1 + 1):
+                for c in self.buckets.get((bx, by), []):
+                    cid = getattr(c, "cell_id", id(c))
+                    if cid not in seen_cids:
+                        seen_cids.add(cid)
+                        candidate_cells.append(c)
+
+        # 最终精确 bbox intersection 过滤
+        return [
+            c for c in candidate_cells
+            if not (self._get_cell_bounds(c)[1] < min_qx or
+                    self._get_cell_bounds(c)[0] > max_qx or
+                    self._get_cell_bounds(c)[3] < min_qy or
+                    self._get_cell_bounds(c)[2] > max_qy)
+        ]
+
+
 @dataclass
 class RasterResultSummary:
     """栅格解算任务结果摘要"""
@@ -482,18 +577,7 @@ def stream_inundation_frequency_interpolation(
     tmp_qc = f"{qc_output_path}.tmp.tif"
 
     min_x, min_y, max_x, max_y = info.bounds
-    bucket_size_x = max(100.0, (max_x - min_x) / 32.0)
-    bucket_size_y = max(100.0, (max_y - min_y) / 32.0)
-    spatial_buckets: Dict[Tuple[int, int], List[QuadCell]] = defaultdict(list)
-
-    for cell in leaf_cells:
-        bx0 = int((cell.x_min - min_x) // bucket_size_x)
-        bx1 = int((cell.x_max - min_x) // bucket_size_x)
-        by0 = int((cell.y_min - min_y) // bucket_size_y)
-        by1 = int((cell.y_max - min_y) // bucket_size_y)
-        for bx in range(bx0, bx1 + 1):
-            for by in range(by0, by1 + 1):
-                spatial_buckets[(bx, by)].append(cell)
+    spatial_index = LeafCellSpatialIndex(leaf_cells, bounds=info.bounds)
 
     # 遵守需求: 如果输入 DEM nodata 是可表示的有限 Float32 且不在有效淹没频率区间 [0, 100] 内，则输出继承该 nodata；否则回退为 NaN 防冲突
     if info.nodata is not None and np.isfinite(info.nodata) and not (0.0 <= float(info.nodata) <= 100.0):
@@ -569,24 +653,7 @@ def stream_inundation_frequency_interpolation(
                         win_x1 = max(w_bounds[0], w_bounds[2])
                         win_y1 = max(w_bounds[1], w_bounds[3])
 
-                        wbx0 = int((win_x0 - min_x) // bucket_size_x)
-                        wbx1 = int((win_x1 - min_x) // bucket_size_x)
-                        wby0 = int((win_y0 - min_y) // bucket_size_y)
-                        wby1 = int((win_y1 - min_y) // bucket_size_y)
-
-                        candidate_cells: List[QuadCell] = []
-                        seen_cids = set()
-                        for bx in range(wbx0, wbx1 + 1):
-                            for by in range(wby0, wby1 + 1):
-                                for c in spatial_buckets.get((bx, by), []):
-                                    if c.cell_id not in seen_cids:
-                                        seen_cids.add(c.cell_id)
-                                        candidate_cells.append(c)
-
-                        intersecting_cells = [
-                            c for c in candidate_cells
-                            if not (c.x_max < win_x0 or c.x_min > win_x1 or c.y_max < win_y0 or c.y_min > win_y1)
-                        ]
+                        intersecting_cells = spatial_index.query_intersecting_cells((win_x0, win_y0, win_x1, win_y1))
 
                         freq_out = np.full(n_chunk_valid, np.nan, dtype=np.float32)
                         qc_out = np.zeros(n_chunk_valid, dtype=np.uint16)
@@ -1802,7 +1869,7 @@ class RasterTideEngine:
         if export_tide_cache_path:
             from .tide_cache import write_tide_cache
 
-            # 计算终端时刻水位 (Terminal Tide at end_time) 以支撑高精度连续露出分析 (Schema 1.2)
+            # 计算终端时刻水位 (Terminal Tide at end_time) 以支撑连续露出时间域分析 (Schema 1.2)
             terminal_tides = None
             try:
                 valid_nodes = [n for n in node_cache.values() if n.valid]
