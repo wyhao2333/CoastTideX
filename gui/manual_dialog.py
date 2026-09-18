@@ -179,7 +179,7 @@ MANUAL_HTML = """
         在 DEM 覆盖区以初始间距（默认 4,000 米）自适应构建控制节点。在水陆交界、潮滩急剧变化区域根据误差容忍度阈值（默认 1.0%）自动递归细分至最小间距（默认 500 米）。
     </li>
     <li><b>像元级拓扑连通防护 (Target-Mask-Derived Topology Guard)</b>：
-        根据 DEM 有效像元与 NoData 陆地屏障，自动构建多连通域拓扑标签。像元在双线性插值时仅使用归属于同一拓扑连通域的有效控制节点，彻底阻断潮位跨越岛礁、海堤或狭窄海峡的错误泄漏。
+        根据 DEM 有效像元与 NoData 陆地屏障，自动构建多连通域拓扑标签。像元在双线性插值时仅使用归属于同一拓扑连通域的有效控制节点，基于目标 DEM valid/NoData 掩膜构建连通域，降低潮位跨越岛礁、海堤或掩膜隔离区域的双线性插值风险。
     </li>
     <li><b>角点重归一化 (Degraded Cell Corner Normalization)</b>：
         当四叉树单元局部角点落在陆地无效区或属于不同连通域时，系统自动剔除无效角点并对剩余可用角点权重进行重新归一化，严禁无效节点以 0m 掺入污染。
@@ -219,7 +219,7 @@ MANUAL_HTML = """
         <td><b>Inundation from Cache</b></td>
         <td><code>inundation-from-cache</code></td>
         <td>直接利用已有完整 Tide Cache 反演淹没频率，零 FES 计算。</td>
-        <td>重调容差参数、快速重新制图。</td>
+        <td>无需重新调用 FES，基于已有兼容 Tide Cache 重新生成/恢复淹没频率产品。</td>
     </tr>
     <tr>
         <td><b>Tide + Exposure</b></td>
@@ -251,7 +251,7 @@ MANUAL_HTML = """
         在任务执行前进行统一预检防线拦截。若当前模式所需的任何目标文件（包括 <code>*_tide.nc</code>、淹没频率或 7 大露出产物中的任意一个）已存在，立即报错并拒绝覆写，确保历史成果不受意外破坏。
     </li>
     <li><code>overwrite</code> (强制覆盖)：
-        允许重新计算，所有空间栅格产物通过 <code>*.tmp.tif</code> 临时写入并原子替换，确保过程无损覆盖。
+        允许重新计算，所有空间栅格产物通过 <code>*.tmp.tif</code> 临时写入并执行单文件原子替换覆盖。
     </li>
 </ul>
 
@@ -259,11 +259,11 @@ MANUAL_HTML = """
 <p>输出的 <code>*_exposure_qc.tif</code> (UInt16) 采用逐位标记体系（Bitmask）：</p>
 <table>
     <tr><th>位 (Bit)</th><th>十进制值</th><th>常量标识</th><th>科学含义与处理说明</th></tr>
-    <tr><td>-</td><td>0</td><td><code>QC_EXP_VALID</code></td><td>正常高保真解算，无任何降级或近似。</td></tr>
+    <tr><td>-</td><td>0</td><td><code>QC_EXP_VALID</code></td><td>未触发当前定义的 Exposure QC 位，有效解算。</td></tr>
     <tr><td>bit 0</td><td>1</td><td><code>QC_EXP_DEGRADED_CELL</code></td><td>四叉树控制单元部分角点无效，已自动执行可用角点重归一化。</td></tr>
     <tr><td>bit 1</td><td>2</td><td><code>QC_EXP_INSUFFICIENT_NODES</code></td><td>局部缺少足够同连通域有效控制节点，可能产生外推误差。</td></tr>
     <tr><td>bit 2</td><td>4</td><td><code>QC_EXP_DATUM_APPROX</code></td><td>垂直基准偏移采用了闭合多边形近似判别。</td></tr>
-    <tr><td>bit 3</td><td>8</td><td><code>QC_EXP_TERMINAL_UNAVAILABLE</code></td><td>终端时刻采样缺失或不可用，末端时步采用截断估算。</td></tr>
+    <tr><td>bit 3</td><td>8</td><td><code>QC_EXP_TERMINAL_UNAVAILABLE</code></td><td>终端潮位不可用时，最后一个请求区间不计入有效积分时长并相应扣减有效时间覆盖率。</td></tr>
     <tr><td>bit 4</td><td>16</td><td><code>QC_EXP_PARTIAL_VALID_TIME</code></td><td>时间序列存在无效数据间隙，有效时间覆盖率 &lt; 100%。</td></tr>
     <tr><td>bit 5</td><td>32</td><td><code>QC_EXP_PERMANENTLY_SUBMERGED</code></td><td>全有效时段内水面始终高于地形（常时淹没区）。</td></tr>
     <tr><td>bit 6</td><td>64</td><td><code>QC_EXP_PERMANENTLY_EXPOSED</code></td><td>全有效时段内水面始终低于地形（常时露出区）。</td></tr>
@@ -273,7 +273,7 @@ MANUAL_HTML = """
 <h2>十二、 批处理清单与产物追溯 (Batch Manifest & Provenance)</h2>
 <p>
 每次批量运行均在输出目录根节点原子生成并实时同步 <code>batch_manifest.json</code> 与 <code>batch_manifest.csv</code> 清单。
-清单详细记录每个 DEM 瓦片的输入文件名、绝对路径、CRS、像元尺寸、NoData、时间步长、控制节点数、各阶段执行耗时、状态、Tide Cache 路径、淹没频率路径、露出产物输出目录 (<code>exposure_output_dir</code>)、露出产物完整性标记 (<code>exposure_products_complete</code>) 及 7 大露出产物路径映射。具备向前向后字段兼容性，支持跨版本断点恢复查看。
+清单详细记录每个 DEM 瓦片的输入文件名、绝对路径、CRS、像元尺寸、NoData、时间步长、时区、垂直基准、目标模式、控制节点数、各阶段执行耗时、状态、Tide Cache 路径、缓存签名、淹没频率路径、露出产物输出目录 (<code>exposure_output_dir</code>)、露出产物完整性标记 (<code>exposure_products_complete</code>) 及 7 大露出产物路径映射。清单可向前兼容读取缺少新增字段的历史清单文件，缺失字段按默认空值处理。
 </p>
 
 <h2>十三、 系统硬件资源与内存管理 (System Resources & Memory Scaling)</h2>
@@ -284,6 +284,7 @@ MANUAL_HTML = """
     <tr><td><b>空间栅格解算</b></td><td>8 ~ 16 GB</td><td>采用 512×512 空间分块流式重构，内存占用与总像元规模严格解耦，单步流式重构水位切片，实现可控的有界内存驻留。</td></tr>
     <tr><td><b>批量潮间带解算</b></td><td>8 ~ 16 GB</td><td>单瓦片顺序推进 (max_parallel_tiles = 1) 与原子写入，单瓦片失败自动隔离。</td></tr>
 </table>
+<p><i>注：推荐内存配置为典型工程经验参考，实际资源开销取决于分块大小、自适应细分深度与时间采样点数。</i></p>
 
 <h2>十四、 科学局限性与使用边界 (Known Scientific Limitations)</h2>
 <ol>

@@ -356,14 +356,16 @@ class LeafCellSpatialIndex:
     """
     轻量级四叉树叶单元空间桶索引 / Lightweight QuadCell Spatial Bucket Index.
 
-    将空间离散的四叉树叶单元 (QuadCell / cell dict) 映射至二维规则空间桶网格中，
-    将逐块相交检索复杂度由 O(N_blocks * N_cells) 降低至接近 O(N_blocks)。
-    用于在大型栅格流式反演中快速筛选与分块窗口相交的候选单元，并实施精确的轴对齐包围盒 (AABB) 相交测试。
+    将空间离散的四叉树叶单元 (QuadCell / cell dict) 映射至二维规则空间桶网格中。
+    在叶单元空间离散分布良好的场景下，将逐块候选相交检索均摊复杂度显著加速（由 O(M * N) 优化至 O(M * k)），
+    最坏全局完全重叠退化情况下为 O(M * N)。
+    用于在大型栅格流式反演中快速筛选与分块窗口相交的候选单元，实施精确的轴对齐包围盒 (AABB) 相交测试与确定性排序。
 
-    Maps spatially distributed QuadCells into a 2D regular bucket grid, reducing
-    per-block cell intersection query complexity from O(N_blocks * N_cells) to
-    near O(N_blocks). Used in large-scale raster streaming to rapidly retrieve
-    candidate cells overlapping the window and perform exact AABB intersection filtering.
+    Maps spatially distributed QuadCells into a 2D regular bucket grid, accelerating
+    per-block candidate intersection retrieval from O(M * N) to average O(M * k) for
+    well-distributed leaf cells (worst-case O(M * N) when cells globally overlap).
+    Used in large-scale raster streaming to rapidly retrieve candidate cells overlapping
+    the block window, enforce exact AABB intersection filtering, and guarantee deterministic ordering.
     """
 
     def __init__(
@@ -377,22 +379,43 @@ class LeafCellSpatialIndex:
         self.min_y = float(min(min_y, max_y))
         self.max_x = float(max(min_x, max_x))
         self.max_y = float(max(min_y, max_y))
-        span_x = max(1e-6, self.max_x - self.min_x)
-        span_y = max(1e-6, self.max_y - self.min_y)
-        self.bucket_size_x = max(100.0, span_x / float(max(1, num_buckets_per_dim)))
-        self.bucket_size_y = max(100.0, span_y / float(max(1, num_buckets_per_dim)))
+        span_x = max(1e-12, self.max_x - self.min_x)
+        span_y = max(1e-12, self.max_y - self.min_y)
+        self.num_buckets_per_dim = max(1, int(num_buckets_per_dim))
+        eps_x = max(span_x * 1e-12, 1e-12)
+        eps_y = max(span_y * 1e-12, 1e-12)
+        self.bucket_size_x = max(span_x / float(self.num_buckets_per_dim), eps_x)
+        self.bucket_size_y = max(span_y / float(self.num_buckets_per_dim), eps_y)
+
         self.buckets: Dict[Tuple[int, int], List[Any]] = defaultdict(list)
+        self.oversized_cells: List[Any] = []
         self.leaf_cells = list(leaf_cells)
+
+        total_buckets = self.num_buckets_per_dim * self.num_buckets_per_dim
+        oversized_threshold = max(4, total_buckets // 2)
 
         for cell in self.leaf_cells:
             cx0, cx1, cy0, cy1 = self._get_cell_bounds(cell)
-            bx0 = int((cx0 - self.min_x) // self.bucket_size_x)
-            bx1 = int((cx1 - self.min_x) // self.bucket_size_x)
-            by0 = int((cy0 - self.min_y) // self.bucket_size_y)
-            by1 = int((cy1 - self.min_y) // self.bucket_size_y)
-            for bx in range(bx0, bx1 + 1):
-                for by in range(by0, by1 + 1):
-                    self.buckets[(bx, by)].append(cell)
+            if cx1 < self.min_x or cx0 > self.max_x or cy1 < self.min_y or cy0 > self.max_y:
+                continue
+
+            raw_bx0 = int((cx0 - self.min_x) // self.bucket_size_x)
+            raw_bx1 = int((cx1 - self.min_x) // self.bucket_size_x)
+            raw_by0 = int((cy0 - self.min_y) // self.bucket_size_y)
+            raw_by1 = int((cy1 - self.min_y) // self.bucket_size_y)
+
+            bx0 = max(0, min(self.num_buckets_per_dim - 1, raw_bx0))
+            bx1 = max(0, min(self.num_buckets_per_dim - 1, raw_bx1))
+            by0 = max(0, min(self.num_buckets_per_dim - 1, raw_by0))
+            by1 = max(0, min(self.num_buckets_per_dim - 1, raw_by1))
+
+            num_covered = (bx1 - bx0 + 1) * (by1 - by0 + 1)
+            if num_covered >= oversized_threshold:
+                self.oversized_cells.append(cell)
+            else:
+                for bx in range(bx0, bx1 + 1):
+                    for by in range(by0, by1 + 1):
+                        self.buckets[(bx, by)].append(cell)
 
     @staticmethod
     def _get_cell_bounds(c: Any) -> Tuple[float, float, float, float]:
@@ -411,10 +434,11 @@ class LeafCellSpatialIndex:
     def query_intersecting_cells(self, query_bounds: Tuple[float, float, float, float]) -> List[Any]:
         """
         检索与指定查询包围盒 (query_bounds: min_x, min_y, max_x, max_y) 相交的所有叶单元。
-        保证候选去重，并严格执行精确 AABB 相交过滤。
+        保证候选去重，严格执行精确 AABB 相交过滤，并实施确定性排序输出。
 
         Query all leaf cells overlapping the given bounding box (min_x, min_y, max_x, max_y).
-        Ensures deduplicated candidates and enforces exact AABB intersection filtering.
+        Ensures deduplicated candidates, enforces exact AABB intersection filtering, and
+        guarantees deterministic cell ordering.
         """
         qx0, qy0, qx1, qy1 = query_bounds
         min_qx = min(qx0, qx1)
@@ -422,13 +446,29 @@ class LeafCellSpatialIndex:
         min_qy = min(qy0, qy1)
         max_qy = max(qy0, qy1)
 
-        wbx0 = int((min_qx - self.min_x) // self.bucket_size_x)
-        wbx1 = int((max_qx - self.min_x) // self.bucket_size_x)
-        wby0 = int((min_qy - self.min_y) // self.bucket_size_y)
-        wby1 = int((max_qy - self.min_y) // self.bucket_size_y)
+        # 查询窗口与整体索引范围完全不相交时立即短路返回
+        if max_qx < self.min_x or min_qx > self.max_x or max_qy < self.min_y or min_qy > self.max_y:
+            return []
+
+        raw_wbx0 = int((min_qx - self.min_x) // self.bucket_size_x)
+        raw_wbx1 = int((max_qx - self.min_x) // self.bucket_size_x)
+        raw_wby0 = int((min_qy - self.min_y) // self.bucket_size_y)
+        raw_wby1 = int((max_qy - self.min_y) // self.bucket_size_y)
+
+        wbx0 = max(0, min(self.num_buckets_per_dim - 1, raw_wbx0))
+        wbx1 = max(0, min(self.num_buckets_per_dim - 1, raw_wbx1))
+        wby0 = max(0, min(self.num_buckets_per_dim - 1, raw_wby0))
+        wby1 = max(0, min(self.num_buckets_per_dim - 1, raw_wby1))
 
         candidate_cells = []
         seen_cids = set()
+
+        for c in self.oversized_cells:
+            cid = getattr(c, "cell_id", id(c))
+            if cid not in seen_cids:
+                seen_cids.add(cid)
+                candidate_cells.append(c)
+
         for bx in range(wbx0, wbx1 + 1):
             for by in range(wby0, wby1 + 1):
                 for c in self.buckets.get((bx, by), []):
@@ -438,13 +478,25 @@ class LeafCellSpatialIndex:
                         candidate_cells.append(c)
 
         # 最终精确 bbox intersection 过滤
-        return [
+        filtered = [
             c for c in candidate_cells
             if not (self._get_cell_bounds(c)[1] < min_qx or
                     self._get_cell_bounds(c)[0] > max_qx or
                     self._get_cell_bounds(c)[3] < min_qy or
                     self._get_cell_bounds(c)[2] > max_qy)
         ]
+
+        def _sort_key(c: Any):
+            cid = getattr(c, "cell_id", None)
+            b = self._get_cell_bounds(c)
+            if isinstance(cid, int):
+                return (0, cid, "", b)
+            elif isinstance(cid, str):
+                return (1, 0, cid, b)
+            return (2, 0, "", b)
+
+        filtered.sort(key=_sort_key)
+        return filtered
 
 
 @dataclass
@@ -557,7 +609,7 @@ def stream_inundation_frequency_interpolation(
     """
     【共享流式插值内核 (Shared Interpolation Kernel)】
     负责在 2D DEM 上根据自适应叶单元与控制节点排序时序流式评估潜在天文潮淹没频率与 QC 掩膜。
-    保证 Direct 单影像路径与 Stage 2 Cache 路径 100% 数学与科学连通域拓扑一致。
+    Direct 单影像路径与 Stage 2 Cache 路径复用本共享流式插值内核，在相同网格与拓扑支持掩膜下保持数学评估与连通域处理一致。
     """
     t_start = time.time()
     if qc_output_path is None:

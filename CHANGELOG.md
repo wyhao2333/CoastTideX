@@ -70,6 +70,13 @@
   - **P1 终端时刻 QC 逐像元精细化**：终端时刻有效性判定由全局变量提升至像元级 `val_term_step`，精准标记局部终端失效像元的 `QC_EXP_TERMINAL_UNAVAILABLE` 并扣减对应 `valid_time_fraction`。
   - **受控真实 FES2022b 经验 Oracle 评测**：基于真实 FES2022b 模型与长江口代表性潮间带地形完成 30 点位对照解算，输出规范误差指标 (Fraction MAE: 0.0395 pp, Duration MAE: 0.0190 h, Event Count error: 0)。
   - **生产场景严密自动化测试套件**：完善单元测试套件并保证回归通过，覆盖端到端非 UTC 转换、混合拓扑隔离、半开边界唯一归属、逐像元终端 QC 与 1D Oracle 多波形等价性。
+- **第七轮最终合并门禁修复与空间索引加固 (Round 7 Merge-Gate Hardening & Index Repair)**：
+  - **LeafCellSpatialIndex 物理单位与坐标系退化修复**：移除硬编码 100.0 米桶间距，改为依赖坐标范围跨度的动态相对比例，全面兼容经纬度 (EPSG:4326)、投影坐标系、小范围区域与负坐标；增加网格桶索引边界钳位与超大单元 (Giant Cell) 分流处理；对候选单元实施确定性排序，消除集合哈希遍历顺序依赖。
+  - **Stage 2 缓存产物权威元数据回写补齐**：`calculate_inundation_from_tide_cache` 与 `calculate_exposure_from_tide_cache` 完整将 Tide Cache 中的权威时间区间、时区、步长、基准面、目标模式、拓扑参数及缓存签名写入输出 GeoTIFF 标签，杜绝被忽略的请求参数渗漏。
+  - **BatchManifest 字段集对齐与向前兼容**：清单新增 `timezone`、`dem_datum`、`target_mode` 与 `cache_signature` 字段，并在历史清单读取时执行向后兼容降级。
+  - **Tide Cache 元数据篡改自校验**：`inspect_tide_cache_metadata` 增加签名自重构与防篡改验证，发现属性篡改立即抛出 `TideCacheIntegrityError`。
+  - **GUI 与 CLI 交互透明度增强**：Tab 4 在 from-cache 模式下更新采样步数标签为显式提示“读取自已存在的 Tide Cache”；CLI 运行 from-cache 模式时打印 Stage 1 参数被忽略的透明提示信息。
+  - **学术文档与手册严谨化**：校准手册与文档中关于拓扑防护、硬件参考、QC 掩膜及原子写入的表述，移除不当夸大修辞。
 
 ### 变更 (Changed)
 - **统一全系统采样时间语义为严格半开区间 `[start, end)`**：

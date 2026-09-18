@@ -953,7 +953,7 @@ class MainWindow(QMainWindow):
 
         layout_inund.addWidget(QLabel("DEM基准面:"), 2, 2)
         self.combo_inund_datum = QComboBox()
-        self.combo_inund_datum.addItem("EGM2008 (大地水准面绝对正高)", "egm2008")
+        self.combo_inund_datum.addItem("EGM2008 (相对 EGM2008 参考面)", "egm2008")
         self.combo_inund_datum.addItem("MSL (相对平均海平面)", "msl")
         self.combo_inund_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
@@ -963,6 +963,8 @@ class MainWindow(QMainWindow):
         self.combo_inund_target_mode = QComboBox()
         self.combo_inund_target_mode.addItem("潮间带模式 (intertidal - 推荐)", "intertidal")
         self.combo_inund_target_mode.addItem("全域网格模式 (standard)", "standard")
+        self.combo_inund_target_mode.setToolTip("长周期栅格产品目标区域解算模式 (支持潜在淹没频率与潜在露出时长)")
+        self.combo_raster_target_mode = self.combo_inund_target_mode
         layout_inund.addWidget(self.combo_inund_target_mode, 3, 1, 1, 3)
 
         self.lbl_inund_qc = QLabel("QC掩膜输出:")
@@ -2280,10 +2282,11 @@ class MainWindow(QMainWindow):
     def _apply_batch_mode_constraints(self, job_mode: Optional[str] = None):
         """根据当前选择的批量模式动态约束参数控件启用状态"""
         if job_mode is None:
-            job_mode = self.cmb_batch_job_mode.currentData()
+            job_mode = self.cmb_batch_job_mode.currentData() if hasattr(self, 'cmb_batch_job_mode') else None
         is_from_cache = (job_mode in ("inundation-from-cache", "exposure-from-cache"))
         self.grp_batch_time.setEnabled(not is_from_cache)
         self.grp_batch_sci.setEnabled(not is_from_cache)
+        self._update_batch_expected_samples()
 
     def _on_batch_job_mode_changed(self):
         job_mode = self.cmb_batch_job_mode.currentData()
@@ -2403,6 +2406,11 @@ class MainWindow(QMainWindow):
         self._update_batch_expected_samples()
 
     def _update_batch_expected_samples(self):
+        job_mode = self.cmb_batch_job_mode.currentData() if hasattr(self, 'cmb_batch_job_mode') else None
+        if job_mode in ("inundation-from-cache", "exposure-from-cache"):
+            self.lbl_batch_samples.setText("时间采样与科学配置：读取自已存在的 Tide Cache")
+            return
+
         freq = self._get_batch_frequency()
         time_mode = self.combo_batch_time_mode.currentData() if hasattr(self, 'combo_batch_time_mode') else 'year'
 

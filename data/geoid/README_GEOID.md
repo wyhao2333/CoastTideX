@@ -64,7 +64,7 @@ CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全�
 ### 3.1 ICGEM 数据源
 - **服务机构**：International Centre for Global Earth Models (ICGEM), GFZ German Research Centre for Geosciences, Potsdam.
 - **参考椭球**：GRS80 / WGS84 正常椭球 ($a = 6378137.0\text{ m}, 1/f = 298.257223563$).
-- **潮汐系统**：**Tide-free** (无潮系统，消除永久潮汐形变，与 CNES-CLS22、EGM2008 官方基准规范保持绝对一致).
+- **潮汐系统**：**Tide-free** (无潮系统，消除永久潮汐形变，与 CNES-CLS22、EGM2008 官方基准规范保持一致).
 
 ### 3.2 栅格复现生成
 用户可运行项目自带通用脚本 `scripts/generate_delta_n.py` 重新生成差值栅格：

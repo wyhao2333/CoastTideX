@@ -29,7 +29,7 @@ from .raster_engine import (
     QC_BIT_INSUFFICIENT_NODES, QC_BIT_DATUM_INVALID, QC_BIT_DATUM_SOURCE_APPROX,
     QC_BIT_MIN_SPACING_REACHED, QC_BIT_CONNECTIVITY_FALLBACK,
     QC_BIT_FES_VALIDITY_BOUNDARY, QC_BIT_MAX_REFINEMENT_REACHED,
-    QC_NODATA, RasterCalculationCancelled,
+    QC_NODATA, RasterCalculationCancelled, ExistingOutputError,
     build_support_topology, stream_inundation_frequency_interpolation
 )
 from .utils import compute_inundation_frequency
@@ -37,11 +37,6 @@ from .utils import compute_inundation_frequency
 COASTTIDEX_VERSION = "1.6"
 CACHE_SCHEMA_VERSION = "1.2"
 CACHE_SIGNATURE_ALGORITHM = "sha256"
-
-
-class ExistingOutputError(FileExistsError):
-    """目标正式产物已存在且当前策略不允许覆盖时抛出"""
-    pass
 
 
 class TideCacheCompatibilityError(ValueError):
@@ -347,9 +342,10 @@ def build_expected_cache_spec(
     }
 
 
-def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
+def inspect_tide_cache_metadata(cache_path: str, validate_signature: bool = True) -> Dict[str, Any]:
     """
     轻量读取 Tide Cache NetCDF 全局属性、维度与签名，严禁读取 tide_msl_m 大矩阵。
+    当 validate_signature 为 True 且文件中存在 CACHE_SIGNATURE 时，自重构签名并执行防篡改校验。
     """
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
@@ -366,6 +362,46 @@ def inspect_tide_cache_metadata(cache_path: str) -> Dict[str, Any]:
 
         has_term = ("tide_msl_terminal_m" in ds.variables) or (str(attrs.get("HAS_TERMINAL_TIDE", "false")).lower() == "true")
         schema_v = str(attrs.get("CACHE_SCHEMA_VERSION", "1.1"))
+
+        if validate_signature and signature:
+            try:
+                calc_sig, _ = generate_tide_cache_signature(
+                    source_path=attrs.get("SOURCE_DEM_PATH", attrs.get("SOURCE_RASTER_PATH", "")),
+                    source_width=int(attrs.get("SOURCE_WIDTH", 0)),
+                    source_height=int(attrs.get("SOURCE_HEIGHT", 0)),
+                    source_crs=attrs.get("SOURCE_CRS", ""),
+                    source_transform=json.loads(attrs.get("SOURCE_TRANSFORM", "[]")) if isinstance(attrs.get("SOURCE_TRANSFORM"), str) else attrs.get("SOURCE_TRANSFORM", []),
+                    source_bounds=json.loads(attrs.get("SOURCE_BOUNDS", "[]")) if isinstance(attrs.get("SOURCE_BOUNDS"), str) else attrs.get("SOURCE_BOUNDS", []),
+                    source_resolution=json.loads(attrs.get("SOURCE_RESOLUTION", "[]")) if isinstance(attrs.get("SOURCE_RESOLUTION"), str) else attrs.get("SOURCE_RESOLUTION", []),
+                    source_nodata=float(attrs.get("SOURCE_NODATA")) if attrs.get("SOURCE_NODATA") is not None and str(attrs.get("SOURCE_NODATA")).lower() != "nan" else None,
+                    source_file_size_bytes=int(attrs["SOURCE_FILE_SIZE_BYTES"]) if "SOURCE_FILE_SIZE_BYTES" in attrs and attrs.get("SOURCE_FILE_SIZE_BYTES") is not None else None,
+                    source_mtime_ns=int(attrs["SOURCE_MTIME_NS"]) if "SOURCE_MTIME_NS" in attrs and attrs.get("SOURCE_MTIME_NS") is not None else None,
+                    start_time=attrs.get("TIME_START", ""),
+                    end_time=attrs.get("TIME_END", ""),
+                    freq=attrs.get("TIME_STEP", ""),
+                    source_tz=attrs.get("TIMEZONE", "UTC"),
+                    inclusive=attrs.get("TIME_INCLUSIVE", "left"),
+                    time_samples=time_samples,
+                    fes_model=attrs.get("TIDE_MODEL", attrs.get("FES_MODEL", "FES2022b")),
+                    fes_source_type=attrs.get("FES_SOURCE_TYPE", "native_lgp2"),
+                    constituents=attrs.get("CONSTITUENTS", "all"),
+                    dem_datum=attrs.get("DEM_DATUM", "egm2008"),
+                    target_mode=attrs.get("TARGET_MODE", "intertidal"),
+                    initial_control_spacing_m=float(attrs.get("INITIAL_CONTROL_SPACING_M", 4000.0)),
+                    min_control_spacing_m=float(attrs.get("MIN_CONTROL_SPACING_M", 500.0)),
+                    inundation_error_tolerance_pct=float(attrs.get("ERROR_TOLERANCE_PCT", 1.0)),
+                    topology_max_resolution_m=float(attrs.get("TOPOLOGY_RESOLUTION_M", 100.0)),
+                    topology_valid_fraction_threshold=float(attrs.get("TOPOLOGY_VALID_FRACTION_THRESHOLD", 0.5)),
+                    schema_version=schema_v
+                )
+                if calc_sig != signature:
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 元数据已被篡改或损坏 (签名不一致: stored '{signature}' != computed '{calc_sig}')"
+                    )
+            except TideCacheIntegrityError:
+                raise
+            except Exception as ex:
+                raise TideCacheIntegrityError(f"Tide Cache 签名校验异常: {str(ex)}")
 
         return {
             "metadata": attrs,
@@ -1200,6 +1236,16 @@ def calculate_inundation_from_tide_cache(
     if not os.path.exists(dem_path):
         raise FileNotFoundError(f"未找到指定的输入 DEM 文件: {dem_path}")
 
+    if qc_output_path is None:
+        base, ext = os.path.splitext(output_path)
+        qc_output_path = f"{base}_qc{ext}"
+
+    if not allow_overwrite:
+        if os.path.exists(output_path):
+            raise ExistingOutputError(f"输出文件已存在且未开启覆盖权限: {output_path}")
+        if qc_output_path and os.path.exists(qc_output_path):
+            raise ExistingOutputError(f"QC 输出文件已存在且未开启覆盖权限: {qc_output_path}")
+
     from .raster_engine import RasterTideEngine
     engine = RasterTideEngine()
     info = engine.inspect_raster(dem_path, compute_valid_count=True)
@@ -1239,10 +1285,6 @@ def calculate_inundation_from_tide_cache(
     nodes: List[ControlNode] = cache_data["nodes"]
     meta: Dict[str, Any] = cache_data["metadata"]
 
-    if qc_output_path is None:
-        base, ext = os.path.splitext(output_path)
-        qc_output_path = f"{base}_qc{ext}"
-
     if block_size is None:
         block_size = 512
 
@@ -1269,9 +1311,16 @@ def calculate_inundation_from_tide_cache(
         "SOURCE_DEM": os.path.basename(dem_path),
         "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
         "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
+        "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.1")),
+        "TIME_START": str(meta.get("TIME_START", "")),
+        "TIME_END": str(meta.get("TIME_END", "")),
+        "TIME_STEP": str(meta.get("TIME_STEP", "")),
+        "TIMEZONE": str(meta.get("TIMEZONE", "UTC")),
         "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", "")),
         "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
         "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
+        "CONSTITUENTS": str(meta.get("CONSTITUENTS", "")),
+        "TIME_INTERVAL_SEMANTICS": "[start, end)",
         "STAGE": "Stage 2 (Zero FES calls)",
         "TOPOLOGY_GUARD": "valid_mask_topology_aware",
         "TOPOLOGY_SOURCE": "target_mask_derived",
@@ -1465,12 +1514,23 @@ def calculate_exposure_from_tide_cache(
             progress_callback(10 + int(pct_val * 0.9), msg_val)
 
     meta_tags = {
+        "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
+        "SOURCE_DEM": os.path.basename(dem_path),
+        "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
         "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
         "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.2")),
+        "TIME_STEP": str(meta.get("TIME_STEP", "")),
+        "TIMEZONE": str(meta.get("TIMEZONE", "UTC")),
+        "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", len(time_idx))),
+        "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
+        "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
+        "CONSTITUENTS": str(meta.get("CONSTITUENTS", "")),
         "TOPOLOGY_RESOLUTION_M": str(top_res_m),
         "TOPOLOGY_VALID_FRACTION_THRESHOLD": str(top_frac),
         "TOPOLOGY_GUARD": "valid_mask_topology_aware",
-        "STAGE": "Stage 2b (Zero FES calls)"
+        "STAGE": "Stage 2b (Zero FES calls)",
+        "TERMINAL_SAMPLE_AVAILABLE": "true" if terminal_tide is not None else "false",
+        "TIME_INTERVAL_SEMANTICS": "[start, end)"
     }
 
     res = stream_exposure_metrics_interpolation(

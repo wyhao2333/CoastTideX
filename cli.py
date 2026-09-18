@@ -463,12 +463,13 @@ def main(args_list: Optional[List[str]] = None):
             batch_engine = BatchRasterEngine(raster_engine=raster_engine)
             print(f"[*] 启动批量潮间带栅格解算任务...")
             print(f"[*] 输入目录: {args.input_folder}")
-            if args.mode == "inundation-from-cache":
-                print(f"[*] 运行模式: inundation-from-cache (Tide Cache is read-only input)")
+            if args.mode in ["inundation-from-cache", "exposure-from-cache"]:
+                print(f"[*] 运行模式: {args.mode} (Tide Cache is read-only input)")
+                print(f"[INFO] From-cache mode: time/datum/constituent/target-grid settings are read from Tide Cache; Stage-1 request options are ignored.")
             else:
                 print(f"[*] 运行模式: {args.mode}")
+                print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
             print(f"[*] Existing output policy: {eff_policy.value}")
-            print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
 
             def _cli_batch_prog(ov, ti, f, m, c):
                 if f:

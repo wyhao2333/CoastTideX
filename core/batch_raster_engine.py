@@ -129,7 +129,11 @@ class BatchManifest:
         "time_start",
         "time_end",
         "time_step",
+        "timezone",
         "time_samples",
+        "dem_datum",
+        "target_mode",
+        "cache_signature",
         "crs",
         "width",
         "height",
@@ -582,7 +586,10 @@ class BatchRasterEngine:
                 width=item["width"],
                 height=item["height"],
                 nodata=item["nodata"],
-                time_step=freq
+                time_step=freq,
+                timezone="UTC",
+                dem_datum=str(dem_datum).lower() if dem_datum is not None else "",
+                target_mode=str(target_mode).lower() if target_mode is not None else ""
             )
 
             # 检查文件基本有效性
@@ -709,7 +716,11 @@ class BatchRasterEngine:
                     time_start=str(c_attrs.get("TIME_START", "")),
                     time_end=str(c_attrs.get("TIME_END", "")),
                     time_step=str(c_attrs.get("TIME_STEP", freq)),
+                    timezone=str(c_attrs.get("TIMEZONE", "UTC")),
                     time_samples=cache_meta_info.get("time_samples", 0),
+                    dem_datum=str(c_attrs.get("DEM_DATUM", dem_datum if dem_datum is not None else "")).lower(),
+                    target_mode=str(c_attrs.get("TARGET_MODE", target_mode if target_mode is not None else "")).lower(),
+                    cache_signature=actual_cache_sig,
                     control_node_count=cache_meta_info.get("num_nodes", 0),
                 )
 
@@ -737,6 +748,17 @@ class BatchRasterEngine:
                     inclusive=eff_inclusive
                 )
                 actual_cache_sig = expected_spec["signature"]
+                manifest.upsert(
+                    input_path,
+                    time_start=st_val,
+                    time_end=et_val,
+                    time_step=freq,
+                    timezone="UTC",
+                    time_samples=expected_spec["time_samples"],
+                    dem_datum=str(dem_datum).lower(),
+                    target_mode=str(target_mode).lower(),
+                    cache_signature=actual_cache_sig,
+                )
 
                 if os.path.exists(tide_cache_path):
                     if is_cache_complete(tide_cache_path):

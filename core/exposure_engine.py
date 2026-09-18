@@ -55,7 +55,8 @@ from rasterio.windows import Window
 
 from .raster_engine import (
     RasterInfo, ControlNode, QuadCell, RasterCalculationCancelled, ExistingOutputError,
-    compute_cell_membership, resolve_topology_compatible_corners, LeafCellSpatialIndex
+    compute_cell_membership, resolve_topology_compatible_corners, LeafCellSpatialIndex,
+    COASTTIDEX_VERSION
 )
 from .tide_cache import TideCacheIntegrityError, TideCacheTimeSeriesReader
 
@@ -786,10 +787,12 @@ def stream_exposure_metrics_interpolation(
 
     full_meta = {
         "SOFTWARE": "CoastTideX v1.6 Beta",
+        "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
         "PRODUCT_TYPE": "Potential Astronomical Tidal Exposure Duration Suite",
         "EXPOSURE_DEFINITION": "Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain (Inundated: H>z, Exposed: H<=z)",
         "TIDE_MODEL": "FES2022b",
         "VERTICAL_DATUM": str(target_datum).upper(),
+        "DEM_DATUM": str(target_datum).lower(),
         "TIME_START": str(time_series_utc[0]),
         "TIME_END": t_end_tag,
         "REQUESTED_TIME_START": t_start_tag,
@@ -801,6 +804,10 @@ def stream_exposure_metrics_interpolation(
         "CACHE_SIGNATURE": str(metadata_tags.get("CACHE_SIGNATURE", "")) if metadata_tags else "",
         "CACHE_SCHEMA_VERSION": str(metadata_tags.get("CACHE_SCHEMA_VERSION", "1.2")) if metadata_tags else "1.2"
     }
+    if metadata_tags:
+        for k, v in metadata_tags.items():
+            if v is not None and k not in ("TIME_START", "TIME_END", "REQUESTED_TIME_START", "REQUESTED_TIME_END"):
+                full_meta[k] = str(v)
 
     writer = _AtomicExposureWriter(output_paths, profile)
     writer.open(metadata_tags=full_meta)
