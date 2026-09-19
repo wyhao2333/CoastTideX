@@ -76,8 +76,11 @@ MANUAL_HTML = """
 </ol>
 </div>
 
+<h3>2. 潜在淹没频率输出与诊断协变量界定 (Inundation Outputs & Diagnostic Covariates)</h3>
+<p>Inundation 模块的标准输出为潜在天文潮淹没频率（Float32，单位 %）与质量控制掩膜（UInt16）。若科研或工程分析中将 QC 掩膜各状态位作为空间协变量使用，必须严格明确其属于<b>物理与数值诊断协变量</b>（例如最小间距达标、最大细分深度达标、FES 动力学有效性突变边界、垂直基准几何多边形近似等数值与几何条件），<b>严禁含混表述为“地形协变量”或“水动力过程协变量”</b>。</p>
+
 <h2>三、 潜在天文潮露出 7 大空间栅格产物体系 (Seven Exposure Raster Products)</h2>
-<p>在潜在天文潮露出时间域反演模式下，系统一次性原子输出 7 大高保真空间栅格产品，完全继承输入 DEM 的坐标系、仿射变换、空间范围与分辨率：</p>
+<p>在潜在天文潮露出时间域反演模式下，系统逐文件通过 <code>*.tmp.tif</code> 原子替换输出 7 大高保真空间栅格产品（注：属于单文件级安全原子替换，非跨 7 个文件的整体事务级回滚），完全继承输入 DEM 的坐标系、仿射变换、空间范围与分辨率：</p>
 
 <table>
     <tr><th>产品文件名后缀</th><th>数据类型</th><th>物理单位</th><th>NoData 值</th><th>科学定义与应用说明</th></tr>
@@ -114,7 +117,7 @@ MANUAL_HTML = """
         <td>UInt32</td>
         <td>次 (count)</td>
         <td>4294967295</td>
-        <td><b>连续潜在露出事件段数量</b>：在请求时间窗口内完整识别到的独立连续露出事件段数量。NoData 采用 UInt32 最大值，与合法 0 次事件彻底解耦。</td>
+        <td><b>连续潜在露出事件段数量</b>：在请求时间窗口内完整识别到的独立连续露出事件段离散整数计数值（UInt32，单位：次，注：属于离散频次指标，非时间长度或连续变量）。NoData 采用 UInt32 最大值，与合法 0 次事件彻底解耦。</td>
     </tr>
     <tr>
         <td><code>*_exposure_valid_time_fraction.tif</code></td>
@@ -128,7 +131,7 @@ MANUAL_HTML = """
         <td>UInt16</td>
         <td>bitmask</td>
         <td>65535</td>
-        <td><b>露出分析质量控制位掩膜</b>：多位标记像元计算过程质量（0 为最优高保真状态，非 0 标明降级、基准近似或常时状态）。</td>
+        <td><b>露出分析质量控制位掩膜</b>：多位标记像元计算过程质量（0 表示未触发任何异常、近似、外推或降级警告位；非 0 标明触发了降级、基准近似或常时状态；注：QC=0 不代表对真实物理环境观测的绝对误差保证）。</td>
     </tr>
 </table>
 
@@ -247,8 +250,8 @@ MANUAL_HTML = """
     <li><code>resume</code> (断点恢复，默认推荐)：
         扫描目标目录已存在的产物。对 Tide Cache 进行完整性与参数签名兼容性校验；对已有 GeoTIFF 产物严格核验尺寸、CRS、仿射变换、数据类型、NoData 与缓存签名。仅当所需产物全部无损存在时才标记 <code>SKIPPED_EXISTING</code> 跳过，否则安全接续计算。
     </li>
-    <li><code>error_if_exists</code> (冲突报错)：
-        在任务执行前进行统一预检防线拦截。若当前模式所需的任何目标文件（包括 <code>*_tide.nc</code>、淹没频率或 7 大露出产物中的任意一个）已存在，立即报错并拒绝覆写，确保历史成果不受意外破坏。
+    <li><code>error_if_exists</code> (冲突报错，严格拦截)：
+        在任务执行前进行统一预检防线拦截。若当前模式所需的任何目标文件（包括 <code>*_tide.nc</code>、淹没频率或 7 大露出产物中的任意一个）已存在，立即报错并拒绝覆写，确保历史成果不受意外破坏（与 <code>resume</code> 严格区分：<code>error_if_exists</code> 绝不跳过，而是立即抛出 <code>ExistingOutputError</code> 拒绝执行）。
     </li>
     <li><code>overwrite</code> (强制覆盖)：
         允许重新计算，所有空间栅格产物通过 <code>*.tmp.tif</code> 临时写入并执行单文件原子替换覆盖。
@@ -259,7 +262,7 @@ MANUAL_HTML = """
 <p>输出的 <code>*_exposure_qc.tif</code> (UInt16) 采用逐位标记体系（Bitmask）：</p>
 <table>
     <tr><th>位 (Bit)</th><th>十进制值</th><th>常量标识</th><th>科学含义与处理说明</th></tr>
-    <tr><td>-</td><td>0</td><td><code>QC_EXP_VALID</code></td><td>未触发当前定义的 Exposure QC 位，有效解算。</td></tr>
+    <tr><td>-</td><td>0</td><td><code>QC_EXP_VALID</code></td><td>未触发当前定义的 Exposure 警告或近似位（不代表对真实自然物理环境的绝对误差保证）。</td></tr>
     <tr><td>bit 0</td><td>1</td><td><code>QC_EXP_DEGRADED_CELL</code></td><td>四叉树控制单元部分角点无效，已自动执行可用角点重归一化。</td></tr>
     <tr><td>bit 1</td><td>2</td><td><code>QC_EXP_INSUFFICIENT_NODES</code></td><td>局部缺少足够同连通域有效控制节点，可能产生外推误差。</td></tr>
     <tr><td>bit 2</td><td>4</td><td><code>QC_EXP_DATUM_APPROX</code></td><td>垂直基准偏移采用了闭合多边形近似判别。</td></tr>

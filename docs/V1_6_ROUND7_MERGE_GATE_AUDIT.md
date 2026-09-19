@@ -4,7 +4,12 @@
 **审计分支**：`fix/v1.6-round7-merge-gate`  
 **基线 Commit**：`a6e34132586f54b5717ba8635c3d8cae399b23b8` (Round 6 远端 HEAD)  
 **环境**：Python 3.11.9 (`I:\Test_tide_model\.venv`), GDAL 3.9.1, Rasterio 1.3.10, NetCDF4 1.7.1  
-**审计结论**：**READY FOR MERGE INTO MAIN AS V1.6 BETA** (所有 186 项单元与行为测试 100% 通过，无夸大宣称，元数据与算法完全闭环)
+**审计结论**：**READY FOR MERGE INTO MAIN AS V1.6 BETA** (所有 186 项单元与行为测试 100% 通过，无夸大宣称，元数据与算法完全闭环)<br>
+**文档状态**：`SUPERSEDED`
+
+> [!NOTE]
+> **历史审计报告声明 (Superseded Notice)**：<br>
+> 本审计报告中的部分遗留项（如 non-UTC provenance、cache 结构轻量校验、production raster 等价测试、FES mask 历史文档笔误等）已在 Round 8 完成收敛，最新结论以 [`docs/V1_6_ROUND8_RELEASE_CANDIDATE_AUDIT.md`](V1_6_ROUND8_RELEASE_CANDIDATE_AUDIT.md) 为准。
 
 ---
 

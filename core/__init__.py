@@ -14,13 +14,16 @@ potential tidal exposure duration and events analysis, and batch processing.
 from .datum_engine import DatumTransformer
 from .raster_engine import (
     RasterTideEngine, RasterInfo, RasterResultSummary,
-    RasterMemoryLimitError, estimate_control_node_memory, LeafCellSpatialIndex
+    RasterMemoryLimitError, estimate_control_node_memory, LeafCellSpatialIndex,
+    ExistingOutputError
 )
 from .exposure_engine import ExposureProductPaths
 from .tide_cache import (
     write_tide_cache, read_tide_cache, calculate_inundation_from_tide_cache,
     calculate_exposure_from_tide_cache,
-    estimate_tide_cache_size, is_cache_complete
+    estimate_tide_cache_size, is_cache_complete,
+    validate_tide_cache_structure, inspect_tide_cache_metadata,
+    TideCacheIntegrityError, TideCacheCompatibilityError
 )
 from .batch_raster_engine import (
     BatchRasterEngine, BatchManifest,
@@ -48,6 +51,7 @@ __all__ = [
     'RasterMemoryLimitError',
     'estimate_control_node_memory',
     'LeafCellSpatialIndex',
+    'ExistingOutputError',
     'ExposureProductPaths',
     'write_tide_cache',
     'read_tide_cache',
@@ -55,6 +59,10 @@ __all__ = [
     'calculate_exposure_from_tide_cache',
     'estimate_tide_cache_size',
     'is_cache_complete',
+    'validate_tide_cache_structure',
+    'inspect_tide_cache_metadata',
+    'TideCacheIntegrityError',
+    'TideCacheCompatibilityError',
     'BatchRasterEngine',
     'BatchManifest',
     'JOB_MODE_TIDE_ONLY',

@@ -4,6 +4,27 @@
 
 ---
 
+## [1.6.0-rc.1] - 2026-09-19 (Round 8 Release Candidate / Merge-Gate Hardening)
+
+### 修复与加固 (Fixed & Hardened)
+- **非 UTC 时间溯源元数据统一 (Non-UTC Provenance Unification)**：
+  - 彻底对齐 Inundation 与 Exposure 引擎生成的 GeoTIFF 标签时间溯源字段：显式写入 `REQUESTED_TIME_START`、`REQUESTED_TIME_END`、`TIME_START`、`TIME_END`、`TIMEZONE`、`TIME_START_UTC`、`TIME_END_UTC`、`TIME_START_UTC_EPOCH`、`TIME_END_UTC_EPOCH` 与 `TIME_INTERVAL_SEMANTICS = '[start, end)'`，杜绝非 UTC 本地时间与标准 UTC 时间戳语义模糊。
+- **Tide Cache 轻量只读结构完整性深度校验 (Lightweight Cache Structure Validation)**：
+  - 实现 `validate_tide_cache_structure(cache_path)`，在不将庞大的 `tide_msl_m` 完整数据读入内存的前提下，安全校验 NetCDF 根维度 (`time`, `node`, `cell`)、必需变量 (`time_epoch`, `cell_node_indices`, `tide_msl_m`, `node_coords`)、节点切片形状 `(n_node, n_time)`、终端采样形状 `(n_node,)`、时间轴严格单调递增性与采样步长一致性，以及控制单元节点索引有界性 `[0, n_node - 1]`。
+  - 在 `inspect_tide_cache_metadata` 中集成结构校验与 `CACHE_SIGNATURE` 篡改检测。
+- **Schema 1.1 兼容性边界严密化 (Schema 1.1 Strict Compatibility)**：
+  - 严密界定 Schema 1.1 缓存处理边界：若缓存时间区间策略非 `left`（如旧版闭区间 `both`），严格抛出 `TideCacheCompatibilityError`，拒绝非确定性时序反演；
+  - 对 `inclusive == 'left'` 但缺失 `tide_msl_terminal_m` 的 Schema 1.1 缓存，安全剔除末段不完整区间，精确扣减 `valid_time_fraction`，并置位 `QC_EXP_TERMINAL_UNAVAILABLE` (bit 3)。
+- **生产栅格级空间索引数值等价回归 (Spatial Index Production Equivalence)**：
+  - 在实际端到端真实栅格输出层面（Inundation 2 大产物、Exposure 7 大产物），自动化验证 `LeafCellSpatialIndex` 空间加速检索结果与全局暴力候选扫描器 (Brute-Force Selector) 的全像元浮点级严格等价性 (`np.array_equal` 与 `np.testing.assert_allclose`)。
+- **文档与历史报告事实级一致性整肃 (Factual Documentation Cleanup)**：
+  - 修正 `README.md` 与 `README_EN.md`：澄清 FES2022b 非结构网格在深海大洋 (~1/16°) 至大陆架近岸 (~1/60°, ~1.5-2km) 的等效分辨率与 CoastTideX 四叉树在 10m/30m DEM 上的 500m 细分尺度；去除无条件厘米级精度表述，明确精度依赖水深与水动力环境；注明 v1.5 验证报告为特定受控区域样本比测。
+  - 修正 `data/geoid/README_GEOID.md` 纠正 MSL 笔误；修正 `docs/V1_5_BETA_REAL_FES_VALIDATION.md` 第 63 行关于 `mask_fes2022B.nc` 为 1/30° 掩膜及准确分类的描述；
+  - 完善 `gui/manual_dialog.py` 补充淹没诊断协变量说明、明确 `event_count` 整数性质与冲突拦截策略；
+  - 在 Round 6 与 Round 7 历史审计报告顶部添加 `SUPERSEDED` 声明横幅，锚定 Round 8 为最新合并门禁基线。
+
+---
+
 ## [1.6.0] - 2026-09-16 (Feature / Beta Release)
 
 ### 新增 (Added)

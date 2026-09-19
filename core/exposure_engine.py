@@ -687,7 +687,8 @@ def stream_exposure_metrics_interpolation(
     metadata_tags: Optional[Dict[str, str]] = None,
     allow_overwrite: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    cancel_event: Optional[Any] = None
+    cancel_event: Optional[Any] = None,
+    spatial_index: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     基于自适应控制网格与分块流式累加，解算高分辨率 DEM 的潜在天文潮露出时间域栅格产品。
@@ -777,13 +778,41 @@ def stream_exposure_metrics_interpolation(
                     terminal_node_wl[idx] = float(t_val + node_offsets[idx])
 
     # 准备元数据标签
-    t_start_tag = str(metadata_tags.get("REQUESTED_TIME_START", time_series_utc[0])) if metadata_tags else str(time_series_utc[0])
-    t_end_tag = str(metadata_tags.get("REQUESTED_TIME_END", "")) if metadata_tags else ""
-    if not t_end_tag:
+    source_tz = str(metadata_tags.get("TIMEZONE", "UTC")) if metadata_tags else "UTC"
+
+    req_start_tag = str(metadata_tags.get("REQUESTED_TIME_START", metadata_tags.get("TIME_START", ""))) if metadata_tags else ""
+    if not req_start_tag:
+        req_start_tag = str(time_series_utc[0])
+
+    req_end_tag = str(metadata_tags.get("REQUESTED_TIME_END", metadata_tags.get("TIME_END", ""))) if metadata_tags else ""
+    if not req_end_tag:
         if has_terminal and terminal_timestamp_sec is not None:
-            t_end_tag = pd.Timestamp(terminal_timestamp_sec, unit="s", tz="UTC").isoformat()
+            req_end_tag = pd.Timestamp(terminal_timestamp_sec, unit="s", tz="UTC").isoformat()
         else:
-            t_end_tag = str(time_series_utc[-1])
+            req_end_tag = str(time_series_utc[-1])
+
+    if requested_time_start_sec is not None:
+        start_utc_epoch = float(requested_time_start_sec)
+        start_utc_iso = pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()
+    elif metadata_tags and "TIME_START_UTC_EPOCH" in metadata_tags and metadata_tags["TIME_START_UTC_EPOCH"]:
+        start_utc_epoch = float(metadata_tags["TIME_START_UTC_EPOCH"])
+        start_utc_iso = str(metadata_tags.get("TIME_START_UTC", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()))
+    else:
+        start_utc_epoch = float(ts_seconds[0])
+        start_utc_iso = str(metadata_tags.get("TIME_START_UTC", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat())) if metadata_tags else pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()
+
+    if requested_time_end_sec is not None:
+        end_utc_epoch = float(requested_time_end_sec)
+        end_utc_iso = pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()
+    elif has_terminal and terminal_timestamp_sec is not None:
+        end_utc_epoch = float(terminal_timestamp_sec)
+        end_utc_iso = pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()
+    elif metadata_tags and "TIME_END_UTC_EPOCH" in metadata_tags and metadata_tags["TIME_END_UTC_EPOCH"]:
+        end_utc_epoch = float(metadata_tags["TIME_END_UTC_EPOCH"])
+        end_utc_iso = str(metadata_tags.get("TIME_END_UTC", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()))
+    else:
+        end_utc_epoch = float(ts_seconds[-1])
+        end_utc_iso = str(metadata_tags.get("TIME_END_UTC", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat())) if metadata_tags else pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()
 
     full_meta = {
         "SOFTWARE": "CoastTideX v1.6 Beta",
@@ -793,10 +822,15 @@ def stream_exposure_metrics_interpolation(
         "TIDE_MODEL": "FES2022b",
         "VERTICAL_DATUM": str(target_datum).upper(),
         "DEM_DATUM": str(target_datum).lower(),
-        "TIME_START": str(time_series_utc[0]),
-        "TIME_END": t_end_tag,
-        "REQUESTED_TIME_START": t_start_tag,
-        "REQUESTED_TIME_END": t_end_tag,
+        "TIME_START": req_start_tag,
+        "TIME_END": req_end_tag,
+        "REQUESTED_TIME_START": req_start_tag,
+        "REQUESTED_TIME_END": req_end_tag,
+        "TIMEZONE": source_tz,
+        "TIME_START_UTC": start_utc_iso,
+        "TIME_END_UTC": end_utc_iso,
+        "TIME_START_UTC_EPOCH": str(start_utc_epoch),
+        "TIME_END_UTC_EPOCH": str(end_utc_epoch),
         "TERMINAL_SAMPLE_AVAILABLE": "true" if has_terminal else "false",
         "TIME_INTERVAL_SEMANTICS": "[start, end)",
         "TIME_SAMPLES": str(n_time),
@@ -806,7 +840,7 @@ def stream_exposure_metrics_interpolation(
     }
     if metadata_tags:
         for k, v in metadata_tags.items():
-            if v is not None and k not in ("TIME_START", "TIME_END", "REQUESTED_TIME_START", "REQUESTED_TIME_END"):
+            if v is not None and k not in full_meta:
                 full_meta[k] = str(v)
 
     writer = _AtomicExposureWriter(output_paths, profile)
@@ -837,7 +871,10 @@ def stream_exposure_metrics_interpolation(
                 raise TideCacheIntegrityError(f"QuadCell 引用了不存在的控制节点 ID {nid}，严禁降级回退！")
         return tuple(node_id_to_idx[nid] for nid in raw_ids)
 
-    spatial_index = LeafCellSpatialIndex(cells, bounds=raster_bounds)
+    if spatial_index is None:
+        spatial_index = LeafCellSpatialIndex(cells, bounds=raster_bounds)
+    else:
+        spatial_index = spatial_index
     total_input_valid_pixels = 0
     total_solved_pixels = 0
 

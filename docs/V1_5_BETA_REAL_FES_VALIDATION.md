@@ -60,7 +60,7 @@ CoastTideX 在经历 v1.5 Alpha 阶段的基础框架构建与两轮 Hardening �
 | 数据标识符 | 物理文件绝对路径 | 文件大小 (Bytes) | 状态 | 科学语义与角色 |
 | :--- | :--- | :--- | :---: | :--- |
 | `fes_ns_grid` | `I:\Test_tide_model\fes2022b\ocean_tide_non_structured\FES2022b_OceanTide_NSgrid.nc` | 3,953,139,340 | **VALID** | 全球 FES2022b 34 分潮非结构化三角网格 (Native LGP2) |
-| `fes_extrapolation_mask_nc` | `I:\Test_tide_model\fes2022b\mask_fes2022B.nc` | 1,027,081 | **VALID** | 1/16° 全球海洋/陆地/外推分类掩膜 (0=海, 1=外推, 2=内陆, 3=陆地) |
+| `fes_extrapolation_mask_nc` | `I:\Test_tide_model\fes2022b\mask_fes2022B.nc` | 1,027,081 | **VALID** | 1/30° 全球海洋/陆地/外推分类掩膜 (0=Ocean native data, 1=Extrapolated data, 2=Land, 3=Lake)（外部参考文件，参见 docs/FES_MASK_METADATA_AUDIT.md） |
 | `mdt_nc` | `I:\Test_tide_model\mdt_cls22\mdt_hybrid_cnes_cls22_cmems2020_global.nc` | 99,625,634 | **VALID** | CNES-CLS22 混合平均海面动力地形 (MSS - Geoid) |
 | `egm2008_tif` | `I:\Test_tide_model\data\geoid\us_nga_egm08_25.tif` | 80,591,169 | **VALID** | NGA 官方 2.5′ 全球 EGM2008 大地水准面差距高 $N$ |
 | `delta_n_goco06s_egm2008_tif` | `I:\Test_tide_model\data\geoid\delta_n_goco06s_minus_egm2008.tif` | 23,758,418 | **VALID** | GOCO06s 与 EGM2008 大地水准面高差残差场 $\Delta N$ |

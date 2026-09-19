@@ -72,7 +72,7 @@ FES2022b is released in two formats:
 
 CoastTideX operates directly on the **native unstructured mesh (3.77 GB NS-grid)** for fundamental hydrodynamic reasons:
 1. **Physical Fidelity**: Uses degree-2 Lagrange Polynomials (LGP2) to capture non-linear shallow-water tidal interactions ($M_4, MS_4$) and resonant coastal amplification.
-2. **Adaptive Resolution**: Mesh cell size dynamically varies from tens of kilometers in the abyssal ocean to hundreds of meters in shallow estuaries, following real coastlines without geometric approximation.
+2. **Adaptive Resolution**: FES2022b finite-element mesh effective spatial resolution refines adaptively from ~1/16° in the open ocean to ~1/60° (~1.5 km ~ 2 km) along continental shelves and coastlines, closely conforming to natural coastal contours; at the DEM scale, CoastTideX adaptive quadtree control grid further subdivides user 10m/30m high-resolution topographies according to gradients down to 500m or higher local density.
 3. **Absence of Interpolation Noise**: The regular 1/30° grid is merely a downsampled interpolation of this finite-element mesh and suffers from boundary smoothing errors.
 
 ---
@@ -290,7 +290,7 @@ Launch the desktop interface via `run_gui.bat` or `python app.py` (CLI batch mod
 
 ## 17. Typical Scientific & Engineering Applications
 
-1. **Satellite-Derived Bathymetry (SDB) & Intertidal Shoreline Inversion**: Corrects satellite overpass water levels with pixel-accurate vertical datum alignments;
+1. **Satellite-Derived Bathymetry (SDB) & Intertidal Shoreline Inversion**: Corrects satellite overpass water levels with pixel-accurate water surface geometric heights, eliminating coastal tidal slope distortions in bathymetric inversions (Note: actual model accuracy depends on local bathymetry, topographic complexity, and tidal hydrodynamic characteristics; accuracy in open ocean and continental shelf areas is generally higher than in ultra-shallow intertidal flats and narrow bays, and the system makes no unqualified global centimeter-level accuracy claims);
 2. **Coastal Wetland & Mangrove Morphodynamics**: Quantifies inundation frequencies and continuous exposure windows for habitat suitability modeling;
 3. **Marine Infrastructure & Coastal Engineering**: Harmonizes offshore wind foundations and sea bridges with national terrestrial vertical geoids.
 
@@ -320,7 +320,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ### Testing Strategy & Isolation:
 1. **GitHub Actions Remote CI**: Runs in a headless Linux runner without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics (live status reflected by the GitHub Actions CI badge above);
-2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs;
+2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs (Note: the v1.5 Beta validation report represents a controlled benchmark test under specific regional sample data rather than an unconstrained global physical accuracy proof);
 3. **v1.6 Production Hardening Suite**: Production-grade scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
 
 ---

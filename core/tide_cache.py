@@ -342,13 +342,126 @@ def build_expected_cache_spec(
     }
 
 
-def inspect_tide_cache_metadata(cache_path: str, validate_signature: bool = True) -> Dict[str, Any]:
+def validate_tide_cache_structure(cache_path: str) -> None:
+    """
+    对已有的 Tide Cache NetCDF 文件执行轻量级物理与拓扑结构完整性核查。
+    零加载全量 tide_msl_m 矩阵入内存。
+    若存在损坏、维度缺失、时间轴非单调、步长不合理、变量形状不匹配或拓扑引用越界，
+    显式抛出 TideCacheIntegrityError。
+    """
+    if not os.path.exists(cache_path):
+        raise TideCacheIntegrityError(f"Tide Cache 文件不存在: {cache_path}")
+
+    try:
+        with netCDF4.Dataset(cache_path, mode="r") as ds:
+            # 1. 必需维度检查
+            required_dims = ["time", "node", "cell"]
+            for dim_name in required_dims:
+                if dim_name not in ds.dimensions:
+                    raise TideCacheIntegrityError(f"Tide Cache 缺失必需维度: '{dim_name}'")
+
+            n_time = len(ds.dimensions["time"])
+            n_node = len(ds.dimensions["node"])
+            n_cell = len(ds.dimensions["cell"])
+
+            if n_time <= 0:
+                raise TideCacheIntegrityError(f"Tide Cache 时间维度长度必须大于0 (当前: {n_time})")
+            if n_node <= 0:
+                raise TideCacheIntegrityError(f"Tide Cache 节点维度长度必须大于0 (当前: {n_node})")
+            if n_cell <= 0:
+                raise TideCacheIntegrityError(f"Tide Cache 单元维度长度必须大于0 (当前: {n_cell})")
+
+            # 2. 必需变量检查
+            required_vars = ["time", "node_lon", "node_lat", "cell_node_indices", "tide_msl_m"]
+            for var_name in required_vars:
+                if var_name not in ds.variables:
+                    raise TideCacheIntegrityError(f"Tide Cache 缺失必需变量: '{var_name}'")
+
+            # 3. 检查 tide_msl_m 变量形状 (轻量元数据核验，不加载矩阵数据)
+            tide_var = ds.variables["tide_msl_m"]
+            expected_tide_shape = (n_node, n_time)
+            if tide_var.shape != expected_tide_shape:
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 'tide_msl_m' 形状不匹配: 期望 {expected_tide_shape}，实际为 {tide_var.shape}"
+                )
+
+            # 4. 检查 terminal tide 形状 (若存在)
+            if "tide_msl_terminal_m" in ds.variables:
+                term_var = ds.variables["tide_msl_terminal_m"]
+                if term_var.shape not in ((n_node,), (1, n_node)):
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 'tide_msl_terminal_m' 形状不匹配: 期望 {(n_node,)} 或 {(1, n_node)}，实际为 {term_var.shape}"
+                    )
+
+            # 5. 检查 node_lon / node_lat 形状
+            lon_var = ds.variables["node_lon"]
+            lat_var = ds.variables["node_lat"]
+            if lon_var.shape != (n_node,) or lat_var.shape != (n_node,):
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 节点坐标形状不匹配: node_lon {lon_var.shape}, node_lat {lat_var.shape}, 期望 {(n_node,)}"
+                )
+
+            # 6. 读取一维时间轴进行单调性与步长合理性校验
+            time_epochs = ds.variables["time"][:]
+            if not np.all(np.isfinite(time_epochs)):
+                raise TideCacheIntegrityError("Tide Cache 时间轴包含非有限值 (NaN 或 Inf)")
+
+            if len(time_epochs) > 1:
+                dt_array = np.diff(time_epochs)
+                if np.any(dt_array <= 0):
+                    raise TideCacheIntegrityError(
+                        "Tide Cache 时间轴不是严格单调递增 (存在非正时间步长)"
+                    )
+                # 检查时间步长与元数据 TIME_STEP_SECONDS 一致性 (若元数据中有)
+                step_sec_attr = getattr(ds, "TIME_STEP_SECONDS", None)
+                if step_sec_attr is not None:
+                    try:
+                        exp_dt = float(step_sec_attr)
+                    except (ValueError, TypeError):
+                        exp_dt = 0.0
+                    if exp_dt > 0:
+                        if not np.allclose(dt_array, exp_dt, atol=1.0):
+                            raise TideCacheIntegrityError(
+                                f"Tide Cache 时间轴采样步长与元数据 TIME_STEP_SECONDS={exp_dt} 不一致"
+                            )
+
+            # 7. 读取 cell_node_indices 检查拓扑索引越界与形状
+            cell_nodes = ds.variables["cell_node_indices"][:]
+            if cell_nodes.ndim != 2 or cell_nodes.shape[0] != n_cell or cell_nodes.shape[1] not in (3, 4):
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 'cell_node_indices' 形状非法: 期望 ({n_cell}, 4) 或 ({n_cell}, 3)，实际为 {cell_nodes.shape}"
+                )
+            if not np.issubdtype(cell_nodes.dtype, np.integer):
+                raise TideCacheIntegrityError("Tide Cache 'cell_node_indices' 必须为整数类型")
+
+            min_idx = int(np.min(cell_nodes))
+            max_idx = int(np.max(cell_nodes))
+            if min_idx < 0 or max_idx >= n_node:
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 拓扑索引越界: 节点索引范围 [{min_idx}, {max_idx}] 超出合法节点范围 [0, {n_node - 1}]"
+                )
+
+    except TideCacheIntegrityError:
+        raise
+    except Exception as ex:
+        raise TideCacheIntegrityError(f"Tide Cache 结构完整性校验失败: {str(ex)}")
+
+
+def inspect_tide_cache_metadata(
+    cache_path: str,
+    validate_signature: bool = True,
+    validate_structure: bool = True
+) -> Dict[str, Any]:
     """
     轻量读取 Tide Cache NetCDF 全局属性、维度与签名，严禁读取 tide_msl_m 大矩阵。
+    当 validate_structure 为 True 时，执行 validate_tide_cache_structure 结构核验。
     当 validate_signature 为 True 且文件中存在 CACHE_SIGNATURE 时，自重构签名并执行防篡改校验。
     """
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
+
+    if validate_structure:
+        validate_tide_cache_structure(cache_path)
 
     with netCDF4.Dataset(cache_path, mode="r") as ds:
         attrs = {attr: getattr(ds, attr) for attr in ds.ncattrs()}
@@ -779,13 +892,17 @@ def write_tide_cache(
 
             ds.setncattr("TIME_START", start_str)
             ds.setncattr("TIME_END", end_str)
+            ds.setncattr("REQUESTED_TIME_START", start_str)
+            ds.setncattr("REQUESTED_TIME_END", end_str)
             ds.setncattr("TIME_START_UTC", start_utc_iso)
             ds.setncattr("TIME_END_UTC", end_utc_iso)
             ds.setncattr("TIME_START_UTC_EPOCH", start_utc_epoch)
             ds.setncattr("TIME_END_UTC_EPOCH", end_utc_epoch)
             ds.setncattr("TIME_STEP", str(metadata.get("freq", "30min")))
+            ds.setncattr("TIME_STEP_SECONDS", float(time_epochs[1] - time_epochs[0]) if len(time_epochs) > 1 else 1800.0)
             ds.setncattr("TIMEZONE", source_tz_str)
             ds.setncattr("TIME_INCLUSIVE", str(metadata.get("inclusive", "left")))
+            ds.setncattr("TIME_INTERVAL_SEMANTICS", "[start, end)")
             ds.setncattr("TIME_SAMPLES", int(num_times))
             ds.setncattr("FES_MODEL", "FES2022b")
             ds.setncattr("FES_SOURCE_TYPE", "native_lgp2")
@@ -1215,17 +1332,17 @@ class TideCacheTimeSeriesReader:
 def calculate_inundation_from_tide_cache(
     dem_path: str,
     cache_path: str,
-    output_path: str,
+    output_path: str = "",
     qc_output_path: Optional[str] = None,
-    block_size: Optional[int] = 512,
+    block_size: Optional[int] = None,
     allow_overwrite: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    cancel_event = None
+    cancel_event = None,
+    spatial_index: Optional[Any] = None
 ) -> RasterResultSummary:
     """
-    基于预先生成的 Tide Cache (*_tide.nc) 与输入 DEM 解算淹没频率 GeoTIFF (Stage 2)。
-    严格从 Tide Cache 读取 TOPOLOGY_RESOLUTION_M 与 TOPOLOGY_VALID_FRACTION_THRESHOLD，
-    确保与 Stage 1 控制网格构建逻辑完全一致。
+    基于预先生成的 Tide Cache (*_tide.nc, Schema 1.2) 与输入 DEM 解算潜在天文潮淹没频率栅格 (零 FES 重复调用)。
+    纯缓存 Stage 2 解算，直接复用已排序的控制节点经验分布与网格拓扑。
     """
     t_start = time.time()
     if cancel_event is not None and cancel_event.is_set():
@@ -1236,12 +1353,9 @@ def calculate_inundation_from_tide_cache(
     if not os.path.exists(dem_path):
         raise FileNotFoundError(f"未找到指定的输入 DEM 文件: {dem_path}")
 
-    if qc_output_path is None:
-        base, ext = os.path.splitext(output_path)
-        qc_output_path = f"{base}_qc{ext}"
-
+    # 预检输出路径冲突
     if not allow_overwrite:
-        if os.path.exists(output_path):
+        if output_path and os.path.exists(output_path):
             raise ExistingOutputError(f"输出文件已存在且未开启覆盖权限: {output_path}")
         if qc_output_path and os.path.exists(qc_output_path):
             raise ExistingOutputError(f"QC 输出文件已存在且未开启覆盖权限: {qc_output_path}")
@@ -1304,18 +1418,45 @@ def calculate_inundation_from_tide_cache(
         cancel_event=cancel_event
     )
 
+    req_start_str = str(meta.get("REQUESTED_TIME_START", meta.get("TIME_START", "")))
+    req_end_str = str(meta.get("REQUESTED_TIME_END", meta.get("TIME_END", "")))
+    source_tz_str = str(meta.get("TIMEZONE", "UTC"))
+
+    start_utc_epoch = meta.get("TIME_START_UTC_EPOCH")
+    if start_utc_epoch is None and req_start_str:
+        try:
+            start_utc_epoch = parse_cache_time_to_utc(req_start_str, default_tz=source_tz_str)
+        except Exception:
+            pass
+    end_utc_epoch = meta.get("TIME_END_UTC_EPOCH")
+    if end_utc_epoch is None and req_end_str:
+        try:
+            end_utc_epoch = parse_cache_time_to_utc(req_end_str, default_tz=source_tz_str)
+        except Exception:
+            pass
+
+    start_utc_iso = str(meta.get("TIME_START_UTC", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat() if start_utc_epoch is not None else ""))
+    end_utc_iso = str(meta.get("TIME_END_UTC", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat() if end_utc_epoch is not None else ""))
+
     provenance_tags = {
+        "SOFTWARE": f"CoastTideX v{COASTTIDEX_VERSION}",
         "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
         "DATA_PRODUCT": "Potential Astronomical Tidal Inundation Frequency",
         "DEFINITION": "P(H(t) > z) under fixed representative terrain",
         "SOURCE_DEM": os.path.basename(dem_path),
         "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
         "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
-        "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.1")),
-        "TIME_START": str(meta.get("TIME_START", "")),
-        "TIME_END": str(meta.get("TIME_END", "")),
+        "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.2")),
+        "TIME_START": req_start_str,
+        "TIME_END": req_end_str,
+        "REQUESTED_TIME_START": req_start_str,
+        "REQUESTED_TIME_END": req_end_str,
         "TIME_STEP": str(meta.get("TIME_STEP", "")),
-        "TIMEZONE": str(meta.get("TIMEZONE", "UTC")),
+        "TIMEZONE": source_tz_str,
+        "TIME_START_UTC": start_utc_iso,
+        "TIME_END_UTC": end_utc_iso,
+        "TIME_START_UTC_EPOCH": str(start_utc_epoch) if start_utc_epoch is not None else "",
+        "TIME_END_UTC_EPOCH": str(end_utc_epoch) if end_utc_epoch is not None else "",
         "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", "")),
         "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
         "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
@@ -1347,7 +1488,8 @@ def calculate_inundation_from_tide_cache(
         metadata_tags=provenance_tags,
         allow_overwrite=allow_overwrite,
         progress_callback=_stage2_prog,
-        cancel_event=cancel_event
+        cancel_event=cancel_event,
+        spatial_index=spatial_index
     )
     summary.mode = "tide_cache_inundation"
     summary.metadata = meta
@@ -1368,7 +1510,8 @@ def calculate_exposure_from_tide_cache(
     time_chunk_size: int = 1000,
     allow_overwrite: bool = True,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    cancel_event = None
+    cancel_event = None,
+    spatial_index: Optional[Any] = None
 ) -> Dict[str, Any]:
     """
     基于预先生成的 Tide Cache (*_tide.nc, Schema 1.2) 与输入 DEM 解算潜在天文潮露出时间域栅格产品 (零 FES 重复调用)。
@@ -1424,6 +1567,14 @@ def calculate_exposure_from_tide_cache(
     meta: Dict[str, Any] = cache_data.metadata
     time_idx: pd.DatetimeIndex = cache_data.time_index
     terminal_tide: Optional[np.ndarray] = cache_data.terminal_tide
+
+    # 显式 Schema 1.1 遗留兼容边界：Exposure 仅支持左闭右开区间 [start, end)
+    time_inclusive = str(meta.get("TIME_INCLUSIVE", "left")).lower()
+    if time_inclusive != "left":
+        raise TideCacheCompatibilityError(
+            f"Tide Cache 的时间区间闭合语义 TIME_INCLUSIVE='{time_inclusive}' 与露出分析 (Exposure) 不兼容。"
+            "Exposure 分析仅支持严格半开区间 [start, end) 及 Schema 1.2 终端采样体系 (inclusive='left')。"
+        )
 
     # 准备产物路径
     from .exposure_engine import ExposureProductPaths, stream_exposure_metrics_interpolation
@@ -1513,14 +1664,30 @@ def calculate_exposure_from_tide_cache(
         if progress_callback:
             progress_callback(10 + int(pct_val * 0.9), msg_val)
 
+    req_start_str = str(meta.get("REQUESTED_TIME_START", meta.get("TIME_START", "")))
+    req_end_str = str(meta.get("REQUESTED_TIME_END", meta.get("TIME_END", "")))
+    start_utc_iso = str(meta.get("TIME_START_UTC", pd.Timestamp(req_start_sec, unit="s", tz="UTC").isoformat() if req_start_sec is not None else ""))
+    end_utc_iso = str(meta.get("TIME_END_UTC", pd.Timestamp(req_end_sec, unit="s", tz="UTC").isoformat() if req_end_sec is not None else ""))
+
     meta_tags = {
+        "SOFTWARE": f"CoastTideX v{COASTTIDEX_VERSION}",
         "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
+        "PRODUCT_TYPE": "Potential Astronomical Tidal Exposure Duration Suite",
+        "EXPOSURE_DEFINITION": "Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain (Inundated: H>z, Exposed: H<=z)",
         "SOURCE_DEM": os.path.basename(dem_path),
         "SOURCE_TIDE_CACHE": os.path.basename(cache_path),
         "CACHE_SIGNATURE": str(meta.get("CACHE_SIGNATURE", "")),
         "CACHE_SCHEMA_VERSION": str(meta.get("CACHE_SCHEMA_VERSION", "1.2")),
+        "TIME_START": req_start_str,
+        "TIME_END": req_end_str,
+        "REQUESTED_TIME_START": req_start_str,
+        "REQUESTED_TIME_END": req_end_str,
+        "TIMEZONE": source_tz,
+        "TIME_START_UTC": start_utc_iso,
+        "TIME_END_UTC": end_utc_iso,
+        "TIME_START_UTC_EPOCH": str(req_start_sec) if req_start_sec is not None else "",
+        "TIME_END_UTC_EPOCH": str(req_end_sec) if req_end_sec is not None else "",
         "TIME_STEP": str(meta.get("TIME_STEP", "")),
-        "TIMEZONE": str(meta.get("TIMEZONE", "UTC")),
         "TIME_SAMPLES": str(meta.get("TIME_SAMPLES", len(time_idx))),
         "DEM_DATUM": str(meta.get("DEM_DATUM", "egm2008")),
         "TARGET_MODE": str(meta.get("TARGET_MODE", "intertidal")),
@@ -1554,6 +1721,7 @@ def calculate_exposure_from_tide_cache(
         metadata_tags=meta_tags,
         allow_overwrite=allow_overwrite,
         progress_callback=_exp_prog,
-        cancel_event=cancel_event
+        cancel_event=cancel_event,
+        spatial_index=spatial_index
     )
     return res

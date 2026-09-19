@@ -9,6 +9,11 @@
 - **代码仓库**：`wyhao2333/CoastTideX`
 - **工作区路径**：`.` (CoastTideX Project Root)
 - **最终就绪判定**：`READY FOR CONTROLLED V1.6 BETA VALIDATION` (受控测试就绪，严禁虚标 Production Ready)
+- **文档状态**：`SUPERSEDED`
+
+> [!NOTE]
+> **历史审计报告声明 (Superseded Notice)**：<br>
+> 本审计报告已被 Round 7 和 Round 8 审计覆盖，最新基线与结论以 [`docs/V1_6_ROUND8_RELEASE_CANDIDATE_AUDIT.md`](V1_6_ROUND8_RELEASE_CANDIDATE_AUDIT.md) 为准。
 
 ---
 

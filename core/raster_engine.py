@@ -604,7 +604,8 @@ def stream_inundation_frequency_interpolation(
     allow_overwrite: bool = True,
     control_nodes_count: Optional[int] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    cancel_event = None
+    cancel_event = None,
+    spatial_index: Optional[Any] = None
 ) -> RasterResultSummary:
     """
     【共享流式插值内核 (Shared Interpolation Kernel)】
@@ -629,7 +630,10 @@ def stream_inundation_frequency_interpolation(
     tmp_qc = f"{qc_output_path}.tmp.tif"
 
     min_x, min_y, max_x, max_y = info.bounds
-    spatial_index = LeafCellSpatialIndex(leaf_cells, bounds=info.bounds)
+    if spatial_index is None:
+        spatial_index = LeafCellSpatialIndex(leaf_cells, bounds=info.bounds)
+    else:
+        spatial_index = spatial_index
 
     # 遵守需求: 如果输入 DEM nodata 是可表示的有限 Float32 且不在有效淹没频率区间 [0, 100] 内，则输出继承该 nodata；否则回退为 NaN 防冲突
     if info.nodata is not None and np.isfinite(info.nodata) and not (0.0 <= float(info.nodata) <= 100.0):
@@ -2032,16 +2036,29 @@ class RasterTideEngine:
         if progress_callback:
             progress_callback(60, f"自适应细分完成: 共 {len(leaf_cells)} 个叶单元, {final_nodes_count} 个控制节点。构建空间索引并开始流式插值写入...")
 
+        from .tide_cache import parse_cache_time_to_utc
+        start_utc_epoch = parse_cache_time_to_utc(t_start_str, default_tz=source_tz)
+        end_utc_epoch = parse_cache_time_to_utc(t_end_str, default_tz=source_tz)
+        start_utc_iso = pd.Timestamp(start_utc_epoch, unit='s', tz='UTC').isoformat()
+        end_utc_iso = pd.Timestamp(end_utc_epoch, unit='s', tz='UTC').isoformat()
+
         metadata = {
             'SOFTWARE': f'CoastTideX v{COASTTIDEX_VERSION}',
             'ENGINE_MODE': 'inundation_frequency_raster',
             'TIDE_MODEL': 'FES2022b',
             'TIDE_CONSTITUENTS': 'all' if constituents == 'all' else str(constituents),
             'INUNDATION_TYPE': 'potential_astronomical_tidal',
+            'REQUESTED_TIME_START': t_start_str,
+            'REQUESTED_TIME_END': t_end_str,
             'TIME_START': t_start_str,
             'TIME_END': t_end_str,
             'TIME_STEP': freq,
             'TIMEZONE': source_tz,
+            'TIME_START_UTC': start_utc_iso,
+            'TIME_END_UTC': end_utc_iso,
+            'TIME_START_UTC_EPOCH': str(start_utc_epoch),
+            'TIME_END_UTC_EPOCH': str(end_utc_epoch),
+            'TIME_INTERVAL_SEMANTICS': '[start, end)',
             'VERTICAL_DATUM': str(dem_datum).upper(),
             'SPATIAL_METHOD': 'adaptive_quadtree_control_grid',
             'TOPOLOGY_GUARD': 'valid_mask_topology_aware',

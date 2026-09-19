@@ -850,8 +850,16 @@ class TestProductionHardeningRound4(_BaseExposureProductionTest):
         self.assertEqual(res["status"], "COMPLETED")
         with rasterio.open(res["products"].exposure_duration_h_path) as src:
             tags = src.tags()
-            self.assertEqual(tags.get("TIME_START"), "2024-01-01 00:00:00+00:00")
-            self.assertEqual(tags.get("TIME_END"), "2024-01-01T10:00:00+00:00")
+            self.assertEqual(tags.get("TIME_START"), "2024-01-01 08:00:00")
+            self.assertEqual(tags.get("TIME_END"), "2024-01-01 18:00:00")
+            self.assertEqual(tags.get("REQUESTED_TIME_START"), "2024-01-01 08:00:00")
+            self.assertEqual(tags.get("REQUESTED_TIME_END"), "2024-01-01 18:00:00")
+            self.assertEqual(tags.get("TIMEZONE"), "Asia/Shanghai")
+            self.assertTrue(tags.get("TIME_START_UTC", "").startswith("2024-01-01T00:00:00"))
+            self.assertTrue(tags.get("TIME_END_UTC", "").startswith("2024-01-01T10:00:00"))
+            self.assertEqual(tags.get("TIME_START_UTC_EPOCH"), "1704067200.0")
+            self.assertEqual(tags.get("TIME_END_UTC_EPOCH"), "1704103200.0")
+            self.assertEqual(tags.get("TIME_INTERVAL_SEMANTICS"), "[start, end)")
 
     def test_topology_mixed_components_and_unknown_handling(self):
         """P0-2: Inundation 与 Exposure 拓扑语义统一及 UNKNOWN (0) 处理测试"""
