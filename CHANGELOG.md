@@ -4,6 +4,35 @@
 
 ---
 
+## [1.6.0-rc.2] - 2026-09-19 (Round 9 Final Evidence, Metadata & Documentation Closure)
+
+### 修复与加固 (Fixed & Hardened)
+- **Tide Cache 规范结构与元数据闭环核验 (Cache Structure Validation Hardening)**：
+  - 加固 `validate_tide_cache_structure(cache_path)`：严格检查 5 大必需维度 (`time > 0`, `node > 0`, `cell > 0`, `bounds_dim == 4`, `corners_dim == 4`) 与 15 大必需节点/单元/时序变量；
+  - 强制核验 `cell_node_indices` 为整数类型且索引严格在 `[0, n_node - 1]` 有界范围内；
+  - 强制核验 `tide_msl_terminal_m` 必须严格为一维 `(n_node,)`，与 `HAS_TERMINAL_TIDE` 布尔属性 100% 互锁；
+  - 严格比对 `TIME_SAMPLES` 与时间轴维度长度，验证时间轴严格单调递增性与采样步长偏差 (`<= 1ms`)；
+  - 严格校验 `TIME_START_UTC_EPOCH` 与 `TIME_END_UTC_EPOCH` 在半开区间 `[start, end)` 下与时间轴端点的对齐度 (`<= 1ms`)，保持对 Schema 1.1 历史缓存的兼容容忍；
+  - 严格比对 `TIME_INTERVAL_SEMANTICS` 与 `TIME_INCLUSIVE` 的语义自洽性。
+- **时间区间闭合语义权威映射器 (Interval Semantics Mapper)**：
+  - 规范并导出 `inclusive_to_interval_semantics(inclusive: str) -> str`，将 `left`, `right`, `both`, `neither` 映射为权威数学区间表示，非支持参数抛出 `ValueError`；
+  - `write_tide_cache` 动态写入匹配的 `TIME_INTERVAL_SEMANTICS` 属性。
+- **终端潮位一维防御性归一化 (1D Defensive Normalization)**：
+  - 在 `read_tide_cache`、`read_tide_cache_structure` 与 `exposure_engine.py` 入口统一执行 `.reshape(-1)` 防御性归一化，杜绝多维广播潜在异常。
+- **外部科学数据物理规格实测与术语核准 (GeoTIFF Metadata Verification)**：
+  - 实测 `data/geoid/us_nga_egm08_25.tif` 物理属性 (EPSG:4979, 80,591,169 字节, 8640×4321, float32, NoData=None)，记录于 `data/geoid/README_GEOID.md`；
+  - 严格校正大地测量学概念为“相对 EGM2008 大地水准面的海拔正高近似 (EGM2008-referenced geoid height / orthometric-height approximation)”。
+- **双语文档与图形界面手册事实级中性化 (Documentation De-sensationalization)**：
+  - 全面剔除 README、README_EN、manual_dialog 中的未经测算绝对化修辞；
+  - 严格依据官方技术手册 (FES2022 Product Handbook, AVISO/CNES, 2024) 修正 FES2022b 原生有限元多尺度分辨率定义（深海 30km、陆架 10km、陆坡 6km、沿岸 4km、复杂海峡局部 2km 至 500m）；
+  - 更新数据依赖表，标明 MDT 单分块约 99.6 MB，全球完整包约 700 MB，明确 Stage 2 基于已有缓存时完全零 FES 与零 MDT 调用；
+  - 澄清 `ERROR_IF_EXISTS` 在新建任务与基于缓存反演任务中的边界。
+- **Round 9 专属闭环测试套件与全量回归 (Final Closure Test Suite & Full Regression)**：
+  - 新增 `tests/test_v16_round9_final_closure.py` (20 项测试)，全面覆盖夏令时跳变 (America/New_York DST 23h & 25h)、15 变量缺失遍历、维度形状容错、NoData 空间索引等价与文档 Linting；
+  - 本地全系统 219 项自动化测试 100% 通过 (0 失败，0 错误，0 跳过)。
+
+---
+
 ## [1.6.0-rc.1] - 2026-09-19 (Round 8 Release Candidate / Merge-Gate Hardening)
 
 ### 修复与加固 (Fixed & Hardened)

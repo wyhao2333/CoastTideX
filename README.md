@@ -1,4 +1,4 @@
-# CoastTideX: 全球海岸带高精度潮位模拟与高程基准转换系统
+# CoastTideX: 全球海岸带天文潮空间模拟与垂直基准转换系统
 
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
@@ -19,14 +19,14 @@
 
 ## 1. 项目定位与科学目标 (Project Overview & Scientific Mission)
 
-**CoastTideX** 是一款面向**海岸带遥感、海洋测绘、沿海潮滩生态演变与水下水文建模**研发的高性能空间潮位模拟与大地测量垂直基准严密转换系统。
+**CoastTideX** 是一款面向**海岸带遥感、海洋测绘、沿海潮滩生态演变与水下水文建模**研发的空间潮位模拟与大地测量垂直基准转换系统。
 
-系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，有效降低了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由网格台阶逼近带来的近岸潮位误差。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部瞬时平均海平面 (MSL)、大地水准面正高与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
+系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，有效降低了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由网格台阶逼近带来的近岸潮位误差。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部平均海平面参考 (MSL)、大地水准面高程与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
 
-在 **CoastTideX v1.6** 中，系统全面拓展至**时间域分析**，正式引入**潮滩/沙滩潜在天文潮露出时长 (Exposure Duration) 分析引擎**、**严格统一的半开区间 `[start, end)` 采样语义** 以及升级的 **Tide Cache Schema 1.2（含终端时刻采样）**，实现面向千万级像元海岸带高分辨率 DEM 的高保真、零 FES 重复开销时空反演。
+在 **CoastTideX v1.6** 中，系统全面拓展至**时间域分析**，正式引入**潮滩/沙滩潜在天文潮露出时长 (Exposure Duration) 分析引擎**、**严格统一的半开区间 `[start, end)` 采样语义** 以及升级的 **Tide Cache Schema 1.2（含终端时刻采样）**，实现面向千万级像元海岸带高分辨率 DEM 的零 FES 重复开销时空反演。
 
 > [!NOTE]
-> 当前阶段定义为 **CoastTideX v1.6 Beta / Feature 分支阶段**。系统具备分层防御架构与自动化验证套件，可直接用于科研分析与业务原型生产。
+> 当前阶段定义为 **CoastTideX v1.6 Beta / Feature 分支阶段**。系统具备分层防御架构与自动化验证套件，可直接用于受控科研分析与业务原型评估。
 
 ---
 
@@ -39,7 +39,7 @@
                     ▲
                     │  + N_EGM2008 (大地水准面起伏)
                     ▼
-               H_EGM2008 (海拔正高，陆海工程测绘基准)
+               H_EGM2008 (大地水准面高程参考)
                     ▲
                     │  + ΔN (GOCO06s/EIGEN-6C4 与 EGM2008 水准面差值)
                     ▼
@@ -51,11 +51,11 @@
 ```
 
 ### 级联转换严密数学关系式：
-1. **瞬时海面相对局部平均海平面 (MSL)**：
+1. **瞬时海面相对局部平均海平面参考 (MSL)**：
    $$\text{Tide}(t, \lambda, \varphi) = \sum_{k=1}^{34} f_k(t) A_k(\lambda, \varphi) \cos\left( \omega_k t + v_k(t) + u_k(t) - G_k(\lambda, \varphi) \right)$$
 2. **瞬时海面相对 MDT 原始水准面 (Global Ocean: GOCO06s; Med/Black Sea: EIGEN-6C4)**：
    $$H_{\text{MDT\_REF}}(t, \lambda, \varphi) = \text{Tide}(t, \lambda, \varphi) + \text{MDT}_{\text{CLS22}}(\lambda, \varphi)$$
-3. **严密改正至 EGM2008 大地水准面正高 (海拔高)**：
+3. **改正至 EGM2008 大地水准面参考高程 (EGM2008-referenced geoid height)**：
    $$H_{\text{EGM2008}}(t, \lambda, \varphi) = H_{\text{MDT\_REF}}(t, \lambda, \varphi) + \Delta N(\lambda, \varphi)$$
    - 全球大洋：$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
    - 地中海/黑海：$\Delta N(\lambda, \varphi) = N_{\text{EIGEN-6C4}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
@@ -70,18 +70,18 @@ FES2022b 提供了两种分发形式：
 - **原生非结构有限元三角形网格 (Native LGP2 Unstructured Mesh)**。
 
 CoastTideX 核心解算器直接驱动 **FES2022b 原生非结构网格 (3.77 GB NS-grid)**，理由如下：
-1. **物理真实性与多项式插值**：采用 LGP2 (Lagrange Polynomial of Degree 2) 二阶连续有限元多项式，真实还原浅海潮波能量在复杂边界处的反射、共振与非线性浅水潮（如 $M_4, MS_4$）。
-2. **空间分辨率自适应跨越**：FES2022b 有限元网格等效空间分辨率从开阔大洋约 1/16° 自适应加密至大陆架与近岸海岸带约 1/60° (~1.5 km ~ 2 km)，网格边界紧密贴合自然海岸轮廓；在 DEM 尺度上，CoastTideX 自适应四叉树控制网格进一步在用户 10m/30m 高分辨率地形上按梯度细分至 500m 甚至更高局部密度。
-3. **杜绝内插失真**：规则 1/30° 网格本身是通过对有限元网格进行二次采样插值生成的产物，丢失了高阶导数信息并在近岸陆地边界混入了人工外推假值。
+1. **有限元基函数与多项式逼近**：采用 LGP2 (Lagrange Polynomial of Degree 2) 二阶连续有限元多项式，较好地模拟浅海潮波在复杂边界处的反射、共振与非线性浅水潮（如 $M_4, MS_4$）。
+2. **空间自适应多尺度分辨率**：根据官方技术文档 (FES2022 Product Handbook, AVISO/CNES)，FES2022b 原生有限元网格采用空间自适应变分辨率设计：大洋深水区 (Offshore) 目标分辨率约 30 km，大陆架 (Shelf) 约 10 km，大陆坡 (Continental slope) 约 6 km，沿岸目标海区 (Coastal) 约 4 km，在特定重点海峡与复杂近岸局部加密至约 2 km 至 500 m；在输出 DEM 尺度上，CoastTideX 自适应四叉树控制网格根据地形梯度与水陆相交边界在用户 10m/30m 高分辨率 DEM 上进一步加密至 500m 控制间距（注：四叉树 500m 间距为空间插值控制节点密度，并非使 FES 底层潮汐动力学模型本身产生 500m 新增动力学分辨率）。
+3. **避免规则化二次插值平滑**：规则 1/30° 网格是对有限元网格进行二次采样插值生成的产物，可能平滑近岸局部极值梯度并在陆架边界引入外推扰动。
 
 ---
 
-## 4. 为什么传统规则网格无法满足高精度近岸要求 (Why Regular Grids Fail in Nearshore)
+## 4. 传统规则网格在近岸区域的潜在局限 (Potential Limitations of Regular Grids in Nearshore)
 
-传统海洋软件广泛采用规则矩形网格（如 1/16°、1/30°），在沿岸沙滩和潮间带存在天然缺陷：
-- **阶梯锯齿误差 (Staircase Artifacts)**：矩形像元将平滑倾斜的自然海岸切成方块阶梯，导致狭长潮沟、潮滩前沿的水位产生数公里的人为断裂；
-- **陆地外推污染 (Land Contamination & Extrapolation Blow-up)**：规则网格在海岸陆地像元缺少动力学解，外推算法在浅水陡坡带极易产生数值发散（动辄数十厘米虚假增减水）；
-- **潮滩边界不连续**：当卫星遥感像元尺度达到 10m/30m 时，1/30° (~3.7 km) 规则格网的粗暴双线性插值会彻底抹平微地貌潮沟的潮波相位差。
+传统海洋软件采用规则矩形网格（如 1/16°、1/30°），在沿岸沙滩和潮间带存在潜在局限：
+- **阶梯网格效应 (Staircase Grid Effects)**：矩形像元逼近自然斜坡海岸时，可能在狭长潮沟与滩涂边缘引入锯齿状过渡；
+- **陆地外推不确定性 (Land Extrapolation Uncertainty)**：规则网格在靠近陆地边界像元缺少动力学解时，数学外推算法在浅水地形剧烈变化带可能产生虚假数值波动；
+- **微地貌相位差异平滑**：当遥感 DEM 达到 10m/30m 像元级别时，1/30° (~3.7 km) 规则格网若直接进行全局双线性插值，可能平滑微地貌复杂潮沟内的局部潮波相位过渡。
 
 ---
 
@@ -139,7 +139,7 @@ $$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
 
 ## 8. 严格时间采样语义与半开区间 `[start, end)` (Strict Temporal Semantics)
 
-在 CoastTideX v1.6 中，全系统科学产品（无论是整年预测、长时序还是自定义时段）全面统一切片时间语义为严格**半开区间 `[start, end)` (即 `inclusive="left"`)**。
+在 CoastTideX v1.6 中，栅格淹没频率统计和 Exposure 露出时间域分析默认统一切片时间语义为严格**半开区间 `[start, end)` (即 `inclusive="left"`)**，同时 Tide Cache Schema 1.2 记录规范的 `TIME_INTERVAL_SEMANTICS`。
 
 ### 核心科学依据：
 1. **样本权重均等**：以 2024 闰年为例，时段为 `2024-01-01 00:00:00` 至 `2025-01-01 00:00:00`，步长为 `30min`。半开区间精确包含 **17,568** 个采样点，每个点代表后续 30 分钟的时间窗口积分，全年等权重；
@@ -169,7 +169,7 @@ $$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
 ```
 
 ### Tide Cache Schema 1.2 关键规范：
-- **`CACHE_SCHEMA_VERSION`**: `"1.2"` (完全向下兼容读取 Schema 1.1)；
+- **`CACHE_SCHEMA_VERSION`**: `"1.2"` (完全向下兼容读取 Schema 1.1；注意：Schema 1.1 缓存若缺失 `tide_msl_terminal_m`，用于 Exposure 分析时会自动采用 $t_{N-1}$ 终端潮位平推降级并标记 `QC_EXP_TERMINAL_UNAVAILABLE`；若 Schema 1.1 包含历史 `inclusive='both'`，Exposure 引擎会因时间跨界连续性语义拒绝加载)；
 - **全要素规范签名 (`CACHE_SIGNATURE`)**: 对源 DEM 文件大小、修改时间、CRS、仿射矩阵、时段、采样率、FES 模型、拓扑分辨率等参数进行确定性 SHA-256 杂凑计算，杜绝参数漂移与缓存错配；
 - **`tide_msl_terminal_m(node)`**: 存储 $t_{\text{end}}$ 时刻各控制节点的瞬时潮位，用于时间域连续性闭合；
 - **流式节点块读取 (Node-chunk streaming)**: 读取缓存时不一次性拉取整个时序矩阵，内存开销极低。
@@ -195,22 +195,22 @@ CoastTideX 严格区分四类科学数据：
 
 | 数据类别 | 文件相对路径 | 存储属性 | 用途与约束说明 | 获取与下载途径 |
 | :--- | :--- | :---: | :--- | :--- |
-| **仓储自带数据 (Bundled)** | `data/geoid/us_nga_egm08_25.tif` | Git 仓库自带 (76.86 MB) | 全球 2.5' EGM2008 大地水准面起伏 $N$，用于海拔正高与椭球高换算 | 随仓库克隆自带，无需额外下载 |
+| **仓储自带数据 (Bundled)** | `data/geoid/us_nga_egm08_25.tif` | Git 仓库自带 (76.86 MB, 80,591,169 字节) | 全球 2.5' EGM2008 大地水准面起伏 $N$ (EPSG:4979)，用于正高与椭球高基准换算 | 随仓库克隆自带，无需额外下载 |
 | **仓储自带数据 (Bundled)** | `data/geoid/delta_n_goco06s_minus_egm2008.tif` | Git 仓库自带 (22.66 MB) | 全球大洋 GOCO06s 与 EGM2008 水准面差值改正栅格 $\Delta N$ | 随仓库克隆自带，无需额外下载 |
-| **外部必须数据 (Mandatory)** | `fes2022b/ocean_tide_non_structured/...` | 外部数据 (约 3.77 GB) | FES2022b 原生非结构有限元网格 NetCDF，提供 34 分潮调和常数 | 访问 AVISO+ 官网申请授权下载 FES2022b 原生包 |
-| **外部必须数据 (Mandatory)** | `mdt_cls22/...` | 外部数据 (约 700 MB) | CNES-CLS22 全球平均动态地形 (MDT)，连接 MSL 与水准面 | 访问 AVISO+ / CMEMS 官网下载 CNES-CLS22 MDT |
+| **外部必须数据 (Mandatory)** | `fes2022b/ocean_tide_non_structured/...` | 外部数据 (约 3.77 GB) | FES2022b 原生非结构有限元网格 NetCDF，提供 34 分潮调和常数 (仅 Stage 1 潮位预测需要；已有 Tide Cache 执行 Stage 2 时无需 FES2022b) | 访问 AVISO+ 官网申请授权下载 FES2022b 原生包 |
+| **外部必须数据 (Mandatory)** | `mdt_cls22/...` | 外部数据 (单个分块约 99.6 MB，全球完整包约 700 MB) | CNES-CLS22 全球平均动态地形 (MDT)，连接 MSL 与水准面 (仅 Stage 1 或启用大地水准面基准转换时需要；已有 Tide Cache 执行 Stage 2 时无需 MDT) | 访问 AVISO+ / CMEMS 官网下载 CNES-CLS22 MDT |
 | **外部可选数据 (Optional)** | `config.yaml -> paths.hybrid_mdt_source_mask` | 外部可选 (未内置) | Hybrid MDT 权威分类掩膜。留空时系统自动采用地理多边形判定并输出 QC 预警 | 用户若有官方分类源栅格可显式配置 |
 | **外部可选数据 (Optional)** | `fes2022b/mask_fes2022B.nc` | 外部参考 (约 0.98 MB, 1,027,081 字节) | FES2022b 1/30° 规则网格外推掩膜。当前原生 LGP2 有限元流程不依赖此文件 (详见 [docs/FES_MASK_METADATA_AUDIT.md](docs/FES_MASK_METADATA_AUDIT.md)) | FES2022b 补充参考包 |
 | **预处理重现数据 (Reproduction)** | `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` | 本地预处理 (Git 已忽略) | 地中海与黑海专用差值改正栅格，为保持仓库轻量未强制入库 | 可使用 `python scripts/generate_delta_n.py` 随时本地生成 |
 
 ---
 
-## 12. 拓扑屏障保护与连通域防护 (Valid-Mask Topology Guard)
+## 12. 基于目标计算掩膜的拓扑连通防护与插值安全启发式 (Target-Mask-Derived Topology Guard & Interpolation Safety Heuristic)
 
 在河口、半岛、狭窄沙咀与岛礁区域，若单纯依靠几何欧氏距离进行空间反距离或双线性插值，会导致海陆两侧或不同水体间发生潮位“穿墙泄漏”。
 
-CoastTideX 引入了**物理尺度拓扑连通防护 (Topology Guard)**：
-1. **物理尺度掩膜构建**: 按 `topology_max_resolution_m` (默认 100m) 构建保守二值粗掩膜；
+CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Topology Guard)**：
+1. **物理尺度掩膜构建**: 按 `topology_max_resolution_m` (默认 100m) 基于输入有效计算区域构建保守二值粗掩膜；
 2. **形态学与连通域分割**: 通过 `scipy.ndimage.label` 标识水体独立连通分量 (Component ID)；
 3. **屏障跨越阻断**: 控制网格节点仅能对同属于同一连通水体域的像元进行空间插值；跨越陆地 NoData 屏障时自动回退为局部单侧插值并标记 `QC_BIT_CONNECTIVITY_FALLBACK`。
 
@@ -237,7 +237,7 @@ CoastTideX 引入了**物理尺度拓扑连通防护 (Topology Guard)**：
 - `bit 0 (1)`: 四角点降级插值 (`QC_EXP_DEGRADED_CELL`)
 - `bit 1 (2)`: 控制节点不足 (`QC_EXP_INSUFFICIENT_NODES`)
 - `bit 2 (4)`: 基准面多边形近似 (`QC_EXP_DATUM_APPROX`)
-- `bit 3 (8)`: 终端时刻水位平推近似 (`QC_EXP_TERMINAL_APPROX`)
+- `bit 3 (8)`: 终端时刻水位缺失降级近似 (`QC_EXP_TERMINAL_UNAVAILABLE`，历史版本兼容别名 `QC_EXP_TERMINAL_APPROX`)
 - `bit 4 (16)`: 序列含无效数据间隙 (`QC_EXP_PARTIAL_VALID_TIME`)
 - `bit 5 (32)`: 全时段常时淹没像元 (`QC_EXP_PERMANENTLY_SUBMERGED`)
 - `bit 6 (64)`: 全时段常时露出像元 (`QC_EXP_PERMANENTLY_EXPOSED`)
@@ -346,7 +346,7 @@ CoastTideX 面向海岸带千万级像元高分辨率遥感影像与长时序模
 1. **控制网格与逐像元 FES 动力学解耦**：
    - 传统逐像元暴力计算需对千万级像元全量运行 34 分潮调和展开，计算耗时与内存开销不可接受；
    - CoastTideX 采用自适应四叉树稀疏控制网格与 CCDF 向量化检索，仅需在数百至数千个关键控制节点解算 FES 潮位，像元级淹没频率通过四角节点经验累计分布高效插值求得；
-   - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时将空间反演误差严格控制在设置的容差（默认 < 1.0%）以内。
+   - 在千万级像元典型沿海影像上，避免了 99% 以上像元的冗余 FES 评估，同时结合设置的四叉树细分容差（默认容差 1.0%）进行网格细分与空间插值反演。
 
 2. **时间域流式 2D 状态机与可控内存驻留**：
    - 露出时间域分析引擎避免分配 $(rows, cols, time\_chunk)$ 规模的像元潮位三维立方体；
@@ -379,7 +379,7 @@ python -m unittest discover -s tests -p "test_*.py"
 完整历史版本日志请参见独立文档 [CHANGELOG.md](CHANGELOG.md)：
 - **v1.6 (Beta / Feature Branch)**: 潜在天文潮露出时间域分析引擎 (7大 GeoTIFF 产物)、跨界线性插值、严格半开区间 `[start, end)` 语义统一、Tide Cache Schema 1.2、双语开发规范与外部数据依赖体系。
 - **v1.5 Beta**: 真实 FES2022b 与真实沙滩/潮滩 DEM 科学验证套件与实测比对。
-- **v1.5 Alpha**: 批量潮间带栅格引擎、Tide Cache 持久化、防篡改签名与断点恢复。
+- **v1.5 Alpha**: 批量潮间带栅格引擎、Tide Cache 持久化、全要素规范兼容性签名与断点恢复。
 - **v1.4**: 空间栅格单时刻快照与自适应四叉树潜在天文潮淹没频率解算。
 - **v1.3**: 四大多元垂直基准严密转换体系 (MSL / MDT / EGM2008 / WGS84)。
 

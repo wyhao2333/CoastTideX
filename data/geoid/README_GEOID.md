@@ -8,20 +8,24 @@
 
 | 文件名 | 数据内容 | 分辨率 / 范围 | 实际大小 | 空间参考 (CRS) | 来源与模型 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `us_nga_egm08_25.tif` | 全球 EGM2008 大地水准面起伏 $N_{\text{EGM2008}}$ | 2.5' 全球网格 (4321×8640) | **76.86 MB** | EPSG:4979 (WGS84 3D) | 美国国家地理空间情报局 (NGA) EGM2008 (d/o 2190) |
-| `delta_n_goco06s_minus_egm2008.tif` | 全球大洋 GOCO06s 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.66 MB** | EPSG:4326 (WGS84 2D) | ICGEM (GFZ Potsdam), GOCO06s (d/o 300) - EGM2008 (d/o 2190) |
-| `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (地中海/黑海非MSL必选，可由脚本本地生成，为保持轻量不强行入 Git 库) |
+| `us_nga_egm08_25.tif` | 全球 EGM2008 大地水准面起伏 $N_{\text{EGM2008}}$ (米) | 2.5' 全球网格 (4321×8640) | **76.86 MB** (80,591,169 字节) | EPSG:4979 (WGS84 3D 地理坐标系) | 美国国家地理空间情报局 (NGA) EGM2008 (d/o 2190) |
+| `delta_n_goco06s_minus_egm2008.tif` | 全球大洋 GOCO06s 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.66 MB** (23,758,418 字节) | EPSG:4326 (WGS84 2D) | ICGEM (GFZ Potsdam), GOCO06s (d/o 300) - EGM2008 (d/o 2190) |
+| `delta_n_eigen6c4_minus_egm2008.tif` | 地中海与黑海 EIGEN-6C4 与 EGM2008 水准面差值 $\Delta N$ | ~5.1' 全球网格 (2118×4236) | **22.54 MB** (23,636,340 字节) | EPSG:4326 (WGS84 2D) | ICGEM EIGEN-6C4 (d/o 2190) - EGM2008 (地中海/黑海非MSL必选，可由脚本本地生成，为保持轻量不强行入 Git 库) |
 | `hybrid_mdt_source_mask.tif` | [可选外部数据，当前未内置] Hybrid MDT 来源分类掩膜 (1=GOCO06s, 2=Med EIGEN-6C4, 3=Black Sea EIGEN-6C4, 0=未知, 255=NoData) | 视外部配置而定 | 视外部配置而定 | EPSG:4326 或投影 CRS | 仅用于判定 CNES-CLS22 MDT 参考重力场基准；当前未内置，系统默认采用精细闭合多边形判别并输出 `QC_DATUM_SOURCE_APPROX`。注意：此文件绝非 FES2022b 的 1/30° 规则潮位外推掩膜。 |
 | `fes2022b/mask_fes2022B.nc` | [FES外部参考，位于 fes2022b 目录] FES2022b 1/30° 规则网格潮位来源/外推掩膜 (0=Ocean native data, 1=Extrapolated data, 2=Land, 3=Lake) | 1/30° (5401×10800) | 磁盘物理大小 ~0.98 MB (1,027,081 字节，NetCDF4压缩)；未压缩数组内存 55.6 MB | EPSG:4326 | 仅用于标明 FES 规则经纬度网格的插值溯源与陆地边界；绝不是 MDT 掩膜，亦不参与大地水准面基准选择。当前 Native LGP2 主解算流程不使用此文件。 |
+
+> [!NOTE]
+> **真实栅格元数据核验说明**：<br>
+> `us_nga_egm08_25.tif` 在 Rasterio/GDAL 底层读取的水平 CRS 为 `EPSG:4979`，像元数据类型为 Float32，NoData 为 None，覆盖范围为 `[-180.0208, -90.0208, 179.9792, 90.0208]`。水平参考系为地理经纬度坐标，像元栅格值物理上代表相对于 WGS84 椭球面的 EGM2008 大地水准面差距高 $N$（米）。水平空间坐标系不等于垂直物理量；本系统严禁将全球大地水准面模型高直接表述为特定国家法定高程基准。
 
 ---
 
 ## 2. 大地测量学原理与严密基准转换链条
 
 ### 2.1 物理背景与问题
-- **瞬时潮位 ($\text{Tide}$)**：由 FES2022b 全球流体潮汐动力学模型给出，是瞬时水面相对于**局部平均海平面 (Mean Sea Level, MSL)** 的物理起伏。
+- **瞬时潮位 ($\text{Tide}$)**：由 FES2022b 全球流体潮汐动力学模型给出，是瞬时水面相对于**局部平均海平面参考 (Mean Sea Level, MSL)** 的物理起伏。
 - **平均动态地形 ($\text{MDT}$)**：CNES-CLS22 提供的 MDT 是瞬时平均海面相对于**大地水准面**的海面高度。
-- **工程与测绘基准 ($\text{EGM2008}$)**：陆海工程通常以高阶大地水准面 EGM2008 为海拔起算面（正常高/正高体系）。
+- **大地水准面高程参考 ($\text{EGM2008}$)**：以全球超高阶大地水准面模型 EGM2008 为起算面的参考水准高/正高近似 (EGM2008-referenced geoid height / orthometric-height approximation)。
 - **空间几何基准 ($\text{WGS84}$)**：GNSS / 卫星测高测量输出的是相对于参考椭球面的几何椭球高 $h$。
 
 ### 2.2 全球开阔大洋级联转换公式 (Global Ocean)
@@ -32,14 +36,14 @@ $$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{E
 1. **瞬时海面相对于 GOCO06s 大地水准面的高程**：
    $$H_{\text{GOCO06s}}(t, \lambda, \varphi) = \text{Tide}(t, \lambda, \varphi) + \text{MDT}_{\text{CLS22}}(\lambda, \varphi)$$
 
-2. **严密改正至 EGM2008 大地水准面高程 (海拔正高)**：
+2. **换算至相对 EGM2008 大地水准面的高程 (EGM2008-referenced geoid height)**：
    $$H_{\text{EGM2008}}(t, \lambda, \varphi) = H_{\text{GOCO06s}}(t, \lambda, \varphi) + \Delta N(\lambda, \varphi) = \text{Tide} + \text{MDT} + (N_{\text{GOCO06s}} - N_{\text{EGM2008}})$$
 
 3. **严密换算至 WGS84 几何空间椭球高**：
    $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
 
 > [!NOTE]
-> 在当前基准引擎架构中，当计算目标仅为 MSL 或 EGM2008（`datum_target='both'` 或 `'egm2008'`）时，系统仅需加载 MDT 与 $\Delta N$ 栅格，**不再强制加载庞大的 EGM2008 绝对水准面起伏栅格 ($N$)**，实现计算内存与文件依赖的严密解耦。
+> 在当前基准引擎架构中，当计算目标仅为 MSL 或 EGM2008（`datum_target='both'` 或 `'egm2008'`）时，系统仅需加载 MDT 与 $\Delta N$ 栅格，**不再强制加载庞大的 EGM2008 绝对水准面起伏栅格 ($N$)**，实现计算内存与文件依赖的解耦。
 
 ### 2.3 复合型混合 MDT (Hybrid MDT) 区域基准特性：地中海与黑海
 CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全球海洋与区域模型的融合成果：

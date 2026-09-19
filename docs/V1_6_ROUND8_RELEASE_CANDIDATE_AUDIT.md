@@ -1,3 +1,8 @@
+> [!WARNING]
+> **SUPERSEDED / 历史归档说明**：
+> 本报告为 **Round 8 (Release Candidate 1)** 阶段性审计记录。
+> 本报告所涉的所有规范、元数据与测试闭环已被 **Round 9 最终审计报告 ([V1_6_ROUND9_FINAL_CLOSURE_AUDIT.md](V1_6_ROUND9_FINAL_CLOSURE_AUDIT.md))** 完全承接与闭环，最新权威状态以此最新文件为准。
+
 # CoastTideX v1.6 Beta — Round 8 最终发布候选与合并门禁加固审计报告
 # Final Release Candidate & Merge-Gate Hardening Audit Report (Round 8)
 

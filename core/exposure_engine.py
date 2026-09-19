@@ -771,9 +771,10 @@ def stream_exposure_metrics_interpolation(
     # 终端时刻各节点水位 (严格校验有效性，无效设为 NaN)
     terminal_node_wl = np.full(n_nodes, np.nan, dtype=np.float32)
     if has_terminal:
+        term_flat = np.asarray(terminal_node_tides).reshape(-1)
         for idx, node in enumerate(nodes):
-            if node.valid and idx < len(terminal_node_tides):
-                t_val = terminal_node_tides[idx]
+            if node.valid and idx < len(term_flat):
+                t_val = term_flat[idx]
                 if np.isfinite(t_val):
                     terminal_node_wl[idx] = float(t_val + node_offsets[idx])
 

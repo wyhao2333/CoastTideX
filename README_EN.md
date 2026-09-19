@@ -1,4 +1,4 @@
-# CoastTideX: High-Precision Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System
+# CoastTideX: Global Coastal Astronomical Tide Spatial Simulation and Multi-Datum Transformation System
 
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
@@ -19,9 +19,9 @@
 
 ## 1. Project Overview & Scientific Mission
 
-**CoastTideX** is an advanced open-source scientific software system designed for **coastal remote sensing, marine geodesy, intertidal morphodynamics, and hydrodynamic baseline unification**.
+**CoastTideX** is an open-source scientific software system designed for **coastal remote sensing, marine geodesy, intertidal morphodynamics, and hydrodynamic baseline unification**.
 
-Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX significantly mitigates the nearshore staircase distortions and land contamination errors intrinsic to conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' ultra-high-resolution global geoid undulation**, providing a seamless, mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
+Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX mitigates the nearshore staircase distortions and land contamination errors associated with conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' global geoid undulation**, providing a mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
 
 In **CoastTideX v1.6**, the system advances into the **time domain**, introducing the **Potential Astronomical Tidal Exposure Duration Engine for Tidal Flats and Beaches**, **strictly unified half-open interval `[start, end)` temporal slicing semantics**, and **Tide Cache Schema 1.2 (with terminal water level sampling)**.
 
@@ -72,7 +72,7 @@ FES2022b is released in two formats:
 
 CoastTideX operates directly on the **native unstructured mesh (3.77 GB NS-grid)** for fundamental hydrodynamic reasons:
 1. **Physical Fidelity**: Uses degree-2 Lagrange Polynomials (LGP2) to capture non-linear shallow-water tidal interactions ($M_4, MS_4$) and resonant coastal amplification.
-2. **Adaptive Resolution**: FES2022b finite-element mesh effective spatial resolution refines adaptively from ~1/16° in the open ocean to ~1/60° (~1.5 km ~ 2 km) along continental shelves and coastlines, closely conforming to natural coastal contours; at the DEM scale, CoastTideX adaptive quadtree control grid further subdivides user 10m/30m high-resolution topographies according to gradients down to 500m or higher local density.
+2. **Adaptive Multi-Scale Resolution**: According to the official FES2022 Product Handbook (SALP-NT-EA-P4-23573-CNES, Issue 1.0, 2024), the FES2022b native finite-element mesh provides multi-scale spatial resolution: ~30 km in deep ocean basins, ~10 km along continental shelves, ~6 km along continental slopes, ~4 km along open coastlines, refining down to ~2 km to 500 m in selected complex coastal channels and straits. At the DEM scale, CoastTideX builds an adaptive quadtree control grid subdividing user 10m/30m high-resolution topographies according to gradients down to 500m (or user-defined minimum spacing).
 3. **Absence of Interpolation Noise**: The regular 1/30° grid is merely a downsampled interpolation of this finite-element mesh and suffers from boundary smoothing errors.
 
 ---
@@ -136,7 +136,7 @@ Between consecutive discrete timesteps $[t_k, t_{k+1}]$ (e.g. 30min), whenever w
 
 ## 8. Strict Temporal Semantics & Half-Open Interval `[start, end)`
 
-In CoastTideX v1.6, all scientific temporal products strictly adopt the **half-open interval `[start, end)` (`inclusive="left"`)**:
+In CoastTideX v1.6, raster inundation frequency statistics and Exposure duration analysis default to adopting the strict **half-open interval `[start, end)` (`inclusive="left"`)**, with Tide Cache Schema 1.2 recording canonical `TIME_INTERVAL_SEMANTICS`:
 - **Uniform Time Weighting**: For the year 2024 (leap year) at 30min intervals, `[2024-01-01 00:00:00, 2025-01-01 00:00:00)` produces exactly **17,568** sample points, each representing a 30-minute duration;
 - **Elimination of Year-End Double Counting**: A closed interval `[start, end]` would erroneously double-count `00:00:00` across adjacent annual cycles;
 - **Continuous Terminal Crossing**: The terminal water level $H(t_{\text{end}})$ is stored as a dedicated array (`tide_msl_terminal_m`) in Tide Cache Schema 1.2 to enable closed crossing interpolation in the final interval without altering discrete sample counts.
@@ -150,8 +150,8 @@ For large-scale workflows, CoastTideX employs a two-stage decoupled architecture
 2. **Stage 2 (Zero-FES Downstream Products)**: Reconstructs quadtree topology and evaluates Inundation Frequency and Exposure Duration directly from cache with **zero FES calls**.
 
 ### Tide Cache Schema 1.2 Highlights:
-- Backward-compatible with Schema 1.1;
-- Includes optional variable `tide_msl_terminal_m(node)` for terminal continuous exposure calculations;
+- Backward-compatible with Schema 1.1 (Note: if a Schema 1.1 cache lacks `tide_msl_terminal_m`, Exposure analysis automatically degrades terminal crossing using $t_{N-1}$ water level and flags `QC_EXP_TERMINAL_UNAVAILABLE`; if a Schema 1.1 cache contains legacy `inclusive='both'`, Exposure engine rejects it to maintain temporal interval continuity);
+- Includes variable `tide_msl_terminal_m(node)` for terminal continuous exposure calculations;
 - Encodes deterministic SHA-256 compatibility signatures (`CACHE_SIGNATURE`).
 
 ---
@@ -171,25 +171,27 @@ For large-scale workflows, CoastTideX employs a two-stage decoupled architecture
 
 ## 11. External Scientific Data Dependencies & Download Guide
 
-| Data Category | Relative Path | Storage Property | Description & Requirements |
-| :--- | :--- | :---: | :--- |
-| **Bundled Data** | `data/geoid/us_nga_egm08_25.tif` | In Git Repo (76.86 MB) | Global EGM2008 2.5' geoid undulation grid |
-| **Bundled Data** | `data/geoid/delta_n_goco06s_minus_egm2008.tif` | In Git Repo (22.66 MB) | Global ocean GOCO06s minus EGM2008 geoid difference $\Delta N$ |
-| **External Mandatory** | `fes2022b/ocean_tide_non_structured/...` | External (~3.77 GB) | FES2022b native unstructured triangular mesh NetCDF |
-| **External Mandatory** | `mdt_cls22/...` | External (~700 MB) | CNES-CLS22 Mean Dynamic Topography NetCDF |
-| **External Optional** | `config.yaml -> paths.hybrid_mdt_source_mask` | User-defined | Authoritative Hybrid MDT classification mask (fallback to polygon ray-casting if omitted) |
-| **External Optional** | `fes2022b/mask_fes2022B.nc` | External Reference (~0.98 MB, 1,027,081 bytes) | FES2022b 1/30° regular grid extrapolation mask (not used in native LGP2 workflow; see [docs/FES_MASK_METADATA_AUDIT.md](docs/FES_MASK_METADATA_AUDIT.md)) |
-| **Preprocessed Reproduction** | `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` | Local (Git Ignored) | Mediterranean/Black Sea geoid difference; generated via `scripts/generate_delta_n.py` |
+CoastTideX strictly distinguishes four categories of scientific data:
+
+| Data Category | Relative Path | Storage Property | Description & Requirements | Acquisition Source |
+| :--- | :--- | :---: | :--- | :--- |
+| **Bundled Data** | `data/geoid/us_nga_egm08_25.tif` | In Git Repo (76.86 MB, 80,591,169 bytes) | Global EGM2008 2.5' geoid undulation grid (EPSG:4979) for orthometric/ellipsoidal datum transformation | Bundled with repo clone |
+| **Bundled Data** | `data/geoid/delta_n_goco06s_minus_egm2008.tif` | In Git Repo (22.66 MB) | Global ocean GOCO06s minus EGM2008 geoid difference $\Delta N$ | Bundled with repo clone |
+| **External Mandatory** | `fes2022b/ocean_tide_non_structured/...` | External (~3.77 GB) | FES2022b native unstructured triangular mesh NetCDF (required for Stage 1 tide prediction; not required for Stage 2 when using existing Tide Cache) | AVISO+ website |
+| **External Mandatory** | `mdt_cls22/...` | External (single tile ~99.6 MB, global full set ~700 MB) | CNES-CLS22 Mean Dynamic Topography NetCDF (required for Stage 1 or geoid conversion; not required for Stage 2 when using existing Tide Cache) | AVISO+ / CMEMS |
+| **External Optional** | `config.yaml -> paths.hybrid_mdt_source_mask` | User-defined | Authoritative Hybrid MDT classification mask (fallback to polygon ray-casting if omitted) | User configured if available |
+| **External Optional** | `fes2022b/mask_fes2022B.nc` | External Reference (~0.98 MB, 1,027,081 bytes) | FES2022b 1/30° regular grid extrapolation mask (not used in native LGP2 workflow; see [docs/FES_MASK_METADATA_AUDIT.md](docs/FES_MASK_METADATA_AUDIT.md)) | FES2022b supplemental package |
+| **Preprocessed Reproduction** | `data/geoid/delta_n_eigen6c4_minus_egm2008.tif` | Local (Git Ignored) | Mediterranean/Black Sea geoid difference; generated via `scripts/generate_delta_n.py` | Locally reproducible |
 
 ---
 
-## 12. Valid-Mask Topology Guard
+## 12. Target-Mask-Derived Topology Guard & Interpolation Safety Heuristic
 
 In complex archipelagoes, narrow sandbars, and bifurcated estuaries, Euclidean distance interpolation can mistakenly leak tidal signals across land barriers.
-CoastTideX applies **Valid-Mask Topology Guarding**:
-- Derives a coarse physical binary mask (`topology_max_resolution_m`, default 100m);
-- Computes connected components via `scipy.ndimage.label`;
-- Prevents cross-barrier interpolation, falling back to one-sided available nodes and flagging `QC_BIT_CONNECTIVITY_FALLBACK`.
+CoastTideX applies **Target-Mask-Derived Topology Guarding**:
+1. **Physical Scale Mask Derivation**: Constructs a conservative binary coarse mask (`topology_max_resolution_m`, default 100m) based on valid target computation areas;
+2. **Morphology & Connected Component Labeling**: Identifies independent water body components via `scipy.ndimage.label`;
+3. **Barrier Traversal Blocking**: Restricts control grid interpolation to pixels within the same connected component; when crossing land NoData barriers, automatically falls back to local one-sided nodes and flags `QC_BIT_CONNECTIVITY_FALLBACK`.
 
 ---
 
@@ -214,7 +216,7 @@ Every pixel in CoastTideX products carries a bitmask for quality assurance:
 - `bit 0 (1)`: Degraded cell interpolation (`QC_EXP_DEGRADED_CELL`)
 - `bit 1 (2)`: Insufficient valid nodes (`QC_EXP_INSUFFICIENT_NODES`)
 - `bit 2 (4)`: Datum polygon approximation (`QC_EXP_DATUM_APPROX`)
-- `bit 3 (8)`: Terminal sample approximated (`QC_EXP_TERMINAL_APPROX`)
+- `bit 3 (8)`: Terminal sample unavailable / degraded fallback (`QC_EXP_TERMINAL_UNAVAILABLE`, legacy alias `QC_EXP_TERMINAL_APPROX`)
 - `bit 4 (16)`: Invalid time gaps present (`QC_EXP_PARTIAL_VALID_TIME`)
 - `bit 5 (32)`: Permanently submerged pixel (`QC_EXP_PERMANENTLY_SUBMERGED`)
 - `bit 6 (64)`: Permanently exposed pixel (`QC_EXP_PERMANENTLY_EXPOSED`)
@@ -302,7 +304,7 @@ CoastTideX is architected for large-scale coastal remote sensing scenes and long
 
 1. **Decoupled Quadtree Control Grid vs. Brute-Force Pixel Inversion**:
    - Rather than evaluating full FES harmonic expansions across tens of millions of DEM pixels, CoastTideX adaptively concentrates tidal evaluations on sparse quadtree control nodes (hundreds to thousands of nodes per scene);
-   - Inundation frequency is rapidly inverted via empirical CCDF search at each pixel, bypassing over 99% of redundant FES calculations while bounding the spatial error to the configured tolerance (default < 1.0%).
+   - Inundation frequency is rapidly inverted via empirical CCDF search at each pixel, bypassing over 99% of redundant FES calculations while adaptively refining control cells based on the configured tolerance (default 1.0%).
 
 2. **2D Vectorized Streaming State Machine with Bounded Memory**:
    - Completely eliminates 3D `(rows, cols, time_chunk)` pixel tensor allocations in memory;
@@ -321,7 +323,7 @@ python -m unittest discover -s tests -p "test_*.py"
 ### Testing Strategy & Isolation:
 1. **GitHub Actions Remote CI**: Runs in a headless Linux runner without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics (live status reflected by the GitHub Actions CI badge above);
 2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs (Note: the v1.5 Beta validation report represents a controlled benchmark test under specific regional sample data rather than an unconstrained global physical accuracy proof);
-3. **v1.6 Production Hardening Suite**: Production-grade scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
+3. **v1.6 Release Candidate & Verification Suite**: Scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
 
 ---
 
@@ -343,7 +345,7 @@ If you use CoastTideX in your research or engineering projects, please cite:
 ```bibtex
 @software{CoastTideX_2026,
   author = {Wang, Yuhao},
-  title = {CoastTideX: A High-Precision Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System},
+  title = {CoastTideX: A Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System},
   year = {2026},
   version = {v1.6},
   url = {https://github.com/wyhao2333/CoastTideX}

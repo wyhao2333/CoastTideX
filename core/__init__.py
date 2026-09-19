@@ -23,6 +23,7 @@ from .tide_cache import (
     calculate_exposure_from_tide_cache,
     estimate_tide_cache_size, is_cache_complete,
     validate_tide_cache_structure, inspect_tide_cache_metadata,
+    inclusive_to_interval_semantics,
     TideCacheIntegrityError, TideCacheCompatibilityError
 )
 from .batch_raster_engine import (
@@ -61,6 +62,7 @@ __all__ = [
     'is_cache_complete',
     'validate_tide_cache_structure',
     'inspect_tide_cache_metadata',
+    'inclusive_to_interval_semantics',
     'TideCacheIntegrityError',
     'TideCacheCompatibilityError',
     'BatchRasterEngine',

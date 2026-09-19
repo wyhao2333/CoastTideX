@@ -1,7 +1,7 @@
 """
 CoastTideX v1.6 Beta — Round 8 Release Candidate & Merge-Gate Hardening Tests
 验证以下核心特性:
-1. 非 UTC 时区 (Asia/Shanghai, America/New_York) 与 UTC 下 Inundation 与 Exposure GeoTIFF 元数据标签的严密统一与时区溯源;
+1. 非 UTC 时区 (Asia/Shanghai) 与 UTC 下 Inundation 与 Exposure GeoTIFF 元数据标签的严密统一与时区溯源;
 2. 真实 Production Raster Pipeline 中 LeafCellSpatialIndex 与 Brute-Force Candidate Selector 的全产物数值等价回归 (Inundation 2大栅格 + Exposure 7大栅格);
 3. Tide Cache 结构完整性轻量校验函数 validate_tide_cache_structure 的完备防御测试 (维度、变量、单调时轴、步长一致性、矩阵形状、拓扑节点索引越界);
 4. Schema 1.1 遗留兼容边界测试 (拒绝 inclusive != 'left'; 对 inclusive == 'left' 且缺失 terminal sample 规范降级并置位 QC bit 3);
@@ -53,7 +53,7 @@ from core.exposure_engine import (
 
 
 class BruteForceSpatialIndex:
-    """暴力空间候选查询基准器 (Ground-Truth Oracle)"""
+    """暴力空间候选查询基准器 (Brute-force candidate-selection reference)"""
     def __init__(self, leaf_cells, bounds=None):
         self.leaf_cells = list(leaf_cells)
         self.bounds = bounds
@@ -418,10 +418,15 @@ class TestTideCacheStructuralIntegrity(unittest.TestCase):
 
             ds.setncattr("CACHE_COMPLETE", "true")
             ds.setncattr("CACHE_SCHEMA_VERSION", "1.2")
+            ds.setncattr("HAS_TERMINAL_TIDE", "true")
             ds.setncattr("CONTROL_NODE_COUNT", n_node)
             ds.setncattr("TIME_SAMPLES", n_time)
             ds.setncattr("LEAF_CELL_COUNT", n_cell)
             ds.setncattr("TIME_STEP_SECONDS", 1800.0)
+            ds.setncattr("TIME_INCLUSIVE", "left")
+            ds.setncattr("TIME_INTERVAL_SEMANTICS", "[start, end)")
+            ds.setncattr("TIME_START_UTC_EPOCH", 1704067200.0)
+            ds.setncattr("TIME_END_UTC_EPOCH", 1704067200.0 + n_time * 1800.0)
 
             vt = ds.createVariable("time", "f8", ("time",))
             vt[:] = np.arange(1704067200, 1704067200 + n_time * 1800, 1800, dtype=np.float64)

@@ -270,7 +270,7 @@ class TestManualDialogContent(unittest.TestCase):
         self.assertIn("五、 时间采样语义与 Schema 1.2 终端采样", MANUAL_HTML)
         self.assertIn("六、 四大高程基准体系与转换原理", MANUAL_HTML)
         self.assertIn("七、 自适应控制网格与空间拓扑连通防护", MANUAL_HTML)
-        self.assertIn("八、 持久化 Tide Cache 架构与防篡改签名", MANUAL_HTML)
+        self.assertIn("八、 持久化 Tide Cache 架构与元数据兼容性签名", MANUAL_HTML)
         self.assertIn("九、 批量处理 6 大运行模式", MANUAL_HTML)
         self.assertIn("十、 现有输出处理策略与断点恢复", MANUAL_HTML)
         self.assertIn("十一、 质量控制掩膜位定义", MANUAL_HTML)

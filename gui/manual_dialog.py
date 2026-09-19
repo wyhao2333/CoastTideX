@@ -103,7 +103,7 @@ MANUAL_HTML = """
         <td>Float32</td>
         <td>hours</td>
         <td>-9999.0</td>
-        <td><b>最长单次连续潜在露出时长</b>：在请求时间窗口内识别出的最长单次无间断露出事件持续物理时长（小时）。反映极端耐干条件。</td>
+        <td><b>最长单次连续潜在露出时长</b>：在请求时间窗口内识别出的最长单次连续潜在露出窗口物理时长（小时）；描述较长连续潜在天文潮露出窗口，其生态意义需要独立物种、沉积物或气象证据。</td>
     </tr>
     <tr>
         <td><code>*_exposure_mean_event_h.tif</code></td>
@@ -117,7 +117,7 @@ MANUAL_HTML = """
         <td>UInt32</td>
         <td>次 (count)</td>
         <td>4294967295</td>
-        <td><b>连续潜在露出事件段数量</b>：在请求时间窗口内完整识别到的独立连续露出事件段离散整数计数值（UInt32，单位：次，注：属于离散频次指标，非时间长度或连续变量）。NoData 采用 UInt32 最大值，与合法 0 次事件彻底解耦。</td>
+        <td><b>连续潜在露出事件段数量</b>：在请求时间窗口内识别到或与窗口相交的连续潜在露出事件段离散整数计数值（UInt32，单位：次，注：属于离散频次指标，非时间长度或连续变量）。NoData 采用 UInt32 最大值，与合法 0 次事件彻底解耦。</td>
     </tr>
     <tr>
         <td><code>*_exposure_valid_time_fraction.tif</code></td>
@@ -152,7 +152,7 @@ MANUAL_HTML = """
 <h2>五、 时间采样语义与 Schema 1.2 终端采样 (Temporal Semantics & Schema 1.2)</h2>
 <ul>
     <li><b>统一半开区间规范 <code>[start, end)</code></b>：
-        CoastTideX 全系统统一采用半开区间（<code>inclusive="left"</code>）生成等间隔时网。在整年模拟中，例如 <code>[2024-01-01 00:00:00, 2025-01-01 00:00:00)</code>，30min 步长精确生成 <b>17,568</b> 个等权重样本点（闰年 366 天），完全消除跨年点重复统计的偏倚。
+        CoastTideX 栅格与缓存流水线统一采用半开区间（<code>inclusive="left"</code>）生成等间隔时网。在整年模拟中，例如 <code>[2024-01-01 00:00:00, 2025-01-01 00:00:00)</code>，30min 步长精确生成 <b>17,568</b> 个等权重样本点（闰年 366 天），完全消除跨年点重复统计的偏倚。
     </li>
     <li><b>Schema 1.2 终端采样保真</b>：
         为了在半开区间下正确解算最后一个时间区间 <code>[t_{N-1}, t_end)</code> 的连续跨界，Tide Cache 升级至 <b>Schema 1.2</b>，显式记录终端时刻 <code>t_end</code> 对应的控制节点潮位 <code>tide_msl_terminal_m</code>。
@@ -189,16 +189,16 @@ MANUAL_HTML = """
     </li>
 </ul>
 
-<h2>八、 持久化 Tide Cache 架构与防篡改签名 (Persistent Tide Cache & Signature)</h2>
+<h2>八、 持久化 Tide Cache 架构与元数据兼容性签名 (Persistent Tide Cache & Signature)</h2>
 <ul>
     <li><b>严格二阶段执行 (Two-Stage Execution)</b>：
         <ul>
             <li><b>Stage 1 (Tide Cache)</b>：在自适应控制网格上解算 FES 潮位时序，原子写入 NetCDF4 格式的 <code>*_tide.nc</code> 文件；</li>
-            <li><b>Stage 2 / Stage 2b (Inundation / Exposure)</b>：流式逐分块读取 DEM 与 Tide Cache 解算空间产品。<b>硬性保证零 FES 调用</b>，速度提升显著。</li>
+            <li><b>Stage 2 / Stage 2b (Inundation / Exposure)</b>：流式逐分块读取 DEM 与 Tide Cache 解算空间产品。<b>实现零 FES 调用</b>，显著提升计算效率。</li>
         </ul>
     </li>
-    <li><b>防篡改参数签名 (CACHE_SIGNATURE)</b>：
-        Tide Cache 内部包含基于输入 DEM 尺寸、坐标系、时间范围、采样率、分潮配置与自适应网格参数计算的 SHA256 签名。解算或续跑时深度比对签名，杜绝参数不匹配导致的错误复用。
+    <li><b>元数据兼容性与完整性签名 (CACHE_SIGNATURE)</b>：
+        Tide Cache 内部包含基于输入 DEM 尺寸、坐标系、时间范围、采样率、分潮配置与自适应网格参数计算的 SHA256 签名（注：属于元数据兼容性与完整性校验签名，非全量潮位数据的加密防伪签名）。解算或续跑时深度比对签名，杜绝参数不匹配导致的错误复用。
     </li>
 </ul>
 
@@ -240,18 +240,18 @@ MANUAL_HTML = """
         <td><b>All Products</b></td>
         <td><code>all</code></td>
         <td>全要素综合产物包：Tide Cache + 淹没频率 + 潜在露出 7 大空间产物。</td>
-        <td>高标准科研与工程交付、全要素建库。</td>
+        <td>全要素建库与综合分析。</td>
     </tr>
 </table>
 
 <h2>十、 现有输出处理策略与断点恢复 (ExistingOutputPolicy & Resume Hardening)</h2>
-<p>系统提供三种确定的现有输出处理策略，彻底消除不一致状态：</p>
+<p>系统提供三种确定的现有输出处理策略：</p>
 <ul>
     <li><code>resume</code> (断点恢复，默认推荐)：
         扫描目标目录已存在的产物。对 Tide Cache 进行完整性与参数签名兼容性校验；对已有 GeoTIFF 产物严格核验尺寸、CRS、仿射变换、数据类型、NoData 与缓存签名。仅当所需产物全部无损存在时才标记 <code>SKIPPED_EXISTING</code> 跳过，否则安全接续计算。
     </li>
     <li><code>error_if_exists</code> (冲突报错，严格拦截)：
-        在任务执行前进行统一预检防线拦截。若当前模式所需的任何目标文件（包括 <code>*_tide.nc</code>、淹没频率或 7 大露出产物中的任意一个）已存在，立即报错并拒绝覆写，确保历史成果不受意外破坏（与 <code>resume</code> 严格区分：<code>error_if_exists</code> 绝不跳过，而是立即抛出 <code>ExistingOutputError</code> 拒绝执行）。
+        在任务执行前进行统一预检拦截。对新建任务模式（<code>tide</code>, <code>tide-inundation</code>, <code>tide-exposure</code>, <code>all</code>），Tide Cache 与下游各产物均属预期产物，若任一文件已存在即视为冲突；对从缓存解算模式（<code>inundation-from-cache</code>, <code>exposure-from-cache</code>），已有 Tide Cache 属于只读输入源而非冲突，仅当下游目标空间栅格已存在时判定为冲突。发现冲突立即抛出 <code>ExistingOutputError</code> 拒绝覆写并保护历史成果。
     </li>
     <li><code>overwrite</code> (强制覆盖)：
         允许重新计算，所有空间栅格产物通过 <code>*.tmp.tif</code> 临时写入并执行单文件原子替换覆盖。
@@ -264,7 +264,7 @@ MANUAL_HTML = """
     <tr><th>位 (Bit)</th><th>十进制值</th><th>常量标识</th><th>科学含义与处理说明</th></tr>
     <tr><td>-</td><td>0</td><td><code>QC_EXP_VALID</code></td><td>未触发当前定义的 Exposure 警告或近似位（不代表对真实自然物理环境的绝对误差保证）。</td></tr>
     <tr><td>bit 0</td><td>1</td><td><code>QC_EXP_DEGRADED_CELL</code></td><td>四叉树控制单元部分角点无效，已自动执行可用角点重归一化。</td></tr>
-    <tr><td>bit 1</td><td>2</td><td><code>QC_EXP_INSUFFICIENT_NODES</code></td><td>局部缺少足够同连通域有效控制节点，可能产生外推误差。</td></tr>
+    <tr><td>bit 1</td><td>2</td><td><code>QC_EXP_INSUFFICIENT_NODES</code></td><td>局部缺少足够同连通域有效控制节点（缺少有效插值支撑，主产品保持 NoData）。</td></tr>
     <tr><td>bit 2</td><td>4</td><td><code>QC_EXP_DATUM_APPROX</code></td><td>垂直基准偏移采用了闭合多边形近似判别。</td></tr>
     <tr><td>bit 3</td><td>8</td><td><code>QC_EXP_TERMINAL_UNAVAILABLE</code></td><td>终端潮位不可用时，最后一个请求区间不计入有效积分时长并相应扣减有效时间覆盖率。</td></tr>
     <tr><td>bit 4</td><td>16</td><td><code>QC_EXP_PARTIAL_VALID_TIME</code></td><td>时间序列存在无效数据间隙，有效时间覆盖率 &lt; 100%。</td></tr>

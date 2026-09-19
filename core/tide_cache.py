@@ -342,11 +342,33 @@ def build_expected_cache_spec(
     }
 
 
+def inclusive_to_interval_semantics(inclusive: str) -> str:
+    """
+    将时间区间包含性策略映射为权威数学区间语义字符串。
+    Canonical mapping:
+      'left'    -> '[start, end)'
+      'right'   -> '(start, end]'
+      'both'    -> '[start, end]'
+      'neither' -> '(start, end)'
+    若传入不支持的参数值，显式抛出 ValueError。
+    """
+    inc = str(inclusive).strip().lower()
+    if inc == "left":
+        return "[start, end)"
+    elif inc == "right":
+        return "(start, end]"
+    elif inc == "both":
+        return "[start, end]"
+    elif inc == "neither":
+        return "(start, end)"
+    raise ValueError(f"不支持的时间区间包含性参数: '{inclusive}' (有效选项: 'left', 'right', 'both', 'neither')")
+
+
 def validate_tide_cache_structure(cache_path: str) -> None:
     """
     对已有的 Tide Cache NetCDF 文件执行轻量级物理与拓扑结构完整性核查。
     零加载全量 tide_msl_m 矩阵入内存。
-    若存在损坏、维度缺失、时间轴非单调、步长不合理、变量形状不匹配或拓扑引用越界，
+    若存在损坏、维度缺失、时间轴非单调、步长不合理、变量缺失、形状不匹配或拓扑引用越界，
     显式抛出 TideCacheIntegrityError。
     """
     if not os.path.exists(cache_path):
@@ -354,8 +376,8 @@ def validate_tide_cache_structure(cache_path: str) -> None:
 
     try:
         with netCDF4.Dataset(cache_path, mode="r") as ds:
-            # 1. 必需维度检查
-            required_dims = ["time", "node", "cell"]
+            # 1. 必需维度检查 (Canonical required dimensions)
+            required_dims = ["time", "node", "cell", "bounds_dim", "corners_dim"]
             for dim_name in required_dims:
                 if dim_name not in ds.dimensions:
                     raise TideCacheIntegrityError(f"Tide Cache 缺失必需维度: '{dim_name}'")
@@ -363,6 +385,8 @@ def validate_tide_cache_structure(cache_path: str) -> None:
             n_time = len(ds.dimensions["time"])
             n_node = len(ds.dimensions["node"])
             n_cell = len(ds.dimensions["cell"])
+            bounds_dim = len(ds.dimensions["bounds_dim"])
+            corners_dim = len(ds.dimensions["corners_dim"])
 
             if n_time <= 0:
                 raise TideCacheIntegrityError(f"Tide Cache 时间维度长度必须大于0 (当前: {n_time})")
@@ -370,14 +394,62 @@ def validate_tide_cache_structure(cache_path: str) -> None:
                 raise TideCacheIntegrityError(f"Tide Cache 节点维度长度必须大于0 (当前: {n_node})")
             if n_cell <= 0:
                 raise TideCacheIntegrityError(f"Tide Cache 单元维度长度必须大于0 (当前: {n_cell})")
+            if bounds_dim != 4:
+                raise TideCacheIntegrityError(f"Tide Cache 'bounds_dim' 维度必须等于4 (当前: {bounds_dim})")
+            if corners_dim != 4:
+                raise TideCacheIntegrityError(f"Tide Cache 'corners_dim' 维度必须等于4 (当前: {corners_dim})")
 
-            # 2. 必需变量检查
-            required_vars = ["time", "node_lon", "node_lat", "cell_node_indices", "tide_msl_m"]
-            for var_name in required_vars:
+            # 2. 必需变量检查与形状核验 (Canonical required variables & shapes)
+            node_vars = [
+                "node_x", "node_y", "node_lon", "node_lat",
+                "node_valid", "static_offset_m", "component_id", "node_qc"
+            ]
+            for var_name in node_vars:
                 if var_name not in ds.variables:
-                    raise TideCacheIntegrityError(f"Tide Cache 缺失必需变量: '{var_name}'")
+                    raise TideCacheIntegrityError(f"Tide Cache 缺失必需控制节点变量: '{var_name}'")
+                v = ds.variables[var_name]
+                if v.shape != (n_node,):
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 控制节点变量 '{var_name}' 形状不匹配: 期望 {(n_node,)}，实际为 {v.shape}"
+                    )
+
+            cell_1d_vars = ["cell_level", "cell_qc", "cell_max_error"]
+            for var_name in cell_1d_vars:
+                if var_name not in ds.variables:
+                    raise TideCacheIntegrityError(f"Tide Cache 缺失必需单元变量: '{var_name}'")
+                v = ds.variables[var_name]
+                if v.shape != (n_cell,):
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 单元变量 '{var_name}' 形状不匹配: 期望 {(n_cell,)}，实际为 {v.shape}"
+                    )
+
+            if "cell_bounds" not in ds.variables:
+                raise TideCacheIntegrityError("Tide Cache 缺失必需单元边界变量: 'cell_bounds'")
+            v_bounds = ds.variables["cell_bounds"]
+            if v_bounds.shape != (n_cell, 4):
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 'cell_bounds' 形状不匹配: 期望 ({n_cell}, 4)，实际为 {v_bounds.shape}"
+                )
+
+            if "cell_node_indices" not in ds.variables:
+                raise TideCacheIntegrityError("Tide Cache 缺失必需单元拓扑变量: 'cell_node_indices'")
+            v_cell_nodes = ds.variables["cell_node_indices"]
+            if v_cell_nodes.shape != (n_cell, 4):
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 'cell_node_indices' 形状不匹配: 期望 ({n_cell}, 4)，实际为 {v_cell_nodes.shape}"
+                )
+
+            if "time" not in ds.variables:
+                raise TideCacheIntegrityError("Tide Cache 缺失必需时间轴变量: 'time'")
+            v_time = ds.variables["time"]
+            if v_time.shape != (n_time,):
+                raise TideCacheIntegrityError(
+                    f"Tide Cache 'time' 变量形状不匹配: 期望 {(n_time,)}，实际为 {v_time.shape}"
+                )
 
             # 3. 检查 tide_msl_m 变量形状 (轻量元数据核验，不加载矩阵数据)
+            if "tide_msl_m" not in ds.variables:
+                raise TideCacheIntegrityError("Tide Cache 缺失必需潮位矩阵变量: 'tide_msl_m'")
             tide_var = ds.variables["tide_msl_m"]
             expected_tide_shape = (n_node, n_time)
             if tide_var.shape != expected_tide_shape:
@@ -385,23 +457,47 @@ def validate_tide_cache_structure(cache_path: str) -> None:
                     f"Tide Cache 'tide_msl_m' 形状不匹配: 期望 {expected_tide_shape}，实际为 {tide_var.shape}"
                 )
 
-            # 4. 检查 terminal tide 形状 (若存在)
-            if "tide_msl_terminal_m" in ds.variables:
-                term_var = ds.variables["tide_msl_terminal_m"]
-                if term_var.shape not in ((n_node,), (1, n_node)):
+            # 4. 检查 terminal tide 形状与 HAS_TERMINAL_TIDE 一致性
+            has_term_var = "tide_msl_terminal_m" in ds.variables
+            has_term_attr = getattr(ds, "HAS_TERMINAL_TIDE", None)
+            if has_term_attr is not None:
+                has_term_flag = str(has_term_attr).lower() == "true"
+                if has_term_flag and not has_term_var:
                     raise TideCacheIntegrityError(
-                        f"Tide Cache 'tide_msl_terminal_m' 形状不匹配: 期望 {(n_node,)} 或 {(1, n_node)}，实际为 {term_var.shape}"
+                        "Tide Cache 属性 HAS_TERMINAL_TIDE=true 但缺失变量 'tide_msl_terminal_m'"
+                    )
+                if not has_term_flag and has_term_var:
+                    raise TideCacheIntegrityError(
+                        "Tide Cache 属性 HAS_TERMINAL_TIDE=false 但存在变量 'tide_msl_terminal_m'"
                     )
 
-            # 5. 检查 node_lon / node_lat 形状
-            lon_var = ds.variables["node_lon"]
-            lat_var = ds.variables["node_lat"]
-            if lon_var.shape != (n_node,) or lat_var.shape != (n_node,):
-                raise TideCacheIntegrityError(
-                    f"Tide Cache 节点坐标形状不匹配: node_lon {lon_var.shape}, node_lat {lat_var.shape}, 期望 {(n_node,)}"
-                )
+            schema_ver_attr = getattr(ds, "CACHE_SCHEMA_VERSION", None)
+            if schema_ver_attr is not None and str(schema_ver_attr).strip() == "1.2":
+                if has_term_attr is not None and str(has_term_attr).lower() == "true" and not has_term_var:
+                    raise TideCacheIntegrityError(
+                        "Tide Cache Schema 1.2 声明 HAS_TERMINAL_TIDE=true 但未提供 'tide_msl_terminal_m'"
+                    )
 
-            # 6. 读取一维时间轴进行单调性与步长合理性校验
+            if has_term_var:
+                term_var = ds.variables["tide_msl_terminal_m"]
+                if term_var.shape != (n_node,):
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 'tide_msl_terminal_m' 形状不匹配: 期望 (n_node,) 即 {(n_node,)}，实际为 {term_var.shape}"
+                    )
+
+            # 5. TIME_SAMPLES 元数据与时间轴闭环检查
+            time_samples_attr = getattr(ds, "TIME_SAMPLES", None)
+            if time_samples_attr is not None:
+                try:
+                    exp_samples = int(time_samples_attr)
+                except (ValueError, TypeError):
+                    raise TideCacheIntegrityError(f"Tide Cache 元数据 TIME_SAMPLES 非法: {time_samples_attr}")
+                if exp_samples != n_time:
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache 元数据 TIME_SAMPLES={exp_samples} 与时间轴维度长度 {n_time} 不一致"
+                    )
+
+            # 6. 读取一维时间轴进行单调性、步长与起止时刻校验
             time_epochs = ds.variables["time"][:]
             if not np.all(np.isfinite(time_epochs)):
                 raise TideCacheIntegrityError("Tide Cache 时间轴包含非有限值 (NaN 或 Inf)")
@@ -412,25 +508,79 @@ def validate_tide_cache_structure(cache_path: str) -> None:
                     raise TideCacheIntegrityError(
                         "Tide Cache 时间轴不是严格单调递增 (存在非正时间步长)"
                     )
-                # 检查时间步长与元数据 TIME_STEP_SECONDS 一致性 (若元数据中有)
+                # 时间步长一致性校验 (容差 1ms)
+                exp_dt = None
                 step_sec_attr = getattr(ds, "TIME_STEP_SECONDS", None)
                 if step_sec_attr is not None:
                     try:
                         exp_dt = float(step_sec_attr)
                     except (ValueError, TypeError):
-                        exp_dt = 0.0
-                    if exp_dt > 0:
-                        if not np.allclose(dt_array, exp_dt, atol=1.0):
-                            raise TideCacheIntegrityError(
-                                f"Tide Cache 时间轴采样步长与元数据 TIME_STEP_SECONDS={exp_dt} 不一致"
-                            )
+                        pass
+                if exp_dt is None or exp_dt <= 0:
+                    step_str_attr = getattr(ds, "TIME_STEP", None)
+                    if step_str_attr is not None:
+                        try:
+                            exp_dt = float(pd.to_timedelta(str(step_str_attr)).total_seconds())
+                        except Exception:
+                            pass
 
-            # 7. 读取 cell_node_indices 检查拓扑索引越界与形状
+                if exp_dt is not None and exp_dt > 0:
+                    if not np.allclose(dt_array, exp_dt, atol=1e-3):
+                        raise TideCacheIntegrityError(
+                            f"Tide Cache 时间轴采样步长与元数据指定步长 ({exp_dt}s) 偏差超过 1ms"
+                        )
+
+            # 7. 起止 UTC 时间戳与 time array 对齐校验
+            start_utc_epoch_attr = getattr(ds, "TIME_START_UTC_EPOCH", None)
+            if start_utc_epoch_attr is not None:
+                start_epoch = None
+                try:
+                    start_epoch = float(start_utc_epoch_attr)
+                except (ValueError, TypeError):
+                    pass
+                if start_epoch is not None:
+                    if abs(float(time_epochs[0]) - start_epoch) > 1e-3:
+                        raise TideCacheIntegrityError(
+                            f"Tide Cache 时间轴起始戳 ({float(time_epochs[0])}) 与 TIME_START_UTC_EPOCH ({start_epoch}) 偏差超过 1ms"
+                        )
+
+            inclusive_attr = getattr(ds, "TIME_INCLUSIVE", "left")
+            inc_clean = str(inclusive_attr).strip().lower()
+
+            if inc_clean == "left":
+                end_utc_epoch_attr = getattr(ds, "TIME_END_UTC_EPOCH", None)
+                step_sec_attr = getattr(ds, "TIME_STEP_SECONDS", None)
+                if end_utc_epoch_attr is not None and step_sec_attr is not None:
+                    end_epoch = None
+                    step_s = None
+                    try:
+                        end_epoch = float(end_utc_epoch_attr)
+                        step_s = float(step_sec_attr)
+                    except (ValueError, TypeError):
+                        pass
+                    if end_epoch is not None and step_s is not None:
+                        diff_canonical = abs((float(time_epochs[-1]) + step_s) - end_epoch)
+                        if diff_canonical > 1e-3:
+                            schema_ver = str(getattr(ds, "CACHE_SCHEMA_VERSION", "1.2")).strip()
+                            diff_legacy = abs(float(time_epochs[-1]) - end_epoch)
+                            if schema_ver == "1.1" and diff_legacy <= 1e-3:
+                                pass
+                            else:
+                                raise TideCacheIntegrityError(
+                                    f"Tide Cache 半开区间末端对齐校验失败: time[-1] + step ({float(time_epochs[-1]) + step_s}) 与 TIME_END_UTC_EPOCH ({end_epoch}) 偏差超过 1ms"
+                                )
+
+            # 8. TIME_INTERVAL_SEMANTICS 自相矛盾校验
+            semantics_attr = getattr(ds, "TIME_INTERVAL_SEMANTICS", None)
+            if semantics_attr is not None and inclusive_attr is not None:
+                expected_semantics = inclusive_to_interval_semantics(inc_clean)
+                if str(semantics_attr).strip() != expected_semantics:
+                    raise TideCacheIntegrityError(
+                        f"Tide Cache TIME_INTERVAL_SEMANTICS='{semantics_attr}' 与 TIME_INCLUSIVE='{inclusive_attr}' 语义矛盾 (期望 '{expected_semantics}')"
+                    )
+
+            # 9. cell_node_indices 检查拓扑索引类型与越界
             cell_nodes = ds.variables["cell_node_indices"][:]
-            if cell_nodes.ndim != 2 or cell_nodes.shape[0] != n_cell or cell_nodes.shape[1] not in (3, 4):
-                raise TideCacheIntegrityError(
-                    f"Tide Cache 'cell_node_indices' 形状非法: 期望 ({n_cell}, 4) 或 ({n_cell}, 3)，实际为 {cell_nodes.shape}"
-                )
             if not np.issubdtype(cell_nodes.dtype, np.integer):
                 raise TideCacheIntegrityError("Tide Cache 'cell_node_indices' 必须为整数类型")
 
@@ -831,14 +981,31 @@ def write_tide_cache(
         except Exception:
             pass
 
+    source_tz_str = str(metadata.get("source_tz", "UTC"))
+    inc_mode = str(metadata.get("inclusive", "left")).strip().lower()
+    start_str = str(metadata.get("start_time", time_index[0].isoformat() if len(time_index) > 0 else ""))
+    if "end_time" in metadata:
+        end_str = str(metadata["end_time"])
+    else:
+        if inc_mode == "left" and len(time_index) > 0:
+            dt_step = (time_index[1] - time_index[0]) if len(time_index) > 1 else pd.Timedelta(seconds=1800)
+            end_str = (time_index[-1] + dt_step).isoformat()
+        else:
+            end_str = time_index[-1].isoformat() if len(time_index) > 0 else ""
+
+    start_utc_epoch = float(metadata.get("start_time_utc_epoch", parse_cache_time_to_utc(start_str, default_tz=source_tz_str)))
+    end_utc_epoch = float(metadata.get("end_time_utc_epoch", parse_cache_time_to_utc(end_str, default_tz=source_tz_str)))
+    start_utc_iso = str(metadata.get("start_time_utc", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()))
+    end_utc_iso = str(metadata.get("end_time_utc", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()))
+
     # 计算兼容性签名 (Signature)
     sig_hex, sig_payload = generate_tide_cache_signature(
         info=info,
-        start_time=str(metadata.get("start_time", time_index[0].isoformat())),
-        end_time=str(metadata.get("end_time", time_index[-1].isoformat())),
+        start_time=start_str,
+        end_time=end_str,
         freq=str(metadata.get("freq", "30min")),
-        source_tz=str(metadata.get("source_tz", "UTC")),
-        inclusive=str(metadata.get("inclusive", "left")),
+        source_tz=source_tz_str,
+        inclusive=inc_mode,
         time_samples=num_times,
         dem_datum=str(metadata.get("dem_datum", "egm2008")),
         constituents=str(metadata.get("constituents", "all")),
@@ -881,14 +1048,6 @@ def write_tide_cache(
             ds.setncattr("SOURCE_NODATA", float(info.nodata) if info.nodata is not None and np.isfinite(info.nodata) else np.nan)
             ds.setncattr("SOURCE_FILE_SIZE_BYTES", int(fsize_val) if fsize_val is not None else 0)
             ds.setncattr("SOURCE_MTIME_NS", int(mtime_val) if mtime_val is not None else 0)
-            source_tz_str = str(metadata.get("source_tz", "UTC"))
-            start_str = str(metadata.get("start_time", time_index[0].isoformat()))
-            end_str = str(metadata.get("end_time", time_index[-1].isoformat()))
-
-            start_utc_epoch = float(metadata.get("start_time_utc_epoch", parse_cache_time_to_utc(start_str, default_tz=source_tz_str)))
-            end_utc_epoch = float(metadata.get("end_time_utc_epoch", parse_cache_time_to_utc(end_str, default_tz=source_tz_str)))
-            start_utc_iso = str(metadata.get("start_time_utc", pd.Timestamp(start_utc_epoch, unit="s", tz="UTC").isoformat()))
-            end_utc_iso = str(metadata.get("end_time_utc", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()))
 
             ds.setncattr("TIME_START", start_str)
             ds.setncattr("TIME_END", end_str)
@@ -901,8 +1060,9 @@ def write_tide_cache(
             ds.setncattr("TIME_STEP", str(metadata.get("freq", "30min")))
             ds.setncattr("TIME_STEP_SECONDS", float(time_epochs[1] - time_epochs[0]) if len(time_epochs) > 1 else 1800.0)
             ds.setncattr("TIMEZONE", source_tz_str)
-            ds.setncattr("TIME_INCLUSIVE", str(metadata.get("inclusive", "left")))
-            ds.setncattr("TIME_INTERVAL_SEMANTICS", "[start, end)")
+            inc_str = str(metadata.get("inclusive", "left"))
+            ds.setncattr("TIME_INCLUSIVE", inc_str)
+            ds.setncattr("TIME_INTERVAL_SEMANTICS", inclusive_to_interval_semantics(inc_str))
             ds.setncattr("TIME_SAMPLES", int(num_times))
             ds.setncattr("FES_MODEL", "FES2022b")
             ds.setncattr("FES_SOURCE_TYPE", "native_lgp2")
@@ -1153,7 +1313,7 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
 
         terminal_tide = None
         if "tide_msl_terminal_m" in ds.variables:
-            terminal_tide = np.array(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32)
+            terminal_tide = np.asarray(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32).reshape(-1)
 
         return {
             "metadata": attrs,
@@ -1170,7 +1330,8 @@ def read_tide_cache(cache_path: str, node_chunk_size: int = 256, chunk_node_size
 def read_tide_cache_structure(cache_path: str) -> TideCacheStructure:
     """
     轻量级只读解析 Tide Cache 控制网格拓扑结构与元数据 (零时序数组内存加载)。
-    严禁读取 tide_msl_m 巨幅矩阵，峰值内存仅取决于节点与网格单元数量 (< 5MB)。
+    严禁读取 tide_msl_m 巨幅矩阵，常驻内存仅取决于控制节点与叶单元拓扑结构大小，不加载大型节点-时间时序矩阵。
+    Does not load the node×time tide matrix; resident memory scales with control-node and leaf-cell structure size.
     """
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
@@ -1262,7 +1423,7 @@ def read_tide_cache_structure(cache_path: str) -> TideCacheStructure:
 
         terminal_tide = None
         if "tide_msl_terminal_m" in ds.variables:
-            terminal_tide = np.array(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32)
+            terminal_tide = np.asarray(ds.variables["tide_msl_terminal_m"][:], dtype=np.float32).reshape(-1)
 
         return TideCacheStructure(
             metadata=attrs,
