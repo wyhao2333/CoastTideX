@@ -1,0 +1,27 @@
+{
+  "0.5km": {
+    "status": "INSUFFICIENT EVIDENCE",
+    "holdout_count": 0,
+    "support_count": 4232
+  },
+  "1.0km": {
+    "status": "INSUFFICIENT EVIDENCE",
+    "holdout_count": 0,
+    "support_count": 4232
+  },
+  "2.0km": {
+    "status": "INSUFFICIENT EVIDENCE",
+    "holdout_count": 0,
+    "support_count": 4232
+  },
+  "4.0km": {
+    "status": "INSUFFICIENT EVIDENCE",
+    "holdout_count": 0,
+    "support_count": 4232
+  },
+  "8.0km": {
+    "status": "INSUFFICIENT EVIDENCE",
+    "holdout_count": 0,
+    "support_count": 4232
+  }
+}

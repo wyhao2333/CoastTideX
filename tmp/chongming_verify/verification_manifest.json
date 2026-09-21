@@ -1,0 +1,124 @@
+{
+  "verification_round": "CoastTideX Chongming Datum & Performance Verification Round",
+  "timestamp": "2026-09-21T16:46:57Z",
+  "git_branch": "test/v1.6-chongming-verification-final",
+  "diagnostic_script": {
+    "path": "I:\\Test_tide_model\\scripts\\diagnose_chongming_verification.py",
+    "sha256": "c0975855771fe3dac7ae0d9ceb694f46b945d4b0f6fcf24db5aaa35e3326e898"
+  },
+  "environment": {
+    "python": "3.11.5 (tags/v3.11.5:cce6ba9, Aug 24 2023, 14:38:34) [MSC v.1936 64 bit (AMD64)]",
+    "numpy": "2.4.6",
+    "scipy": "1.17.1",
+    "pandas": "3.0.5",
+    "rasterio": "1.4.4",
+    "xarray": "2026.7.0",
+    "psutil": "7.2.2"
+  },
+  "dem_metadata": {
+    "path": "F:/1-Research/China_tidal-flat_terrain(ICESat2)/3-Result/ChongMing_NoClipped(2021-2024)/ChongMing/2024/ChongMing_2024_Elevation.tif",
+    "width": 13599,
+    "height": 11133,
+    "crs": "EPSG:4326",
+    "bounds": [
+      120.99992466740512,
+      30.999962139680566,
+      122.22154362227926,
+      32.00005654549083
+    ],
+    "nodata": -9999.0,
+    "valid_pixels": 6822308,
+    "total_pixels": 151397667
+  },
+  "generated_files": {
+    "experiment_plan.json": {
+      "sha256": "b9d3a73e05747045a17e40225cf4463494806c2ac305b09259cf485358a1ebef",
+      "size_bytes": 2031,
+      "mtime": 1789994430.0
+    },
+    "control_nodes_verified.csv": {
+      "sha256": "3ee8cb1424244472338ac1657863ce51eaea0b1d265ce70f31d4fbf931ac216c",
+      "size_bytes": 1191895,
+      "mtime": 1790009170.0
+    },
+    "leaf_cells_verified.csv": {
+      "sha256": "f873e34764d390a26a4eda11d2976184e6defd91d5e4a4299f794253bebf292a",
+      "size_bytes": 212169,
+      "mtime": 1790009170.0
+    },
+    "mdt_geometry_classes.csv": {
+      "sha256": "e1786e3806c6dde1ceeebd4ea3cc9c3bc72b2b4ec81aee0760daf470ce87a621",
+      "size_bytes": 43292,
+      "mtime": 1790009170.0
+    },
+    "local_interpolation_validation.json": {
+      "sha256": "cb78914c45c8d208eb294a4741a17f0ebba7462483d76d833acc8543b5e7ab6d",
+      "size_bytes": 229,
+      "mtime": 1790009170.0
+    },
+    "edge_holdout_validation.json": {
+      "sha256": "cc8aed2fbd09e947e2227c5a2e5f079f91256310fa02ae12262dd3370c30ae1f",
+      "size_bytes": 563,
+      "mtime": 1790009172.0
+    },
+    "spatial_block_validation.json": {
+      "sha256": "be2b96cf013ed208a546c6c4a557c533fee29639ce2fe416d15b07f1a5a9bef1",
+      "size_bytes": 708,
+      "mtime": 1790009172.0
+    },
+    "qc68_pixel_provenance.json": {
+      "sha256": "5af7fcc27ee4c090ae26f616e0318fc31367baf447ce73c430123897fc1b983a",
+      "size_bytes": 528,
+      "mtime": 1790009172.0
+    },
+    "performance_current.json": {
+      "sha256": "57a8f9471790a9823f3fb240889d9e5a17980d85e6273da230a8765f6679c678",
+      "size_bytes": 597,
+      "mtime": 1790009172.0
+    },
+    "performance_parent_bbox.json": {
+      "sha256": "6b7e9769bafe13223fbf5e701f1a9be07715be380db21536a3cc462169f25933",
+      "size_bytes": 941,
+      "mtime": 1790009172.0
+    },
+    "time_resolution_full_year.json": {
+      "sha256": "fed9e0e0b529e8ee84ef80dafe91b9b64e1c9b0aca60faf07056cc958188cd44",
+      "size_bytes": 1049,
+      "mtime": 1790009218.0
+    },
+    "constituents_full_year.json": {
+      "sha256": "e46bd4c18cd8ccf2f88d52b57c1346d2a9109b302c609998da2cc14b06034324",
+      "size_bytes": 626,
+      "mtime": 1790009218.0
+    },
+    "claim_verification_table.csv": {
+      "sha256": "f042042e51f324ee25febba5465ee1295333ec818e0f3678bc75150f81b98c9e",
+      "size_bytes": 1668,
+      "mtime": 1790009218.0
+    }
+  },
+  "summary_metrics": {
+    "total_control_nodes": 5383,
+    "leaf_cells_count": 2090,
+    "class_counts": {
+      "A_FES_INVALID": 475,
+      "B_FES_VALID_MDT_INVALID": 676,
+      "C_FES_VALID_MDT_VALID_DELTAN_INVALID": 0,
+      "D_FES_VALID_DATUM_VALID": 4232,
+      "E_OTHER_DATUM_FAILURE": 0
+    },
+    "mdt_geom_counts": {
+      "TYPE_4": 0,
+      "TYPE_3_INSIDE": 243,
+      "TYPE_3_OUTSIDE": 84,
+      "TYPE_2_ON_SEGMENT": 0,
+      "TYPE_2_OUTSIDE": 252,
+      "TYPE_1": 78,
+      "TYPE_0": 19
+    },
+    "barycentric_truth_mae": 0.00015319346524723953,
+    "wall_time_current_sec": 210.5,
+    "wall_time_parent_bbox_sec": 31.2,
+    "speedup_ratio": 6.746794871794872
+  }
+}

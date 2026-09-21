@@ -1,0 +1,12 @@
+claim,old_value,new_verified_value,status,evidence_file,notes
+468 B nodes,468 (27.32%),676,VERIFIED,control_nodes_verified.csv,FES valid and MDT invalid nodes in western Chongming estuary
+121.57E all B west,All B nodes west of 121.57E,Max B lon = 121.9350E,VERIFIED,control_nodes_verified.csv,"Westernmost valid datum anchor is at 121.5714E, not a true vertical MDT cutoff"
+95.94% bilinear induced,95.94% (449/468),657/676 have 1-3 finite corners,PARTIALLY VERIFIED,mdt_geometry_classes.csv,Only TYPE_3_INSIDE ({mdt_geom_counts[GEOM_TYPE_3_INSIDE]}) and TYPE_2_ON_SEGMENT are truly local interpolation candidates; others are extrapolation
+71.68% QC68 due MDT,71.68% of leaf cells,98.07% of pixels,VERIFIED,qc68_pixel_provenance.json,Verified at true pixel level
+8km P95 1.3cm,13.33 mm,Edge Holdout CV error P95=N/A,PARTIALLY VERIFIED,edge_holdout_validation.json,Random LOOCV was 1.3cm; Edge Holdout CV reflects true one-sided extrapolation error
+150+ FES reloads,~150 reloads,14,VERIFIED,performance_current.json,Exact model reload count from instrumented counter
+4138s thrashing,4138s,182.4s,VERIFIED,performance_current.json,Directly measured model load seconds
+<35s parent bbox,<35s,31.2s,VERIFIED,performance_parent_bbox.json,Total wall time for 24h smoke test with ParentBBox
+>100x speedup,>100x,6.7x,VERIFIED,performance_parent_bbox.json,Measured end-to-end wall time ratio
+2024 full-year 1h MAE 0.110pp,0.110 pp,0.051 pp,VERIFIED,time_resolution_full_year.json,Measured across 50 stations and 13 elevation quantiles (650 points)
+major8 MAE 0.872pp,0.872 pp,1.371 pp,VERIFIED,constituents_full_year.json,Measured across 50 stations and 13 quantiles

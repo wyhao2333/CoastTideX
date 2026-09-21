@@ -1,0 +1,20 @@
+{
+  "model_load_count": 14,
+  "model_load_seconds": 182.4,
+  "model_cache_hit_count": 0,
+  "model_cache_miss_count": 0,
+  "predict_points_period_calls": 0,
+  "predict_spatial_snapshot_calls": 0,
+  "logical_requested_node_time_pairs": 0,
+  "actual_pyfes_evaluate_calls": 14,
+  "actual_pyfes_evaluate_points": 0,
+  "actual_pyfes_evaluate_seconds": 0.0,
+  "unique_requested_bboxes": [],
+  "unique_loaded_bboxes": [],
+  "rss_before_load_bytes": 0,
+  "rss_after_load_bytes": 0,
+  "peak_rss_bytes": 0,
+  "wall_time_seconds": 210.5,
+  "stage1_seconds": 210.5,
+  "stage2_seconds": 0.0
+}

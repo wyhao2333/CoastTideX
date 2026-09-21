@@ -1,0 +1,26 @@
+{
+  "western_estuary_edge": {
+    "target_sample_count": 12,
+    "support_sample_count": 4220,
+    "mae": 0.0020711809834655093,
+    "rmse": 0.002549264570997687,
+    "p95": 0.004755597868014015,
+    "max": 0.005502961753666491
+  },
+  "north_branch_block": {
+    "target_sample_count": 566,
+    "support_sample_count": 3666,
+    "mae": 0.08145518185271948,
+    "rmse": 0.09764059677332904,
+    "p95": 0.15871882364266104,
+    "max": 0.1746787586840125
+  },
+  "south_branch_block": {
+    "target_sample_count": 1168,
+    "support_sample_count": 3064,
+    "mae": 0.030427702198201508,
+    "rmse": 0.04392683177084207,
+    "p95": 0.0988671645699836,
+    "max": 0.11847826752658686
+  }
+}
