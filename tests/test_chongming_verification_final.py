@@ -64,6 +64,8 @@ class TestChongmingVerificationFinal(unittest.TestCase):
     """崇明岛基准支持与性能验证最终门禁测试套件"""
 
     def setUp(self):
+        self.patch_pyfes = patch('core.tide_engine.HAS_PYFES', True)
+        self.patch_pyfes.start()
         self.mock_config = {
             'paths': {
                 'fes_ns_grid': 'dummy/fes_ns_grid.nc'
@@ -78,6 +80,9 @@ class TestChongmingVerificationFinal(unittest.TestCase):
                 'min_control_spacing_m': 500.0
             }
         }
+
+    def tearDown(self):
+        self.patch_pyfes.stop()
 
     # 1. Instrumented predictor is actually injected into RasterTideEngine.
     def test_01_instrumented_predictor_injected(self):

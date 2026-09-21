@@ -31,7 +31,11 @@ import scipy
 from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial import cKDTree
 import xarray as xr
-import psutil
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 
 # 确保能从项目根目录导入 core
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -1454,7 +1458,7 @@ def execute_master_verification(
             'pandas': pd.__version__,
             'rasterio': rasterio.__version__,
             'xarray': xr.__version__,
-            'psutil': psutil.__version__
+            'psutil': psutil.__version__ if psutil is not None else 'not installed'
         },
         'dem_metadata': {
             'path': dem_path,

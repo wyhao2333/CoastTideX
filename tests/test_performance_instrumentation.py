@@ -20,8 +20,11 @@ class TestPerformanceInstrumentation(unittest.TestCase):
     """测试 FES 预测器性能统计与缓存感知机制"""
 
     def setUp(self):
+        self.patch_pyfes = patch('core.tide_engine.HAS_PYFES', True)
+        self.patch_pyfes.start()
         # 构造一个不需要连接外部配置的 Predictor 测试实例
-        with patch('core.tide_engine.load_app_config') as mock_cfg:
+        with patch('core.tide_engine.load_app_config') as mock_cfg, \
+             patch('os.path.exists', return_value=True):
             mock_cfg.return_value = {
                 'paths': {
                     'fes_ns_grid': 'dummy/fes_ns_grid.nc'
@@ -32,14 +35,16 @@ class TestPerformanceInstrumentation(unittest.TestCase):
                     'default_constituents': 'all'
                 }
             }
-            with patch('os.path.exists', return_value=True):
-                self.predictor_default = InstrumentedFESTidePredictor(
-                    enable_tile_bbox_cache=False
-                )
-                self.predictor_tile_cached = InstrumentedFESTidePredictor(
-                    enable_tile_bbox_cache=True,
-                    parent_bbox=(121.0, 31.0, 122.5, 32.0)
-                )
+            self.predictor_default = InstrumentedFESTidePredictor(
+                enable_tile_bbox_cache=False
+            )
+            self.predictor_tile_cached = InstrumentedFESTidePredictor(
+                enable_tile_bbox_cache=True,
+                parent_bbox=(121.0, 31.0, 122.5, 32.0)
+            )
+
+    def tearDown(self):
+        self.patch_pyfes.stop()
 
     def test_stats_initialization(self):
         """测试初始统计字典结构与初值"""
