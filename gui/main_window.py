@@ -20,7 +20,7 @@ try:
 except ImportError:
     pass
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime, QUrl
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QGroupBox, QLabel, QLineEdit, QComboBox,
@@ -29,12 +29,16 @@ from PyQt6.QtWidgets import (
     QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
     QCheckBox, QDoubleSpinBox, QInputDialog, QApplication
 )
-from PyQt6.QtGui import QIcon, QFont, QAction, QColor
+from PyQt6.QtGui import QIcon, QFont, QAction, QColor, QDesktopServices
 import threading
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
 from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary, RasterCalculationCancelled
+from core.dem_datum_converter import (
+    DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
+    MAX_MDT_EXTRAPOLATION_DISTANCE_KM
+)
 from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
 from .settings_dialog import SettingsDialog
@@ -417,12 +421,68 @@ class BatchRasterWorker(QThread):
         except Exception as e:
             self.error.emit(f"批量任务发生异常: {str(e)}")
 
+
+class DEMDatumConversionWorker(QThread):
+    """后台 DEM 垂直基准转换工作线程 (EGM2008 -> MSL, v1.7)"""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(object)  # DEMConversionSummary
+    error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            from core.dem_datum_converter import convert_dem_to_msl
+
+            def p_cb(percent, msg):
+                if not self._is_cancelled:
+                    self.progress.emit(percent, msg)
+
+            summary = convert_dem_to_msl(
+                input_dem_path=self.params['input_path'],
+                output_msl_path=self.params.get('output_path'),
+                output_qc_path=self.params.get('qc_output_path'),
+                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                block_size=self.params.get('block_size', 512),
+                allow_overwrite=self.params.get('allow_overwrite', True),
+                progress_callback=p_cb,
+                cancel_event=self.cancel_event
+            )
+
+            # 若未勾选保存 QC 掩膜，清理临时生成的 QC 产物
+            save_qc = self.params.get('save_qc', False)
+            if not save_qc and summary.qc_output_path and os.path.exists(summary.qc_output_path):
+                try:
+                    os.remove(summary.qc_output_path)
+                except Exception:
+                    pass
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(summary)
+        except Exception as e:
+            if self._is_cancelled or "用户主动取消" in str(e):
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """CoastTideX 桌面客户端主窗口"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX v1.6 - 全球海岸带潮位模拟与高程基准转换系统")
+        self.setWindowTitle("CoastTideX v1.7 - 全球海岸带潮位模拟与高程基准转换系统")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -433,6 +493,8 @@ class MainWindow(QMainWindow):
         self._user_selected_freq = "30min"
         self.raster_worker = None
         self.current_raster_info = None
+        self.dem_worker = None
+        self.current_dem_summary = None
 
         self._init_menu()
         self._init_ui()
@@ -471,16 +533,19 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_single = QWidget()
         self.tab_batch = QWidget()
+        self.tab_dem_convert = QWidget()
         self.tab_raster = QWidget()
         self.tab_batch_raster = QWidget()
 
         self.tabs.addTab(self.tab_single, " 🌊 单点/时段潮位序列 ")
         self.tabs.addTab(self.tab_batch, " 📊 批量站点多时刻解算 ")
+        self.tabs.addTab(self.tab_dem_convert, " 📐 DEM 基准转换 (EGM2008→MSL) ")
         self.tabs.addTab(self.tab_raster, " 🗺️ 单影像栅格解算 / 验证 ")
         self.tabs.addTab(self.tab_batch_raster, " 🗂️ 批量潮间带栅格解算 ")
 
         self._setup_single_tab()
         self._setup_batch_tab()
+        self._setup_dem_convert_tab()
         self._setup_raster_tab()
         self._setup_batch_raster_tab()
 
@@ -489,7 +554,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.6")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.7 (MSL 统一基准架构)")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -788,6 +853,510 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(layout_batch_table)
 
+    def _setup_dem_convert_tab(self):
+        """配置 DEM 基准转换 (EGM2008 -> MSL) 选项卡 (v1.7 新增)"""
+        scroll = QScrollArea(self.tab_dem_convert)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        panel = QWidget()
+        layout_main = QVBoxLayout(panel)
+        layout_main.setContentsMargins(10, 10, 10, 10)
+        layout_main.setSpacing(12)
+
+        # 1. 输入 DEM 栅格与元数据检查卡片
+        grp_in = QGroupBox("1. 输入 DEM 栅格 (EGM2008 基准)")
+        layout_in = QGridLayout(grp_in)
+        layout_in.setSpacing(8)
+
+        layout_in.addWidget(QLabel("输入 DEM GeoTIFF:"), 0, 0)
+        self.edit_dem_input = QLineEdit()
+        self.edit_dem_input.setPlaceholderText("请选择基于 EGM2008 大地水准面正高的高程栅格 (GeoTIFF)...")
+        self.edit_dem_input.textChanged.connect(self._on_dem_input_changed)
+        layout_in.addWidget(self.edit_dem_input, 0, 1)
+
+        btn_browse_in = QPushButton("浏览 DEM 文件...")
+        btn_browse_in.setObjectName("btn_secondary")
+        btn_browse_in.clicked.connect(self._browse_dem_input)
+        layout_in.addWidget(btn_browse_in, 0, 2)
+
+        btn_inspect = QPushButton("🔍 检查 DEM 元数据")
+        btn_inspect.setObjectName("btn_secondary")
+        btn_inspect.clicked.connect(self._inspect_dem_input_ui)
+        layout_in.addWidget(btn_inspect, 0, 3)
+
+        # 元数据展示卡片
+        frame_meta = QFrame()
+        frame_meta.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 6px;")
+        layout_meta = QGridLayout(frame_meta)
+        layout_meta.setSpacing(6)
+
+        layout_meta.addWidget(QLabel("栅格规格:"), 0, 0)
+        self.lbl_dem_dims = QLabel("-")
+        self.lbl_dem_dims.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_meta.addWidget(self.lbl_dem_dims, 0, 1)
+
+        layout_meta.addWidget(QLabel("波段数量:"), 0, 2)
+        self.lbl_dem_bands = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_bands, 0, 3)
+
+        layout_meta.addWidget(QLabel("坐标系统 (CRS):"), 1, 0)
+        self.lbl_dem_crs = QLabel("-")
+        self.lbl_dem_crs.setStyleSheet("font-weight: bold; color: #a78bfa;")
+        layout_meta.addWidget(self.lbl_dem_crs, 1, 1)
+
+        layout_meta.addWidget(QLabel("空间分辨率:"), 1, 2)
+        self.lbl_dem_res = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_res, 1, 3)
+
+        layout_meta.addWidget(QLabel("NoData 值:"), 2, 0)
+        self.lbl_dem_nodata = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_nodata, 2, 1)
+
+        layout_meta.addWidget(QLabel("识别基准面:"), 2, 2)
+        self.lbl_dem_detected_datum = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_detected_datum, 2, 3)
+
+        layout_meta.addWidget(QLabel("空间范围 (Bounds):"), 3, 0)
+        self.lbl_dem_bounds = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_bounds, 3, 1, 1, 3)
+
+        layout_in.addWidget(frame_meta, 1, 0, 1, 4)
+
+        # 双重转换告警提示卡片 (Double-Conversion Guard)
+        self.frame_dem_warning = QFrame()
+        self.frame_dem_warning.setStyleSheet("background-color: #451a03; border: 1px solid #f59e0b; border-radius: 6px; padding: 8px;")
+        layout_warn = QHBoxLayout(self.frame_dem_warning)
+        layout_warn.setContentsMargins(8, 4, 8, 4)
+        self.lbl_dem_warning = QLabel()
+        self.lbl_dem_warning.setStyleSheet("color: #fef08a; font-size: 12px; line-height: 1.4;")
+        self.lbl_dem_warning.setWordWrap(True)
+        layout_warn.addWidget(self.lbl_dem_warning)
+        self.frame_dem_warning.setVisible(False)
+        layout_in.addWidget(self.frame_dem_warning, 2, 0, 1, 4)
+
+        layout_main.addWidget(grp_in)
+
+        # 2. 转换科学范式与参数配置
+        grp_params = QGroupBox("2. 转换科学范式与参数配置 (Seeger & Minderhoud, Nature, 2026 理论范式改编)")
+        layout_params = QGridLayout(grp_params)
+        layout_params.setSpacing(8)
+
+        layout_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
+        combo_target_datum = QComboBox()
+        combo_target_datum.addItem("EGM2008 → 局部平均海平面 (Local MSL) (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)", "msl")
+        combo_target_datum.setEnabled(False)
+        layout_params.addWidget(combo_target_datum, 0, 1, 1, 3)
+
+        layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
+        combo_mdt_source = QComboBox()
+        combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT (原生大洋双线性插值 + 沿岸 3D-IDW 外推)", "cnes_cls22")
+        combo_mdt_source.setEnabled(False)
+        layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
+
+        layout_params.addWidget(QLabel("沿岸外推距离上限:"), 2, 0)
+        self.spin_dem_max_dist = QDoubleSpinBox()
+        self.spin_dem_max_dist.setRange(0.0, 100.0)
+        self.spin_dem_max_dist.setValue(100.0)
+        self.spin_dem_max_dist.setSingleStep(5.0)
+        self.spin_dem_max_dist.setSuffix(" km")
+        self.spin_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推保守截断上限，严格限制在 0.0 ~ 100.0 km。\n(Seeger & Minderhoud 2026 原研究针对全球宏观尺度采用 500 km)")
+        layout_params.addWidget(self.spin_dem_max_dist, 2, 1)
+
+        layout_params.addWidget(QLabel("2D 分块流式大小:"), 2, 2)
+        self.spin_dem_block_size = QSpinBox()
+        self.spin_dem_block_size.setRange(64, 4096)
+        self.spin_dem_block_size.setValue(512)
+        self.spin_dem_block_size.setSingleStep(64)
+        self.spin_dem_block_size.setSuffix(" px")
+        layout_params.addWidget(self.spin_dem_block_size, 2, 3)
+
+        self.chk_dem_apply_deltan = QCheckBox("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 与 EGM2008 闭合改正)")
+        self.chk_dem_apply_deltan.setChecked(True)
+        self.chk_dem_apply_deltan.setEnabled(False)
+        layout_params.addWidget(self.chk_dem_apply_deltan, 3, 0, 1, 2)
+
+        self.chk_dem_save_qc = QCheckBox("保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask)")
+        self.chk_dem_save_qc.setChecked(False)
+        self.chk_dem_save_qc.stateChanged.connect(self._on_dem_save_qc_toggled)
+        layout_params.addWidget(self.chk_dem_save_qc, 3, 2, 1, 2)
+
+        layout_main.addWidget(grp_params)
+
+        # 3. 输出路径配置与任务控制
+        grp_exec = QGroupBox("3. 输出路径配置与任务执行")
+        layout_exec = QGridLayout(grp_exec)
+        layout_exec.setSpacing(8)
+
+        layout_exec.addWidget(QLabel("输出 DEM_MSL 文件:"), 0, 0)
+        self.edit_dem_output = QLineEdit()
+        self.edit_dem_output.setPlaceholderText("输出 DEM_MSL GeoTIFF 路径 (默认: <输入路径>_MSL.tif)...")
+        layout_exec.addWidget(self.edit_dem_output, 0, 1)
+
+        btn_browse_out = QPushButton("浏览...")
+        btn_browse_out.setObjectName("btn_secondary")
+        btn_browse_out.clicked.connect(self._browse_dem_output)
+        layout_exec.addWidget(btn_browse_out, 0, 2)
+
+        self.lbl_dem_qc_output = QLabel("输出 QC 掩膜文件:")
+        layout_exec.addWidget(self.lbl_dem_qc_output, 1, 0)
+        self.edit_dem_qc_output = QLineEdit()
+        self.edit_dem_qc_output.setPlaceholderText("输出 QC 掩膜 GeoTIFF 路径...")
+        layout_exec.addWidget(self.edit_dem_qc_output, 1, 1)
+
+        self.btn_browse_dem_qc = QPushButton("浏览...")
+        self.btn_browse_dem_qc.setObjectName("btn_secondary")
+        self.btn_browse_dem_qc.clicked.connect(self._browse_dem_qc_output)
+        layout_exec.addWidget(self.btn_browse_dem_qc, 1, 2)
+
+        self.lbl_dem_qc_output.setVisible(False)
+        self.edit_dem_qc_output.setVisible(False)
+        self.btn_browse_dem_qc.setVisible(False)
+
+        # 执行与取消按钮
+        btn_box = QHBoxLayout()
+        self.btn_run_dem_convert = QPushButton("🚀 开始 DEM 基准转换 (EGM2008 → MSL)")
+        self.btn_run_dem_convert.setFixedHeight(40)
+        self.btn_run_dem_convert.setStyleSheet("background-color: #059669; color: white; font-weight: bold; font-size: 13px;")
+        self.btn_run_dem_convert.clicked.connect(self._run_dem_conversion)
+
+        self.btn_cancel_dem_convert = QPushButton("🛑 取消任务")
+        self.btn_cancel_dem_convert.setFixedHeight(40)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.btn_cancel_dem_convert.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_cancel_dem_convert.clicked.connect(self._cancel_dem_conversion)
+
+        btn_box.addWidget(self.btn_run_dem_convert, stretch=3)
+        btn_box.addWidget(self.btn_cancel_dem_convert, stretch=1)
+        layout_exec.addLayout(btn_box, 2, 0, 1, 3)
+
+        self.prog_dem_convert = QProgressBar()
+        self.prog_dem_convert.setValue(0)
+        self.prog_dem_convert.setTextVisible(True)
+        layout_exec.addWidget(self.prog_dem_convert, 3, 0, 1, 3)
+
+        self.lbl_dem_status = QLabel("就绪 - 请选择输入 DEM (EGM2008) 影像并配置转换参数")
+        self.lbl_dem_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_exec.addWidget(self.lbl_dem_status, 4, 0, 1, 3)
+
+        layout_main.addWidget(grp_exec)
+
+        # 4. 转换结果摘要与下游分析直通卡片
+        self.grp_dem_results = QGroupBox("4. 转换结果摘要与下游分析直通")
+        layout_res = QVBoxLayout(self.grp_dem_results)
+        layout_res.setSpacing(10)
+
+        frame_summary = QFrame()
+        frame_summary.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 8px;")
+        layout_sum = QGridLayout(frame_summary)
+        layout_sum.setSpacing(6)
+
+        layout_sum.addWidget(QLabel("产物文件路径:"), 0, 0)
+        self.lbl_res_dem_path = QLabel("-")
+        self.lbl_res_dem_path.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_sum.addWidget(self.lbl_res_dem_path, 0, 1, 1, 3)
+
+        layout_sum.addWidget(QLabel("栅格规格:"), 1, 0)
+        self.lbl_res_dem_dims = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_dims, 1, 1)
+
+        layout_sum.addWidget(QLabel("有效 DEM 像元:"), 1, 2)
+        self.lbl_res_dem_valid = QLabel("-")
+        self.lbl_res_dem_valid.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_sum.addWidget(self.lbl_res_dem_valid, 1, 3)
+
+        layout_sum.addWidget(QLabel("大洋双线性像元:"), 2, 0)
+        self.lbl_res_dem_native = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_native, 2, 1)
+
+        layout_sum.addWidget(QLabel("沿岸 3D-IDW 外推:"), 2, 2)
+        self.lbl_res_dem_extrap = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_extrap, 2, 3)
+
+        layout_sum.addWidget(QLabel("超出100km/NoData:"), 3, 0)
+        self.lbl_res_dem_nodata = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_nodata, 3, 1)
+
+        layout_sum.addWidget(QLabel("执行耗时:"), 3, 2)
+        self.lbl_res_dem_elapsed = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_elapsed, 3, 3)
+
+        layout_res.addWidget(frame_summary)
+
+        # 直通操作按钮
+        box_handoff = QHBoxLayout()
+        self.btn_handoff_inund = QPushButton("📊 将此 DEM_MSL 载入单影像淹没频率分析")
+        self.btn_handoff_inund.setFixedHeight(38)
+        self.btn_handoff_inund.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_handoff_inund.clicked.connect(self._handoff_to_inundation)
+
+        self.btn_handoff_exp = QPushButton("⏳ 将此 DEM_MSL 载入单影像露出时间分析")
+        self.btn_handoff_exp.setFixedHeight(38)
+        self.btn_handoff_exp.setStyleSheet("background-color: #0d9488; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_handoff_exp.clicked.connect(self._handoff_to_exposure)
+
+        self.btn_dem_open_folder = QPushButton("📂 打开所在文件夹")
+        self.btn_dem_open_folder.setFixedHeight(38)
+        self.btn_dem_open_folder.setObjectName("btn_secondary")
+        self.btn_dem_open_folder.clicked.connect(self._open_dem_output_folder)
+
+        box_handoff.addWidget(self.btn_handoff_inund, stretch=2)
+        box_handoff.addWidget(self.btn_handoff_exp, stretch=2)
+        box_handoff.addWidget(self.btn_dem_open_folder, stretch=1)
+        layout_res.addLayout(box_handoff)
+
+        layout_main.addWidget(self.grp_dem_results)
+        self.grp_dem_results.setVisible(False)
+
+        layout_main.addStretch()
+
+        scroll.setWidget(panel)
+        tab_layout = QVBoxLayout(self.tab_dem_convert)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+
+    def _browse_dem_input(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择输入 DEM 影像 (EGM2008 基准)", "", "GeoTIFF (*.tif *.tiff *.geotiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_input.setText(f)
+
+    def _browse_dem_output(self):
+        cur = self.edit_dem_output.text().strip()
+        f, _ = QFileDialog.getSaveFileName(
+            self, "保存输出 DEM_MSL 影像", cur, "GeoTIFF (*.tif *.tiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_output.setText(f)
+
+    def _browse_dem_qc_output(self):
+        cur = self.edit_dem_qc_output.text().strip()
+        f, _ = QFileDialog.getSaveFileName(
+            self, "保存 QC 掩膜影像", cur, "GeoTIFF (*.tif *.tiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_qc_output.setText(f)
+
+    def _on_dem_save_qc_toggled(self, state):
+        is_checked = (state == Qt.CheckState.Checked.value or state == True or state == 2)
+        self.lbl_dem_qc_output.setVisible(is_checked)
+        self.edit_dem_qc_output.setVisible(is_checked)
+        self.btn_browse_dem_qc.setVisible(is_checked)
+
+    def _on_dem_input_changed(self, text):
+        path = text.strip()
+        if os.path.exists(path) and os.path.isfile(path):
+            base, ext = os.path.splitext(path)
+            self.edit_dem_output.setText(f"{base}_MSL{ext}")
+            self.edit_dem_qc_output.setText(f"{base}_MSL_qc{ext}")
+            self._inspect_dem_input_ui(path)
+
+    def _inspect_dem_input_ui(self, target_path=None):
+        path = target_path if isinstance(target_path, str) else self.edit_dem_input.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "文件无效", "请选择有效的 DEM GeoTIFF 文件")
+            return
+        try:
+            import rasterio
+            with rasterio.open(path) as src:
+                w, h = src.width, src.height
+                bands = src.count
+                crs = src.crs
+                res = src.res
+                nodata = src.nodata
+                b = src.bounds
+                tags = src.tags()
+
+            self.lbl_dem_dims.setText(f"{w} × {h} (总计 {w*h:,} 像元)")
+            if bands == 1:
+                self.lbl_dem_bands.setText(f"1 波段 (单波段高程 DEM - 正常)")
+                self.lbl_dem_bands.setStyleSheet("font-weight: bold; color: #4ade80;")
+            else:
+                self.lbl_dem_bands.setText(f"⚠️ {bands} 波段 (DEM 通常必须为单波段)")
+                self.lbl_dem_bands.setStyleSheet("font-weight: bold; color: #f59e0b;")
+
+            crs_str = f"{crs.to_string()}" if crs else "未定义 (None)"
+            if crs and crs.is_projected:
+                self.lbl_dem_crs.setText(f"投影坐标系: {crs_str}")
+            elif crs:
+                self.lbl_dem_crs.setText(f"地理坐标系: {crs_str}")
+            else:
+                self.lbl_dem_crs.setText(f"⚠️ 坐标系未定义")
+            self.lbl_dem_crs.setStyleSheet("font-weight: bold; color: #a78bfa;")
+
+            is_proj = crs.is_projected if crs else False
+            unit = "米" if is_proj else "度"
+            self.lbl_dem_res.setText(f"({res[0]:.6g}, {res[1]:.6g}) [单位: {unit}]")
+            self.lbl_dem_nodata.setText(f"{nodata}" if nodata is not None else "未指定 (None)")
+            self.lbl_dem_bounds.setText(f"[{b.left:.4f}, {b.bottom:.4f}] -> [{b.right:.4f}, {b.top:.4f}]")
+
+            # 双重转换检测 (Double Conversion Guard)
+            datum_tag = str(tags.get('DATUM', '')).upper()
+            target_tag = str(tags.get('TARGET_VERTICAL_DATUM', '')).upper()
+            ref_tag = str(tags.get('ANALYSIS_REFERENCE', '')).upper()
+            fn_upper = os.path.basename(path).upper()
+            is_already_msl = (datum_tag == 'MSL' or target_tag == 'MSL' or ref_tag == 'MSL' or '_MSL' in fn_upper)
+
+            if is_already_msl:
+                self.frame_dem_warning.setVisible(True)
+                tag_info = f"DATUM={datum_tag}" if datum_tag else "文件名含 _MSL"
+                self.lbl_dem_warning.setText(
+                    f"⚠️ 提示: 输入 DEM 元数据或文件名显示其已处于 MSL 局部平均海平面基准 ({tag_info})。\n"
+                    f"无需重复执行基准转换！您可以直接点击下方直通按钮将该 DEM 载入淹没频率或露出时间分析，"
+                    f"亦可点击下方的强制重新转换按钮。"
+                )
+                self.lbl_dem_detected_datum.setText("MSL (局部平均海平面 - 已是MSL基准)")
+                self.lbl_dem_detected_datum.setStyleSheet("color: #4ade80; font-weight: bold;")
+                self.btn_run_dem_convert.setText("⚠️ 强制重新转换 DEM 基准 (Force Re-convert)")
+                # 展现直通卡片，方便用户直接使用当前 DEM
+                self.grp_dem_results.setVisible(True)
+                self.lbl_res_dem_path.setText(path)
+                self.lbl_res_dem_dims.setText(f"{w} × {h} ({w*h:,} 像元)")
+                self.lbl_res_dem_valid.setText("已就绪 (无需转换)")
+                self.lbl_res_dem_native.setText("-")
+                self.lbl_res_dem_extrap.setText("-")
+                self.lbl_res_dem_nodata.setText(f"{nodata}")
+                self.lbl_res_dem_elapsed.setText("0.00 s (已存在产物)")
+            else:
+                self.frame_dem_warning.setVisible(False)
+                self.lbl_dem_detected_datum.setText("EGM2008 (大地水准面正高 - 待转换)")
+                self.lbl_dem_detected_datum.setStyleSheet("color: #38bdf8; font-weight: bold;")
+                self.btn_run_dem_convert.setText("🚀 开始 DEM 基准转换 (EGM2008 → MSL)")
+                self.btn_run_dem_convert.setEnabled(True)
+
+            self.status_bar.showMessage(f"已就绪: 已检查输入 DEM 元数据 ({os.path.basename(path)})")
+        except Exception as e:
+            QMessageBox.critical(self, "检查失败", f"无法解析 DEM GeoTIFF 元数据:\n{e}")
+
+    def _run_dem_conversion(self):
+        in_path = self.edit_dem_input.text().strip()
+        out_path = self.edit_dem_output.text().strip()
+        if not in_path or not os.path.exists(in_path):
+            QMessageBox.warning(self, "输入无效", "请选择有效的输入 DEM GeoTIFF 文件。")
+            return
+        if not out_path:
+            QMessageBox.warning(self, "输出路径无效", "请指定输出 DEM_MSL GeoTIFF 路径。")
+            return
+
+        max_dist_km = min(100.0, float(self.spin_dem_max_dist.value()))
+        block_size = int(self.spin_dem_block_size.value())
+        save_qc = self.chk_dem_save_qc.isChecked()
+        qc_out = self.edit_dem_qc_output.text().strip() if save_qc else None
+
+        self.btn_run_dem_convert.setEnabled(False)
+        self.btn_cancel_dem_convert.setEnabled(True)
+        self.prog_dem_convert.setValue(0)
+        self.lbl_dem_status.setText("准备开始 DEM 垂直基准转换...")
+        self.status_bar.showMessage("DEM 垂直基准转换进行中...")
+
+        params = {
+            'input_path': in_path,
+            'output_path': out_path,
+            'qc_output_path': qc_out,
+            'max_dist_km': max_dist_km,
+            'block_size': block_size,
+            'allow_overwrite': True,
+            'save_qc': save_qc
+        }
+
+        self.dem_worker = DEMDatumConversionWorker(params)
+        self.dem_worker.progress.connect(self._on_dem_conversion_progress)
+        self.dem_worker.finished.connect(self._on_dem_conversion_finished)
+        self.dem_worker.error.connect(self._on_dem_conversion_error)
+        self.dem_worker.cancelled.connect(self._on_dem_conversion_cancelled)
+        self.dem_worker.start()
+
+    def _cancel_dem_conversion(self):
+        if self.dem_worker and self.dem_worker.isRunning():
+            self.lbl_dem_status.setText("正在取消 DEM 基准转换任务...")
+            self.btn_cancel_dem_convert.setEnabled(False)
+            self.dem_worker.cancel()
+
+    def _on_dem_conversion_progress(self, percent, msg):
+        self.prog_dem_convert.setValue(percent)
+        self.lbl_dem_status.setText(msg)
+
+    def _on_dem_conversion_finished(self, summary):
+        self.current_dem_summary = summary
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.prog_dem_convert.setValue(100)
+        self.lbl_dem_status.setText(f"基准转换成功完成！耗时: {summary.elapsed_seconds:.2f}s")
+        self.status_bar.showMessage(f"DEM 基准转换成功: {os.path.basename(summary.output_path)}")
+
+        # 展示结果卡片
+        self.grp_dem_results.setVisible(True)
+        self.lbl_res_dem_path.setText(summary.output_path)
+        self.lbl_res_dem_dims.setText(f"{summary.width} × {summary.height} ({summary.total_pixels:,} 像元)")
+        valid_pct = (summary.valid_dem_pixels / max(1, summary.total_pixels)) * 100.0
+        self.lbl_res_dem_valid.setText(f"{summary.valid_dem_pixels:,} ({valid_pct:.1f}%)")
+        native_pct = (summary.native_mdt_pixels / max(1, summary.valid_dem_pixels)) * 100.0
+        self.lbl_res_dem_native.setText(f"{summary.native_mdt_pixels:,} ({native_pct:.1f}%)")
+        extrap_pct = (summary.extrapolated_mdt_pixels / max(1, summary.valid_dem_pixels)) * 100.0
+        self.lbl_res_dem_extrap.setText(f"{summary.extrapolated_mdt_pixels:,} ({extrap_pct:.1f}%)")
+        self.lbl_res_dem_nodata.setText(f"{summary.nodata_pixels:,}")
+        self.lbl_res_dem_elapsed.setText(f"{summary.elapsed_seconds:.2f} s")
+
+    def _on_dem_conversion_error(self, err_msg):
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.lbl_dem_status.setText(f"转换失败: {err_msg}")
+        self.status_bar.showMessage("DEM 基准转换失败")
+        QMessageBox.critical(self, "转换失败", f"DEM 基准转换发生错误:\n{err_msg}")
+
+    def _on_dem_conversion_cancelled(self):
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.lbl_dem_status.setText("DEM 基准转换已被用户取消。")
+        self.status_bar.showMessage("DEM 基准转换已取消")
+
+    def _handoff_to_inundation(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            out_path = self.edit_dem_output.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            QMessageBox.warning(self, "文件未就绪", "转换后的 DEM_MSL 文件尚不存在，请先执行基准转换。")
+            return
+
+        self.tabs.setCurrentWidget(self.tab_raster)
+        self.edit_raster_input.setText(out_path)
+        idx_inund = self.combo_raster_mode.findData('inundation')
+        if idx_inund >= 0:
+            self.combo_raster_mode.setCurrentIndex(idx_inund)
+        idx_msl = self.combo_inund_datum.findData('msl')
+        if idx_msl >= 0:
+            self.combo_inund_datum.setCurrentIndex(idx_msl)
+        self._inspect_raster_ui(out_path)
+        self.status_bar.showMessage(f"已就绪: 已将转换后的 DEM_MSL 载入单影像淹没频率分析模式")
+
+    def _handoff_to_exposure(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            out_path = self.edit_dem_output.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            QMessageBox.warning(self, "文件未就绪", "转换后的 DEM_MSL 文件尚不存在，请先执行基准转换。")
+            return
+
+        self.tabs.setCurrentWidget(self.tab_raster)
+        self.edit_raster_input.setText(out_path)
+        idx_exp = self.combo_raster_mode.findData('exposure')
+        if idx_exp >= 0:
+            self.combo_raster_mode.setCurrentIndex(idx_exp)
+        idx_msl = self.combo_inund_datum.findData('msl')
+        if idx_msl >= 0:
+            self.combo_inund_datum.setCurrentIndex(idx_msl)
+        self._inspect_raster_ui(out_path)
+        self.status_bar.showMessage(f"已就绪: 已将转换后的 DEM_MSL 载入单影像露出时间分析模式")
+
+    def _open_dem_output_folder(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path:
+            out_path = self.edit_dem_output.text().strip()
+        folder = os.path.dirname(os.path.abspath(out_path)) if out_path else os.getcwd()
+        if os.path.exists(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
     def _setup_raster_tab(self):
         scroll = QScrollArea(self.tab_raster)
         scroll.setWidgetResizable(True)
@@ -953,10 +1522,11 @@ class MainWindow(QMainWindow):
 
         layout_inund.addWidget(QLabel("DEM基准面:"), 2, 2)
         self.combo_inund_datum = QComboBox()
-        self.combo_inund_datum.addItem("EGM2008 (相对 EGM2008 参考面)", "egm2008")
-        self.combo_inund_datum.addItem("MSL (相对平均海平面)", "msl")
+        self.combo_inund_datum.addItem("MSL (相对平均海平面 - v1.7推荐)", "msl")
+        self.combo_inund_datum.addItem("EGM2008 (相对 EGM2008 参考面 - 兼容模式)", "egm2008")
         self.combo_inund_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        self.combo_inund_datum.currentIndexChanged.connect(self._on_inund_datum_changed)
         layout_inund.addWidget(self.combo_inund_datum, 2, 3)
 
         layout_inund.addWidget(QLabel("目标区域:"), 3, 0)
@@ -977,6 +1547,11 @@ class MainWindow(QMainWindow):
         self.btn_browse_qc.setObjectName("btn_secondary")
         self.btn_browse_qc.clicked.connect(self._browse_inund_qc)
         layout_inund.addWidget(self.btn_browse_qc, 4, 3)
+
+        self.lbl_inund_datum_hint = QLabel("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+        self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
+        self.lbl_inund_datum_hint.setWordWrap(True)
+        layout_inund.addWidget(self.lbl_inund_datum_hint, 5, 0, 1, 4)
 
         layout_params.addWidget(self.container_inund)
         self.container_inund.setVisible(False)
@@ -1670,6 +2245,24 @@ class MainWindow(QMainWindow):
             self.lbl_raster_nodata.setText(nodata_str)
             b = info.bounds
             self.lbl_raster_bounds.setText(f"[{b[0]:.4f}, {b[1]:.4f}] -> [{b[2]:.4f}, {b[3]:.4f}]")
+
+            # 检测输入 DEM 是否具有 MSL 基准标签 (v1.7 智能联动)
+            try:
+                import rasterio
+                with rasterio.open(path) as src_tags:
+                    chk_tags = src_tags.tags()
+                    datum_tag = str(chk_tags.get('DATUM', '')).upper()
+                    target_tag = str(chk_tags.get('TARGET_VERTICAL_DATUM', '')).upper()
+                    ref_tag = str(chk_tags.get('ANALYSIS_REFERENCE', '')).upper()
+                    fn_upper = os.path.basename(path).upper()
+                    if datum_tag == 'MSL' or target_tag == 'MSL' or ref_tag == 'MSL' or '_MSL' in fn_upper:
+                        idx_msl = self.combo_inund_datum.findData('msl')
+                        if idx_msl >= 0 and self.combo_inund_datum.currentIndex() != idx_msl:
+                            self.combo_inund_datum.setCurrentIndex(idx_msl)
+                        self.status_bar.showMessage(f"已检测到 MSL 基准 DEM ({os.path.basename(path)})，已自动切换为 MSL 模式")
+            except Exception:
+                pass
+
             self.status_bar.showMessage(f"已加载栅格元数据: {os.path.basename(path)}")
         except Exception as e:
             QMessageBox.critical(self, "检查失败", f"无法解析 GeoTIFF 元数据:\n{e}")
@@ -1714,6 +2307,17 @@ class MainWindow(QMainWindow):
         inp = self.edit_raster_input.text().strip()
         if inp:
             self._propose_raster_output(inp)
+
+    def _on_inund_datum_changed(self):
+        val = self.combo_inund_datum.currentData()
+        if val == 'msl':
+            self.lbl_inund_datum_hint.setText("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+            self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
+        elif val == 'egm2008':
+            self.lbl_inund_datum_hint.setText("⚠️ EGM2008 为兼容模式。v1.7 推荐先使用 [DEM 基准转换] 标签页将 DEM 转换至 MSL 基准，以消除沿岸潮位-高程系统偏差。")
+            self.lbl_inund_datum_hint.setStyleSheet("color: #fbbf24; font-size: 11px;")
+        else:
+            self.lbl_inund_datum_hint.setText("")
 
     def _run_raster_simulation(self):
         inp_path = self.edit_raster_input.text().strip()
@@ -1976,10 +2580,17 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.6</h3>"
-            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (Functional Prototype)</b></p>"
+            "<h3>CoastTideX v1.7</h3>"
+            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (MSL Reference Workflow)</b></p>"
             "<p>致力于为海洋工程、海岸带遥感、大地测量与潮滩生态演变建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
+            "<li><b>v1.7 MSL 统一基准架构</b>: "
+            "<ul>"
+            "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 理论范式，大洋区双线性插值，沿岸 100 km 球面 3D-IDW 保守外推；</li>"
+            "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界严密一致；</li>"
+            "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
+            "</ul></li>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
             "<li><b>四大多元基准体系</b>: "
             "<ul>"
@@ -1990,7 +2601,7 @@ class MainWindow(QMainWindow):
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>v1.6 潜在天文潮露出时间域分析引擎</b>: "
+            "<li><b>潜在天文潮露出时间域分析引擎</b>: "
             "<ul>"
             "<li>固定代表性地形条件下的潜在天文潮露出时长 (Exposure Duration)、最长连续露出、平均事件时长、发生频次与有效时间覆盖率等 7 大独立 GeoTIFF 空间栅格产物；</li>"
             "<li>高精度时间跨界线性插值 (Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
@@ -2135,7 +2746,7 @@ class MainWindow(QMainWindow):
         h_datum = QHBoxLayout()
         h_datum.addWidget(QLabel("DEM 高程基准:"))
         self.cmb_batch_datum = QComboBox()
-        self.cmb_batch_datum.addItems(["EGM2008 (推荐全球)", "MSL (平均海平面)", "GOCO06s (全球大洋)", "WGS84 椭球高"])
+        self.cmb_batch_datum.addItems(["MSL (推荐 - v1.7 统一基准)", "EGM2008 (兼容模式)", "GOCO06s (全球大洋)", "WGS84 椭球高"])
         h_datum.addWidget(self.cmb_batch_datum)
         vbox_sci.addLayout(h_datum)
 

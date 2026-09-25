@@ -43,7 +43,7 @@ from .utils import (
 from .datum_engine import DatumTransformer, DatumDataError
 from .tide_engine import FESTidePredictor
 
-COASTTIDEX_VERSION = "1.6"
+COASTTIDEX_VERSION = "1.7"
 
 
 
@@ -1226,11 +1226,15 @@ class RasterTideEngine:
                         )
 
                         # 静态基准转换
-                        offsets_dict = self.transformer.get_static_datum_offsets(
-                            lons=lons, lats=lats, target=datum_target, strict=strict
-                        )
-                        offsets = offsets_dict['offset_m']
-                        qc_provenance = offsets_dict['qc_warning']
+                        if datum_target.lower() == 'msl':
+                            offsets = np.zeros(n_valid, dtype=np.float32)
+                            qc_provenance = np.full(n_valid, 'NORMAL', dtype=object)
+                        else:
+                            offsets_dict = self.transformer.get_static_datum_offsets(
+                                lons=lons, lats=lats, target=datum_target, strict=strict
+                            )
+                            offsets = offsets_dict['offset_m']
+                            qc_provenance = offsets_dict['qc_warning']
 
                         # 像元水面高与位掩码质量计算
                         water_levels = tide_msl + offsets
@@ -1398,7 +1402,7 @@ class RasterTideEngine:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
         freq: str = "30min",
-        dem_datum: str = "egm2008",
+        dem_datum: str = "msl",
         constituents: str | list = "all",
         source_tz: str = "UTC",
         initial_control_spacing_m: Optional[float] = None,
@@ -1412,7 +1416,8 @@ class RasterTideEngine:
         target_mode: str = "standard",
         export_tide_cache_path: Optional[str] = None,
         grid_only: bool = False,
-        allow_overwrite: bool = True
+        allow_overwrite: bool = True,
+        analysis_reference: Optional[str] = None
     ) -> RasterResultSummary:
         """
         【Mode B】自适应潮位控制网格 (Adaptive Tide Control Grid) 潜在天文潮淹没频率 GeoTIFF 解算。
@@ -1438,6 +1443,18 @@ class RasterTideEngine:
             inundation_error_tolerance_pct = self.inundation_error_tolerance_pct
         if block_size is None:
             block_size = self.default_block_size
+
+        if analysis_reference is not None:
+            dem_datum = str(analysis_reference).lower()
+
+        if dem_datum.lower() != "msl":
+            warnings.warn(
+                f"Using dem_datum='{dem_datum}' is deprecated in CoastTideX v1.7 (Deprecated compatibility workflow). "
+                f"In accordance with the Seeger & Minderhoud (Nature, 2026) coastal vertical datum framework, "
+                f"please convert DEM to local MSL datum (Z_MSL = Z_EGM2008 - MDT - DeltaN) using core.dem_datum_converter and run with dem_datum='msl'.",
+                DeprecationWarning,
+                stacklevel=2
+            )
 
         if not grid_only:
             if qc_output_path is None:
@@ -1529,487 +1546,528 @@ class RasterTideEngine:
         xs_init = np.arange(min_x, max_x + step_x_crs, step_x_crs)
         ys_init = np.arange(min_y, max_y + step_y_crs, step_y_crs)
 
-        # 3. 量化坐标缓存 (Node Cache) 与 Level-wise 节点批次解算
-        node_cache: Dict[Tuple[int, int], ControlNode] = {}
-        node_id_counter = [0]
-        predictor_call_count = [0]
-        evaluated_node_count = [0]
 
-        def _coord_key(x_val: float, y_val: float) -> Tuple[int, int]:
-            if info.is_projected:
-                return (int(round(x_val * 100)), int(round(y_val * 100)))
+        # 提取 DEM 与初始网格覆盖范围，用于 Stage 1 自适应网格 FES 模型作用域复用 (ParentBBox)
+        min_x_out = float(min(min_x, xs_init[0]))
+        max_x_out = float(max(max_x, xs_init[-1]))
+        min_y_out = float(min(min_y, ys_init[0]))
+        max_y_out = float(max(max_y, ys_init[-1]))
+
+        src_c = rasterio.crs.CRS.from_user_input(info.crs)
+        if not info.is_projected:
+            dem_footprint_lons = [min_x_out, max_x_out, max_x_out, min_x_out]
+            dem_footprint_lats = [min_y_out, min_y_out, max_y_out, max_y_out]
+        else:
+            xs_footprint = [
+                min_x_out, (min_x_out + max_x_out) / 2.0, max_x_out, max_x_out,
+                max_x_out, (min_x_out + max_x_out) / 2.0, min_x_out, min_x_out
+            ]
+            ys_footprint = [
+                min_y_out, min_y_out, min_y_out, (min_y_out + max_y_out) / 2.0,
+                max_y_out, max_y_out, max_y_out, (min_y_out + max_y_out) / 2.0
+            ]
+            if Transformer is not None:
+                t_wgs = Transformer.from_crs(src_c, 'EPSG:4326', always_xy=True)
+                t_lons, t_lats = t_wgs.transform(xs_footprint, ys_footprint)
             else:
-                return (int(round(x_val * 1e6)), int(round(y_val * 1e6)))
+                t_lons, t_lats = rasterio.warp.transform(src_c, 'EPSG:4326', xs_footprint, ys_footprint)
+            dem_footprint_lons = [float(x) for x in t_lons]
+            dem_footprint_lats = [float(y) for y in t_lats]
 
-        def _get_or_create_node(x_val: float, y_val: float) -> ControlNode:
-            k = _coord_key(x_val, y_val)
-            if k in node_cache:
-                return node_cache[k]
+        has_scope = hasattr(predictor, 'begin_spatial_model_scope') and hasattr(predictor, 'end_spatial_model_scope')
+        if has_scope:
+            predictor.begin_spatial_model_scope(lons=dem_footprint_lons, lats=dem_footprint_lats, buffer_deg=1.0)
 
-            src_c = rasterio.crs.CRS.from_user_input(info.crs)
-            if not info.is_projected:
-                lon_n = normalize_longitude(x_val, to_360=False)
-                lat_n = float(y_val)
-            else:
-                if Transformer is not None:
-                    t_wgs = Transformer.from_crs(src_c, "EPSG:4326", always_xy=True)
-                    t_lon, t_lat = t_wgs.transform(x_val, y_val)
+        try:
+            # 3. 量化坐标缓存 (Node Cache) 与 Level-wise 节点批次解算
+            node_cache: Dict[Tuple[int, int], ControlNode] = {}
+            node_id_counter = [0]
+            predictor_call_count = [0]
+            evaluated_node_count = [0]
+
+            def _coord_key(x_val: float, y_val: float) -> Tuple[int, int]:
+                if info.is_projected:
+                    return (int(round(x_val * 100)), int(round(y_val * 100)))
                 else:
-                    t_lon, t_lat = rasterio.warp.transform(src_c, "EPSG:4326", [x_val], [y_val])
-                    t_lon, t_lat = t_lon[0], t_lat[0]
-                lon_n = normalize_longitude(float(t_lon), to_360=False)
-                lat_n = float(t_lat)
+                    return (int(round(x_val * 1e6)), int(round(y_val * 1e6)))
 
-            cid = _get_point_component(x_val, y_val)
-            node = ControlNode(
-                node_id=node_id_counter[0],
-                x=float(x_val),
-                y=float(y_val),
-                lon=float(lon_n),
-                lat=float(lat_n),
-                component_id=cid
-            )
-            node_id_counter[0] += 1
-            node_cache[k] = node
-            return node
+            def _get_or_create_node(x_val: float, y_val: float) -> ControlNode:
+                k = _coord_key(x_val, y_val)
+                if k in node_cache:
+                    return node_cache[k]
 
-        def _evaluate_nodes_batch(nodes_to_eval: List[ControlNode]):
-            """
-            批量解算控制节点 FES 时序并执行静态基准转换。
-            严格遵循批次分块 (control_node_batch_size) 与内存就地排序，释放冗余矩阵。
-            """
-            uncalculated = [n for n in nodes_to_eval if not n.valid and len(n.water_levels_sorted) == 0 and not getattr(n, '_evaluated', False)]
-            if not uncalculated:
-                return
+                src_c = rasterio.crs.CRS.from_user_input(info.crs)
+                if not info.is_projected:
+                    lon_n = normalize_longitude(x_val, to_360=False)
+                    lat_n = float(y_val)
+                else:
+                    if Transformer is not None:
+                        t_wgs = Transformer.from_crs(src_c, "EPSG:4326", always_xy=True)
+                        t_lon, t_lat = t_wgs.transform(x_val, y_val)
+                    else:
+                        t_lon, t_lat = rasterio.warp.transform(src_c, "EPSG:4326", [x_val], [y_val])
+                        t_lon, t_lat = t_lon[0], t_lat[0]
+                    lon_n = normalize_longitude(float(t_lon), to_360=False)
+                    lat_n = float(t_lat)
 
-            resident_count = sum(1 for n in node_cache.values() if len(n.water_levels_sorted) > 0)
-            pending_count = len(uncalculated)
-            total_attempted = resident_count + pending_count
-            bytes_per_sample = 8 if export_tide_cache_path else 4
-            if total_attempted > self.max_in_memory_control_nodes:
-                mem_required_mb = estimate_control_node_memory(total_attempted, n_time_samples, dtype_bytes=bytes_per_sample)
-                mem_budget_mb = estimate_control_node_memory(self.max_in_memory_control_nodes, n_time_samples, dtype_bytes=bytes_per_sample)
-                raise RasterMemoryLimitError(
-                    f"自适应控制网格节点超出常驻内存预算上限 (Raster engine exceeded max_in_memory_control_nodes budget)! "
-                    f"当前常驻节点 (Resident): {resident_count}, 待解算新节点 (Pending batch): {pending_count}, "
-                    f"总尝试节点数 (Total attempted): {total_attempted}, 内存上限 (Limit): {self.max_in_memory_control_nodes}. "
-                    f"每个节点时间采样点数 (Time samples per node): {n_time_samples}. "
-                    f"预估所需时序数组内存: {mem_required_mb:.2f} MB (当前预算上限: {mem_budget_mb:.2f} MB). "
-                    f"建议解决方案: (1) 在 config.yaml 中调大 raster.max_in_memory_control_nodes; "
-                    f"(2) 适当增大最小控制网格间距 min_control_spacing_m; "
-                    f"(3) 适当提高淹没误差容限 inundation_error_tolerance_pct; "
-                    f"(4) 裁剪 DEM 空间范围以降低复杂海岸线节点密度。"
+                cid = _get_point_component(x_val, y_val)
+                node = ControlNode(
+                    node_id=node_id_counter[0],
+                    x=float(x_val),
+                    y=float(y_val),
+                    lon=float(lon_n),
+                    lat=float(lat_n),
+                    component_id=cid
                 )
+                node_id_counter[0] += 1
+                node_cache[k] = node
+                return node
 
-            for n in uncalculated:
-                n._evaluated = True
+            def _evaluate_nodes_batch(nodes_to_eval: List[ControlNode]):
+                """
+                批量解算控制节点 FES 时序并执行静态基准转换。
+                严格遵循批次分块 (control_node_batch_size) 与内存就地排序，释放冗余矩阵。
+                """
+                uncalculated = [n for n in nodes_to_eval if not n.valid and len(n.water_levels_sorted) == 0 and not getattr(n, '_evaluated', False)]
+                if not uncalculated:
+                    return
 
-            batch_size = max(1, self.control_node_batch_size)
-            n_total = len(uncalculated)
+                resident_count = sum(1 for n in node_cache.values() if len(n.water_levels_sorted) > 0)
+                pending_count = len(uncalculated)
+                total_attempted = resident_count + pending_count
+                bytes_per_sample = 8 if export_tide_cache_path else 4
+                if total_attempted > self.max_in_memory_control_nodes:
+                    mem_required_mb = estimate_control_node_memory(total_attempted, n_time_samples, dtype_bytes=bytes_per_sample)
+                    mem_budget_mb = estimate_control_node_memory(self.max_in_memory_control_nodes, n_time_samples, dtype_bytes=bytes_per_sample)
+                    raise RasterMemoryLimitError(
+                        f"自适应控制网格节点超出常驻内存预算上限 (Raster engine exceeded max_in_memory_control_nodes budget)! "
+                        f"当前常驻节点 (Resident): {resident_count}, 待解算新节点 (Pending batch): {pending_count}, "
+                        f"总尝试节点数 (Total attempted): {total_attempted}, 内存上限 (Limit): {self.max_in_memory_control_nodes}. "
+                        f"每个节点时间采样点数 (Time samples per node): {n_time_samples}. "
+                        f"预估所需时序数组内存: {mem_required_mb:.2f} MB (当前预算上限: {mem_budget_mb:.2f} MB). "
+                        f"建议解决方案: (1) 在 config.yaml 中调大 raster.max_in_memory_control_nodes; "
+                        f"(2) 适当增大最小控制网格间距 min_control_spacing_m; "
+                        f"(3) 适当提高淹没误差容限 inundation_error_tolerance_pct; "
+                        f"(4) 裁剪 DEM 空间范围以降低复杂海岸线节点密度。"
+                    )
 
-            for b_i in range(0, n_total, batch_size):
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RasterCalculationCancelled("用户取消了任务。")
-                sub_nodes = uncalculated[b_i:b_i + batch_size]
-                b_lons = np.array([n.lon for n in sub_nodes], dtype=float)
-                b_lats = np.array([n.lat for n in sub_nodes], dtype=float)
+                for n in uncalculated:
+                    n._evaluated = True
 
-                tide_mat, _, flag_mat = predictor.predict_points_period(
-                    lons=b_lons,
-                    lats=b_lats,
-                    start_time=t_start_str,
-                    end_time=t_end_str,
-                    freq=freq,
-                    inclusive=inclusive_mode,
-                    constituents=constituents,
-                    source_tz=source_tz,
-                    max_fes_evaluate_points=self.max_fes_evaluate_points
-                )
-                predictor_call_count[0] += 1
-                evaluated_node_count[0] += len(sub_nodes)
+                batch_size = max(1, self.control_node_batch_size)
+                n_total = len(uncalculated)
 
-                offsets_dict = self.transformer.get_static_datum_offsets(
-                    lons=b_lons, lats=b_lats, target=dem_datum, strict=strict
-                )
-                b_offsets = offsets_dict['offset_m']
-                b_qc_prov = offsets_dict['qc_warning']
+                for b_i in range(0, n_total, batch_size):
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RasterCalculationCancelled("用户取消了任务。")
+                    sub_nodes = uncalculated[b_i:b_i + batch_size]
+                    b_lons = np.array([n.lon for n in sub_nodes], dtype=float)
+                    b_lats = np.array([n.lat for n in sub_nodes], dtype=float)
 
-                for idx_n, n_obj in enumerate(sub_nodes):
-                    t_ser = tide_mat[idx_n]
-                    valid_mask_t = np.isfinite(t_ser)
-                    valid_t = t_ser[valid_mask_t]
-                    off_val = b_offsets[idx_n]
-                    is_valid = (len(valid_t) > 0) and np.isfinite(off_val)
-                    fl = flag_mat[idx_n]
-                    q_min = int(np.min(fl)) if len(fl) > 0 else 0
+                    tide_mat, _, flag_mat = predictor.predict_points_period(
+                        lons=b_lons,
+                        lats=b_lats,
+                        start_time=t_start_str,
+                        end_time=t_end_str,
+                        freq=freq,
+                        inclusive=inclusive_mode,
+                        constituents=constituents,
+                        source_tz=source_tz,
+                        max_fes_evaluate_points=self.max_fes_evaluate_points
+                    )
+                    predictor_call_count[0] += 1
+                    evaluated_node_count[0] += len(sub_nodes)
 
-                    qc_bits = QC_BIT_VALID
-                    if not is_valid:
-                        qc_bits |= QC_BIT_INSUFFICIENT_NODES
-                    if q_min < 0:
-                        qc_bits |= QC_BIT_FES_EXTRAPOLATED
-                    if b_qc_prov[idx_n] == 'QC_DATUM_SOURCE_APPROX':
-                        qc_bits |= QC_BIT_DATUM_SOURCE_APPROX
-                    if np.isnan(off_val):
-                        qc_bits |= QC_BIT_DATUM_INVALID
+                    if str(dem_datum).lower() == 'msl':
+                        b_offsets = np.zeros(len(sub_nodes), dtype=np.float32)
+                        b_qc_prov = np.full(len(sub_nodes), 'NORMAL', dtype=object)
+                    else:
+                        offsets_dict = self.transformer.get_static_datum_offsets(
+                            lons=b_lons, lats=b_lats, target=dem_datum, strict=strict
+                        )
+                        b_offsets = offsets_dict['offset_m']
+                        b_qc_prov = offsets_dict['qc_warning']
 
-                    if is_valid:
-                        # 保存原始 MSL 潮位序列供 Tide Cache 导出 (仅当指定导出 cache 时暂存)
-                        if export_tide_cache_path:
-                            n_obj.tide_msl_raw = t_ser.copy().astype(np.float32)
+                    for idx_n, n_obj in enumerate(sub_nodes):
+                        t_ser = tide_mat[idx_n]
+                        valid_mask_t = np.isfinite(t_ser)
+                        valid_t = t_ser[valid_mask_t]
+                        off_val = b_offsets[idx_n]
+                        is_valid = (len(valid_t) > 0) and np.isfinite(off_val)
+                        fl = flag_mat[idx_n]
+                        q_min = int(np.min(fl)) if len(fl) > 0 else 0
+
+                        qc_bits = QC_BIT_VALID
+                        if not is_valid:
+                            qc_bits |= QC_BIT_INSUFFICIENT_NODES
+                        if q_min < 0:
+                            qc_bits |= QC_BIT_FES_EXTRAPOLATED
+                        if b_qc_prov[idx_n] == 'QC_DATUM_SOURCE_APPROX':
+                            qc_bits |= QC_BIT_DATUM_SOURCE_APPROX
+                        if np.isnan(off_val):
+                            qc_bits |= QC_BIT_DATUM_INVALID
+
+                        if is_valid:
+                            # 保存原始 MSL 潮位序列供 Tide Cache 导出 (仅当指定导出 cache 时暂存)
+                            if export_tide_cache_path:
+                                n_obj.tide_msl_raw = t_ser.copy().astype(np.float32)
+                            else:
+                                n_obj.tide_msl_raw = None
+                            # 原地添加基准偏移并排序，极大节省内存
+                            valid_t += off_val
+                            valid_t.sort()
+                            sorted_w = valid_t.astype(np.float32)
                         else:
                             n_obj.tide_msl_raw = None
-                        # 原地添加基准偏移并排序，极大节省内存
-                        valid_t += off_val
-                        valid_t.sort()
-                        sorted_w = valid_t.astype(np.float32)
-                    else:
-                        n_obj.tide_msl_raw = None
-                        sorted_w = np.array([], dtype=np.float32)
+                            sorted_w = np.array([], dtype=np.float32)
 
-                    n_obj.water_levels_sorted = sorted_w
-                    n_obj.valid = is_valid
-                    n_obj.quality_flag = q_min
-                    n_obj.static_offset_m = float(off_val) if np.isfinite(off_val) else 0.0
-                    n_obj.qc_bitmask = qc_bits
+                        n_obj.water_levels_sorted = sorted_w
+                        n_obj.valid = is_valid
+                        n_obj.quality_flag = q_min
+                        n_obj.static_offset_m = float(off_val) if np.isfinite(off_val) else 0.0
+                        n_obj.qc_bitmask = qc_bits
 
-                del tide_mat
-                del flag_mat
+                    del tide_mat
+                    del flag_mat
 
-        # 4. 生成具有 DEM 支持的初始活动控制网格
-        active_initial_cells: List[Tuple[float, float, float, float]] = []
-        for i_x in range(len(xs_init) - 1):
-            x0, x1 = xs_init[i_x], xs_init[i_x + 1]
-            for i_y in range(len(ys_init) - 1):
-                y0, y1 = ys_init[i_y], ys_init[i_y + 1]
-                c0_f, r1_f = ~info.transform @ (x0, y0)
-                c1_f, r0_f = ~info.transform @ (x1, y1)
-                r_min = int(np.clip(min(r0_f, r1_f) // downsample_factor, 0, h_coarse - 1))
-                r_max = int(np.clip(max(r0_f, r1_f) // downsample_factor + 1, 0, h_coarse))
-                c_min = int(np.clip(min(c0_f, c1_f) // downsample_factor, 0, w_coarse - 1))
-                c_max = int(np.clip(max(c0_f, c1_f) // downsample_factor + 1, 0, w_coarse))
-                if np.any(coarse_active_support[r_min:r_max, c_min:c_max]):
-                    active_initial_cells.append((x0, y0, x1, y1))
-
-        if not active_initial_cells:
+            # 4. 生成具有 DEM 支持的初始活动控制网格
+            active_initial_cells: List[Tuple[float, float, float, float]] = []
             for i_x in range(len(xs_init) - 1):
+                x0, x1 = xs_init[i_x], xs_init[i_x + 1]
                 for i_y in range(len(ys_init) - 1):
-                    active_initial_cells.append((xs_init[i_x], ys_init[i_y], xs_init[i_x + 1], ys_init[i_y + 1]))
+                    y0, y1 = ys_init[i_y], ys_init[i_y + 1]
+                    c0_f, r1_f = ~info.transform @ (x0, y0)
+                    c1_f, r0_f = ~info.transform @ (x1, y1)
+                    r_min = int(np.clip(min(r0_f, r1_f) // downsample_factor, 0, h_coarse - 1))
+                    r_max = int(np.clip(max(r0_f, r1_f) // downsample_factor + 1, 0, h_coarse))
+                    c_min = int(np.clip(min(c0_f, c1_f) // downsample_factor, 0, w_coarse - 1))
+                    c_max = int(np.clip(max(c0_f, c1_f) // downsample_factor + 1, 0, w_coarse))
+                    if np.any(coarse_active_support[r_min:r_max, c_min:c_max]):
+                        active_initial_cells.append((x0, y0, x1, y1))
 
-        initial_node_keys_set = set()
-        for x0, y0, x1, y1 in active_initial_cells:
-            for pt_x in [x0, x1]:
-                for pt_y in [y0, y1]:
-                    initial_node_keys_set.add(_coord_key(pt_x, pt_y))
-        initial_grid_nodes_count = len(initial_node_keys_set)
+            if not active_initial_cells:
+                for i_x in range(len(xs_init) - 1):
+                    for i_y in range(len(ys_init) - 1):
+                        active_initial_cells.append((xs_init[i_x], ys_init[i_y], xs_init[i_x + 1], ys_init[i_y + 1]))
 
-        # 动态计算所需最大细分深度与绝对防护上限 (Dynamic Max Refinement Depth)
-        required_max_depth = int(np.ceil(np.log2(max(1.0, initial_control_spacing_m / max(1.0, min_control_spacing_m)))))
-        effective_max_depth = min(required_max_depth, self.absolute_max_refinement_depth)
+            initial_node_keys_set = set()
+            for x0, y0, x1, y1 in active_initial_cells:
+                for pt_x in [x0, x1]:
+                    for pt_y in [y0, y1]:
+                        initial_node_keys_set.add(_coord_key(pt_x, pt_y))
+            initial_grid_nodes_count = len(initial_node_keys_set)
 
-        if progress_callback:
-            progress_callback(10, f"初始网格就绪 (有效单元: {len(active_initial_cells)} 个, 最大允许深度: {effective_max_depth}), 开始宽度优先自适应细分...")
+            # 动态计算所需最大细分深度与绝对防护上限 (Dynamic Max Refinement Depth)
+            required_max_depth = int(np.ceil(np.log2(max(1.0, initial_control_spacing_m / max(1.0, min_control_spacing_m)))))
+            effective_max_depth = min(required_max_depth, self.absolute_max_refinement_depth)
 
-        # 5. 宽度优先四叉树自适应细分 (Level-wise Breadth-First Refinement)
-        leaf_cells: List[QuadCell] = []
-        cell_id_counter = [0]
-        max_level_reached = [0]
+            if progress_callback:
+                progress_callback(10, f"初始网格就绪 (有效单元: {len(active_initial_cells)} 个, 最大允许深度: {effective_max_depth}), 开始宽度优先自适应细分...")
 
-        current_cells: List[Tuple[float, float, float, float, int]] = [
-            (x0, y0, x1, y1, 0) for x0, y0, x1, y1 in active_initial_cells
-        ]
+            # 5. 宽度优先四叉树自适应细分 (Level-wise Breadth-First Refinement)
+            leaf_cells: List[QuadCell] = []
+            cell_id_counter = [0]
+            max_level_reached = [0]
 
-        with rasterio.open(info.path) as src_for_refine:
-            while current_cells:
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RasterCalculationCancelled("用户取消了任务。")
+            current_cells: List[Tuple[float, float, float, float, int]] = [
+                (x0, y0, x1, y1, 0) for x0, y0, x1, y1 in active_initial_cells
+            ]
 
-                current_level = current_cells[0][4]
-                if current_level > max_level_reached[0]:
-                    max_level_reached[0] = current_level
+            with rasterio.open(info.path) as src_for_refine:
+                while current_cells:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise RasterCalculationCancelled("用户取消了任务。")
 
-                # A. 收集当前层所有候选单元的四角与中心节点
-                nodes_to_batch: List[ControlNode] = []
-                for x0, y0, x1, y1, lvl in current_cells:
-                    na = _get_or_create_node(x0, y0)
-                    nb = _get_or_create_node(x1, y0)
-                    nc = _get_or_create_node(x0, y1)
-                    nd = _get_or_create_node(x1, y1)
-                    ne = _get_or_create_node((x0 + x1) / 2.0, (y0 + y1) / 2.0)
-                    nodes_to_batch.extend([na, nb, nc, nd, ne])
+                    current_level = current_cells[0][4]
+                    if current_level > max_level_reached[0]:
+                        max_level_reached[0] = current_level
 
-                # 统一批量解算当前层的所有未计算节点
-                _evaluate_nodes_batch(nodes_to_batch)
+                    # A. 收集当前层所有候选单元的四角与中心节点
+                    nodes_to_batch: List[ControlNode] = []
+                    for x0, y0, x1, y1, lvl in current_cells:
+                        na = _get_or_create_node(x0, y0)
+                        nb = _get_or_create_node(x1, y0)
+                        nc = _get_or_create_node(x0, y1)
+                        nd = _get_or_create_node(x1, y1)
+                        ne = _get_or_create_node((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                        nodes_to_batch.extend([na, nb, nc, nd, ne])
 
-                # B. 检查边缘探测 (Edge Probing) 需求
-                probe_nodes_to_batch: List[ControlNode] = []
-                cell_probe_map: Dict[int, List[ControlNode]] = {}
+                    # 统一批量解算当前层的所有未计算节点
+                    _evaluate_nodes_batch(nodes_to_batch)
 
-                for idx_cell, (x0, y0, x1, y1, lvl) in enumerate(current_cells):
-                    na = _get_or_create_node(x0, y0)
-                    nb = _get_or_create_node(x1, y0)
-                    nc = _get_or_create_node(x0, y1)
-                    nd = _get_or_create_node(x1, y1)
-                    ne = _get_or_create_node((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+                    # B. 检查边缘探测 (Edge Probing) 需求
+                    probe_nodes_to_batch: List[ControlNode] = []
+                    cell_probe_map: Dict[int, List[ControlNode]] = {}
 
-                    # 若四角和中心全为无效 (FES Invalid / Land)，但单元内可能存在有效 DEM 地形，触发边缘中点探测
-                    if not (na.valid or nb.valid or nc.valid or nd.valid or ne.valid):
+                    for idx_cell, (x0, y0, x1, y1, lvl) in enumerate(current_cells):
+                        na = _get_or_create_node(x0, y0)
+                        nb = _get_or_create_node(x1, y0)
+                        nc = _get_or_create_node(x0, y1)
+                        nd = _get_or_create_node(x1, y1)
+                        ne = _get_or_create_node((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+
+                        # 若四角和中心全为无效 (FES Invalid / Land)，但单元内可能存在有效 DEM 地形，触发边缘中点探测
+                        if not (na.valid or nb.valid or nc.valid or nd.valid or ne.valid):
+                            x_mid = (x0 + x1) / 2.0
+                            y_mid = (y0 + y1) / 2.0
+                            p_ab = _get_or_create_node(x_mid, y0)
+                            p_cd = _get_or_create_node(x_mid, y1)
+                            p_ac = _get_or_create_node(x0, y_mid)
+                            p_bd = _get_or_create_node(x1, y_mid)
+                            probes = [p_ab, p_cd, p_ac, p_bd]
+                            cell_probe_map[idx_cell] = probes
+                            probe_nodes_to_batch.extend(probes)
+
+                    if probe_nodes_to_batch:
+                        _evaluate_nodes_batch(probe_nodes_to_batch)
+
+                    # C. 逐单元判定误差、FES 连续性与细分决策
+                    next_level_cells: List[Tuple[float, float, float, float, int]] = []
+
+                    for idx_cell, (x0, y0, x1, y1, lvl) in enumerate(current_cells):
+                        na = _get_or_create_node(x0, y0)
+                        nb = _get_or_create_node(x1, y0)
+                        nc = _get_or_create_node(x0, y1)
+                        nd = _get_or_create_node(x1, y1)
                         x_mid = (x0 + x1) / 2.0
                         y_mid = (y0 + y1) / 2.0
-                        p_ab = _get_or_create_node(x_mid, y0)
-                        p_cd = _get_or_create_node(x_mid, y1)
-                        p_ac = _get_or_create_node(x0, y_mid)
-                        p_bd = _get_or_create_node(x1, y_mid)
-                        probes = [p_ab, p_cd, p_ac, p_bd]
-                        cell_probe_map[idx_cell] = probes
-                        probe_nodes_to_batch.extend(probes)
+                        ne = _get_or_create_node(x_mid, y_mid)
 
-                if probe_nodes_to_batch:
-                    _evaluate_nodes_batch(probe_nodes_to_batch)
+                        try:
+                            win_f = rasterio.windows.from_bounds(
+                                min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
+                                transform=info.transform
+                            )
+                            c_off = max(0, int(np.floor(win_f.col_off)))
+                            r_off = max(0, int(np.floor(win_f.row_off)))
+                            c_max = min(info.width, int(np.ceil(win_f.col_off + win_f.width)))
+                            r_max = min(info.height, int(np.ceil(win_f.row_off + win_f.height)))
+                            win = Window(c_off, r_off, max(0, c_max - c_off), max(0, r_max - r_off))
+                        except Exception:
+                            win = Window(0, 0, 0, 0)
 
-                # C. 逐单元判定误差、FES 连续性与细分决策
-                next_level_cells: List[Tuple[float, float, float, float, int]] = []
+                        if win.width <= 0 or win.height <= 0:
+                            leaf_cells.append(QuadCell(
+                                cell_id=cell_id_counter[0], x_min=x0, y_min=y0, x_max=x1, y_max=y1,
+                                level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
+                                qc_min_spacing_reached=False, qc_max_refinement_reached=False,
+                                qc_validity_boundary=False, max_error_pct=0.0
+                            ))
+                            cell_id_counter[0] += 1
+                            continue
 
-                for idx_cell, (x0, y0, x1, y1, lvl) in enumerate(current_cells):
-                    na = _get_or_create_node(x0, y0)
-                    nb = _get_or_create_node(x1, y0)
-                    nc = _get_or_create_node(x0, y1)
-                    nd = _get_or_create_node(x1, y1)
-                    x_mid = (x0 + x1) / 2.0
-                    y_mid = (y0 + y1) / 2.0
-                    ne = _get_or_create_node(x_mid, y_mid)
+                        sub_dem = src_for_refine.read(1, window=win)
+                        if info.nodata is not None and np.isfinite(info.nodata):
+                            val_z = sub_dem[~np.isclose(sub_dem, info.nodata) & np.isfinite(sub_dem)]
+                        else:
+                            val_z = sub_dem[np.isfinite(sub_dem)]
 
-                    try:
-                        win_f = rasterio.windows.from_bounds(
-                            min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1),
-                            transform=info.transform
-                        )
-                        c_off = max(0, int(np.floor(win_f.col_off)))
-                        r_off = max(0, int(np.floor(win_f.row_off)))
-                        c_max = min(info.width, int(np.ceil(win_f.col_off + win_f.width)))
-                        r_max = min(info.height, int(np.ceil(win_f.row_off + win_f.height)))
-                        win = Window(c_off, r_off, max(0, c_max - c_off), max(0, r_max - r_off))
-                    except Exception:
-                        win = Window(0, 0, 0, 0)
+                        if len(val_z) == 0:
+                            leaf_cells.append(QuadCell(
+                                cell_id=cell_id_counter[0], x_min=x0, y_min=y0, x_max=x1, y_max=y1,
+                                level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
+                                qc_min_spacing_reached=False, qc_max_refinement_reached=False,
+                                qc_validity_boundary=False, max_error_pct=0.0
+                            ))
+                            cell_id_counter[0] += 1
+                            continue
 
-                    if win.width <= 0 or win.height <= 0:
-                        leaf_cells.append(QuadCell(
-                            cell_id=cell_id_counter[0], x_min=x0, y_min=y0, x_max=x1, y_max=y1,
-                            level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
-                            qc_min_spacing_reached=False, qc_max_refinement_reached=False,
-                            qc_validity_boundary=False, max_error_pct=0.0
-                        ))
-                        cell_id_counter[0] += 1
-                        continue
+                        # 提取单元内部代表性地形高程
+                        if len(val_z) >= 10:
+                            z_test = np.quantile(val_z, [0.10, 0.50, 0.90])
+                        else:
+                            z_test = np.unique(val_z)
 
-                    sub_dem = src_for_refine.read(1, window=win)
-                    if info.nodata is not None and np.isfinite(info.nodata):
-                        val_z = sub_dem[~np.isclose(sub_dem, info.nodata) & np.isfinite(sub_dem)]
-                    else:
-                        val_z = sub_dem[np.isfinite(sub_dem)]
+                        # 1. CCDF 插值误差计算
+                        cell_error = 0.0
+                        corners = [na, nb, nc, nd]
+                        v_corners = [cn for cn in corners if cn.valid and len(cn.water_levels_sorted) > 0]
+                        if ne.valid and len(ne.water_levels_sorted) > 0:
+                            f_true = compute_inundation_frequency(ne.water_levels_sorted, z_test, as_percentage=True)
+                            if len(v_corners) > 0:
+                                f_interp = np.zeros_like(z_test, dtype=float)
+                                w_each = 1.0 / len(v_corners)
+                                for cn in v_corners:
+                                    f_interp += w_each * compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True)
+                                cell_error = float(np.max(np.abs(f_true - f_interp)))
+                        elif len(v_corners) >= 2:
+                            # 中心为陆地但有多个有效海角：评估有效角节点之间的频率变化梯度
+                            corner_freqs = [compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True) for cn in v_corners]
+                            max_diff = 0.0
+                            for i_cf in range(len(corner_freqs)):
+                                for j_cf in range(i_cf + 1, len(corner_freqs)):
+                                    d_cf = float(np.max(np.abs(corner_freqs[i_cf] - corner_freqs[j_cf])))
+                                    if d_cf > max_diff:
+                                        max_diff = d_cf
+                            cell_error = max_diff
 
-                    if len(val_z) == 0:
-                        leaf_cells.append(QuadCell(
-                            cell_id=cell_id_counter[0], x_min=x0, y_min=y0, x_max=x1, y_max=y1,
-                            level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
-                            qc_min_spacing_reached=False, qc_max_refinement_reached=False,
-                            qc_validity_boundary=False, max_error_pct=0.0
-                        ))
-                        cell_id_counter[0] += 1
-                        continue
+                        # 2. FES 有效性突变与连通域边界分析 (Validity Discontinuity Check)
+                        corner_valids = [na.valid, nb.valid, nc.valid, nd.valid]
+                        center_valid = ne.valid
+                        validity_discontinuity = False
 
-                    # 提取单元内部代表性地形高程
-                    if len(val_z) >= 10:
-                        z_test = np.quantile(val_z, [0.10, 0.50, 0.90])
-                    else:
-                        z_test = np.unique(val_z)
-
-                    # 1. CCDF 插值误差计算
-                    cell_error = 0.0
-                    corners = [na, nb, nc, nd]
-                    v_corners = [cn for cn in corners if cn.valid and len(cn.water_levels_sorted) > 0]
-                    if ne.valid and len(ne.water_levels_sorted) > 0:
-                        f_true = compute_inundation_frequency(ne.water_levels_sorted, z_test, as_percentage=True)
-                        if len(v_corners) > 0:
-                            f_interp = np.zeros_like(z_test, dtype=float)
-                            w_each = 1.0 / len(v_corners)
-                            for cn in v_corners:
-                                f_interp += w_each * compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True)
-                            cell_error = float(np.max(np.abs(f_true - f_interp)))
-                    elif len(v_corners) >= 2:
-                        # 中心为陆地但有多个有效海角：评估有效角节点之间的频率变化梯度
-                        corner_freqs = [compute_inundation_frequency(cn.water_levels_sorted, z_test, as_percentage=True) for cn in v_corners]
-                        max_diff = 0.0
-                        for i_cf in range(len(corner_freqs)):
-                            for j_cf in range(i_cf + 1, len(corner_freqs)):
-                                d_cf = float(np.max(np.abs(corner_freqs[i_cf] - corner_freqs[j_cf])))
-                                if d_cf > max_diff:
-                                    max_diff = d_cf
-                        cell_error = max_diff
-
-                    # 2. FES 有效性突变与连通域边界分析 (Validity Discontinuity Check)
-                    corner_valids = [na.valid, nb.valid, nc.valid, nd.valid]
-                    center_valid = ne.valid
-                    validity_discontinuity = False
-
-                    if len(set(corner_valids)) > 1:
-                        validity_discontinuity = True
-                    elif center_valid != corner_valids[0]:
-                        validity_discontinuity = True
-                    elif center_valid and not all(corner_valids):
-                        validity_discontinuity = True
-                    elif not center_valid and any(corner_valids):
-                        validity_discontinuity = True
-
-                    # 边缘探测结果判定
-                    if idx_cell in cell_probe_map:
-                        probe_valids = [p.valid for p in cell_probe_map[idx_cell]]
-                        if any(probe_valids):
+                        if len(set(corner_valids)) > 1:
+                            validity_discontinuity = True
+                        elif center_valid != corner_valids[0]:
+                            validity_discontinuity = True
+                        elif center_valid and not all(corner_valids):
+                            validity_discontinuity = True
+                        elif not center_valid and any(corner_valids):
                             validity_discontinuity = True
 
-                    # 多连通域交错判定
-                    corner_comps = {cn.component_id for cn in [na, nb, nc, nd] if cn.valid and cn.component_id > 0}
-                    if len(corner_comps) > 1:
-                        validity_discontinuity = True
-
-                    cur_spacing = min(x1 - x0, y1 - y0)
-                    can_subdivide_spacing = (cur_spacing / 2.0 >= min_spacing_crs - 1e-6)
-                    can_subdivide_depth = (lvl < effective_max_depth)
-                    can_subdivide = can_subdivide_spacing and can_subdivide_depth
-
-                    if target_mode == "intertidal":
-                        # 潮间带目标感知模式:
-                        # 1. 连通域冲突 (跨水体屏障): 必须细分
-                        topology_conflict = (len(corner_comps) > 1)
-                        # 2. 精度指标: 频率误差超标必须细分
-                        accuracy_fail = (cell_error > inundation_error_tolerance_pct)
-                        # 3. 寻找水体支撑: 无有效角节点，但探测或中心有水体时，细分以捕获水体控制节点
-                        has_valid_corner = any(corner_valids)
-                        probes_found_water = False
+                        # 边缘探测结果判定
                         if idx_cell in cell_probe_map:
-                            probes_found_water = any(p.valid for p in cell_probe_map[idx_cell])
-                        need_water_anchor = (not has_valid_corner) and (center_valid or probes_found_water)
+                            probe_valids = [p.valid for p in cell_probe_map[idx_cell]]
+                            if any(probe_valids):
+                                validity_discontinuity = True
 
-                        should_subdivide = topology_conflict or accuracy_fail or need_water_anchor
-                    else:
-                        should_subdivide = (cell_error > inundation_error_tolerance_pct) or validity_discontinuity
+                        # 多连通域交错判定
+                        corner_comps = {cn.component_id for cn in [na, nb, nc, nd] if cn.valid and cn.component_id > 0}
+                        if len(corner_comps) > 1:
+                            validity_discontinuity = True
 
-                    if should_subdivide and can_subdivide:
-                        next_level_cells.append((x0, y0, x_mid, y_mid, lvl + 1))
-                        next_level_cells.append((x_mid, y0, x1, y_mid, lvl + 1))
-                        next_level_cells.append((x0, y_mid, x_mid, y1, lvl + 1))
-                        next_level_cells.append((x_mid, y_mid, x1, y1, lvl + 1))
-                    else:
-                        reached_min = should_subdivide and not can_subdivide_spacing
-                        reached_max_depth = should_subdivide and can_subdivide_spacing and not can_subdivide_depth
-                        leaf_cells.append(QuadCell(
-                            cell_id=cell_id_counter[0],
-                            x_min=x0, y_min=y0, x_max=x1, y_max=y1,
-                            level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
-                            qc_min_spacing_reached=reached_min,
-                            qc_max_refinement_reached=reached_max_depth,
-                            qc_validity_boundary=validity_discontinuity,
-                            max_error_pct=cell_error
-                        ))
-                        cell_id_counter[0] += 1
+                        cur_spacing = min(x1 - x0, y1 - y0)
+                        can_subdivide_spacing = (cur_spacing / 2.0 >= min_spacing_crs - 1e-6)
+                        can_subdivide_depth = (lvl < effective_max_depth)
+                        can_subdivide = can_subdivide_spacing and can_subdivide_depth
 
-                current_cells = next_level_cells
-                if progress_callback:
-                    pct = min(58, 10 + int(48 * (current_level + 1) / (effective_max_depth + 1)))
-                    progress_callback(pct, f"自适应梯度细分进行中 (已完成 Level {current_level}, 现有 {len(leaf_cells)} 个叶节点单元)...")
+                        if target_mode == "intertidal":
+                            # 潮间带目标感知模式:
+                            # 1. 连通域冲突 (跨水体屏障): 必须细分
+                            topology_conflict = (len(corner_comps) > 1)
+                            # 2. 精度指标: 频率误差超标必须细分
+                            accuracy_fail = (cell_error > inundation_error_tolerance_pct)
+                            # 3. 寻找水体支撑: 无有效角节点，但探测或中心有水体时，细分以捕获水体控制节点
+                            has_valid_corner = any(corner_valids)
+                            probes_found_water = False
+                            if idx_cell in cell_probe_map:
+                                probes_found_water = any(p.valid for p in cell_probe_map[idx_cell])
+                            need_water_anchor = (not has_valid_corner) and (center_valid or probes_found_water)
 
-        final_nodes_count = len(node_cache)
-        active_nodes_count = sum(1 for n in node_cache.values() if n.valid)
+                            should_subdivide = topology_conflict or accuracy_fail or need_water_anchor
+                        else:
+                            should_subdivide = (cell_error > inundation_error_tolerance_pct) or validity_discontinuity
 
-        # 若指定了导出 Tide Cache 路径，在此刻将控制网格及其时序原子序列化
-        if export_tide_cache_path:
-            from .tide_cache import write_tide_cache
+                        if should_subdivide and can_subdivide:
+                            next_level_cells.append((x0, y0, x_mid, y_mid, lvl + 1))
+                            next_level_cells.append((x_mid, y0, x1, y_mid, lvl + 1))
+                            next_level_cells.append((x0, y_mid, x_mid, y1, lvl + 1))
+                            next_level_cells.append((x_mid, y_mid, x1, y1, lvl + 1))
+                        else:
+                            reached_min = should_subdivide and not can_subdivide_spacing
+                            reached_max_depth = should_subdivide and can_subdivide_spacing and not can_subdivide_depth
+                            leaf_cells.append(QuadCell(
+                                cell_id=cell_id_counter[0],
+                                x_min=x0, y_min=y0, x_max=x1, y_max=y1,
+                                level=lvl, node_a=na, node_b=nb, node_c=nc, node_d=nd,
+                                qc_min_spacing_reached=reached_min,
+                                qc_max_refinement_reached=reached_max_depth,
+                                qc_validity_boundary=validity_discontinuity,
+                                max_error_pct=cell_error
+                            ))
+                            cell_id_counter[0] += 1
 
-            # 计算终端时刻水位 (Terminal Tide at end_time) 以支撑连续露出时间域分析 (Schema 1.2)
-            terminal_tides = None
-            try:
-                valid_nodes = [n for n in node_cache.values() if n.valid]
-                if valid_nodes:
-                    all_nodes_list = list(node_cache.values())
-                    all_lons = np.array([n.lon for n in all_nodes_list], dtype=float)
-                    all_lats = np.array([n.lat for n in all_nodes_list], dtype=float)
-                    if hasattr(predictor, "predict_points_at_time"):
-                        t_vals, _ = predictor.predict_points_at_time(
-                            lons=all_lons,
-                            lats=all_lats,
-                            timestamp=t_end_str,
-                            constituents=constituents,
-                            source_tz=source_tz
-                        )
-                        terminal_tides = t_vals.astype(np.float32)
-                    elif hasattr(predictor, "predict_spatial_snapshot"):
-                        t_vals, _ = predictor.predict_spatial_snapshot(
-                            lons=all_lons,
-                            lats=all_lats,
-                            timestamp=t_end_str,
-                            constituents=constituents,
-                            source_tz=source_tz
-                        )
-                        terminal_tides = t_vals.astype(np.float32)
-                    else:
-                        # 兼容旧版 mock predictor: 使用严格半开区间 [t_end, t_end + freq) 取第 0 点 (t_end 处真实水位)
-                        dt_offset = pd.to_timedelta(pd.tseries.frequencies.to_offset(freq).nanos, unit='ns')
-                        t_end_next = (pd.Timestamp(t_end_str) + dt_offset).isoformat()
-                        t_mat, _, _ = predictor.predict_points_period(
-                            lons=all_lons,
-                            lats=all_lats,
-                            start_time=t_end_str,
-                            end_time=t_end_next,
-                            freq=freq,
-                            inclusive="left",
-                            constituents=constituents,
-                            source_tz=source_tz,
-                            max_fes_evaluate_points=self.max_fes_evaluate_points
-                        )
-                        terminal_tides = t_mat[:, 0].astype(np.float32)
-            except Exception as e:
-                warnings.warn(f"无法预计算终端时刻潮位采样: {e}")
+                    current_cells = next_level_cells
+                    if progress_callback:
+                        pct = min(58, 10 + int(48 * (current_level + 1) / (effective_max_depth + 1)))
+                        progress_callback(pct, f"自适应梯度细分进行中 (已完成 Level {current_level}, 现有 {len(leaf_cells)} 个叶节点单元)...")
 
-            start_utc_dt, _ = convert_time_to_utc(t_start_str, source_tz=source_tz)
-            end_utc_dt, _ = convert_time_to_utc(t_end_str, source_tz=source_tz)
-            start_utc_iso = pd.Timestamp(start_utc_dt[0], tz="UTC").isoformat()
-            end_utc_iso = pd.Timestamp(end_utc_dt[0], tz="UTC").isoformat()
-            start_utc_epoch = float(pd.Timestamp(start_utc_dt[0], tz="UTC").timestamp())
-            end_utc_epoch = float(pd.Timestamp(end_utc_dt[0], tz="UTC").timestamp())
+            final_nodes_count = len(node_cache)
+            active_nodes_count = sum(1 for n in node_cache.values() if n.valid)
 
-            cache_meta = {
-                "start_time": t_start_str,
-                "end_time": t_end_str,
-                "start_time_utc": start_utc_iso,
-                "end_time_utc": end_utc_iso,
-                "start_time_utc_epoch": start_utc_epoch,
-                "end_time_utc_epoch": end_utc_epoch,
-                "freq": freq,
-                "source_tz": source_tz,
-                "inclusive": inclusive_mode,
-                "constituents": constituents,
-                "dem_datum": dem_datum,
-                "initial_control_spacing_m": initial_control_spacing_m,
-                "min_control_spacing_m": min_control_spacing_m,
-                "inundation_error_tolerance_pct": inundation_error_tolerance_pct,
-                "target_mode": target_mode,
-                "topology_max_resolution_m": self.topology_max_resolution_m,
-                "topology_valid_fraction_threshold": self.topology_valid_fraction_threshold
-            }
-            write_tide_cache(
-                cache_path=export_tide_cache_path,
-                info=info,
-                leaf_cells=leaf_cells,
-                node_cache=node_cache,
-                time_index=time_idx,
-                metadata=cache_meta,
-                allow_overwrite=allow_overwrite,
-                cancel_event=cancel_event,
-                tide_msl_terminal=terminal_tides
-            )
-            # 导出 Cache 完成后立即解引用所有控制节点的 raw MSL 数组，常驻内存仅保留 water_levels_sorted
-            for n in node_cache.values():
-                n.tide_msl_raw = None
+            # 若指定了导出 Tide Cache 路径，在此刻将控制网格及其时序原子序列化
+            if export_tide_cache_path:
+                from .tide_cache import write_tide_cache
+
+                # 计算终端时刻水位 (Terminal Tide at end_time) 以支撑连续露出时间域分析 (Schema 1.2)
+                terminal_tides = None
+                try:
+                    valid_nodes = [n for n in node_cache.values() if n.valid]
+                    if valid_nodes:
+                        all_nodes_list = list(node_cache.values())
+                        all_lons = np.array([n.lon for n in all_nodes_list], dtype=float)
+                        all_lats = np.array([n.lat for n in all_nodes_list], dtype=float)
+                        if hasattr(predictor, "predict_points_at_time"):
+                            t_vals, _ = predictor.predict_points_at_time(
+                                lons=all_lons,
+                                lats=all_lats,
+                                timestamp=t_end_str,
+                                constituents=constituents,
+                                source_tz=source_tz
+                            )
+                            terminal_tides = t_vals.astype(np.float32)
+                        elif hasattr(predictor, "predict_spatial_snapshot"):
+                            t_vals, _ = predictor.predict_spatial_snapshot(
+                                lons=all_lons,
+                                lats=all_lats,
+                                timestamp=t_end_str,
+                                constituents=constituents,
+                                source_tz=source_tz
+                            )
+                            terminal_tides = t_vals.astype(np.float32)
+                        else:
+                            # 兼容旧版 mock predictor: 使用严格半开区间 [t_end, t_end + freq) 取第 0 点 (t_end 处真实水位)
+                            dt_offset = pd.to_timedelta(pd.tseries.frequencies.to_offset(freq).nanos, unit='ns')
+                            t_end_next = (pd.Timestamp(t_end_str) + dt_offset).isoformat()
+                            t_mat, _, _ = predictor.predict_points_period(
+                                lons=all_lons,
+                                lats=all_lats,
+                                start_time=t_end_str,
+                                end_time=t_end_next,
+                                freq=freq,
+                                inclusive="left",
+                                constituents=constituents,
+                                source_tz=source_tz,
+                                max_fes_evaluate_points=self.max_fes_evaluate_points
+                            )
+                            terminal_tides = t_mat[:, 0].astype(np.float32)
+                except Exception as e:
+                    warnings.warn(f"无法预计算终端时刻潮位采样: {e}")
+
+                start_utc_dt, _ = convert_time_to_utc(t_start_str, source_tz=source_tz)
+                end_utc_dt, _ = convert_time_to_utc(t_end_str, source_tz=source_tz)
+                start_utc_iso = pd.Timestamp(start_utc_dt[0], tz="UTC").isoformat()
+                end_utc_iso = pd.Timestamp(end_utc_dt[0], tz="UTC").isoformat()
+                start_utc_epoch = float(pd.Timestamp(start_utc_dt[0], tz="UTC").timestamp())
+                end_utc_epoch = float(pd.Timestamp(end_utc_dt[0], tz="UTC").timestamp())
+
+                cache_meta = {
+                    "start_time": t_start_str,
+                    "end_time": t_end_str,
+                    "start_time_utc": start_utc_iso,
+                    "end_time_utc": end_utc_iso,
+                    "start_time_utc_epoch": start_utc_epoch,
+                    "end_time_utc_epoch": end_utc_epoch,
+                    "freq": freq,
+                    "source_tz": source_tz,
+                    "inclusive": inclusive_mode,
+                    "constituents": constituents,
+                    "dem_datum": dem_datum,
+                    "initial_control_spacing_m": initial_control_spacing_m,
+                    "min_control_spacing_m": min_control_spacing_m,
+                    "inundation_error_tolerance_pct": inundation_error_tolerance_pct,
+                    "target_mode": target_mode,
+                    "topology_max_resolution_m": self.topology_max_resolution_m,
+                    "topology_valid_fraction_threshold": self.topology_valid_fraction_threshold
+                }
+                write_tide_cache(
+                    cache_path=export_tide_cache_path,
+                    info=info,
+                    leaf_cells=leaf_cells,
+                    node_cache=node_cache,
+                    time_index=time_idx,
+                    metadata=cache_meta,
+                    allow_overwrite=allow_overwrite,
+                    cancel_event=cancel_event,
+                    tide_msl_terminal=terminal_tides
+                )
+                # 导出 Cache 完成后立即解引用所有控制节点的 raw MSL 数组，常驻内存仅保留 water_levels_sorted
+                for n in node_cache.values():
+                    n.tide_msl_raw = None
+
+        finally:
+            if has_scope:
+                predictor.end_spatial_model_scope()
 
         if grid_only:
             elapsed = time.time() - t_start
@@ -2060,6 +2118,7 @@ class RasterTideEngine:
             'TIME_END_UTC_EPOCH': str(end_utc_epoch),
             'TIME_INTERVAL_SEMANTICS': '[start, end)',
             'VERTICAL_DATUM': str(dem_datum).upper(),
+            'ANALYSIS_REFERENCE': str(dem_datum).upper(),
             'SPATIAL_METHOD': 'adaptive_quadtree_control_grid',
             'TOPOLOGY_GUARD': 'valid_mask_topology_aware',
             'INITIAL_CONTROL_SPACING_M': str(initial_control_spacing_m),

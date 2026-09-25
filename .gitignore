@@ -47,3 +47,16 @@ data/geoid/height_anomaly_ell_*.tif
 *.swp
 .DS_Store
 Thumbs.db
+
+# 本地科研验证产物与临时工作区
+validation/artifacts/
+validation/scratch/
+
+# 本地文献与大体积 PDF 资料 (仅本地保留，不纳入仓库跟踪)
+*.pdf
+参考文献/
+
+# 本地 Agent 说明文件 (仅本地保留，不纳入仓库跟踪)
+AGENTS.md
+AGENT.md
+

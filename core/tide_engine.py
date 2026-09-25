@@ -13,7 +13,8 @@ CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine)
 
 import os
 import warnings
-from typing import Optional, Tuple, List, Dict, Any, Callable, Union
+from contextlib import contextmanager
+from typing import Optional, Tuple, List, Dict, Any, Callable, Union, Sequence
 import numpy as np
 import pandas as pd
 
@@ -65,10 +66,27 @@ def validate_constituents(constituents: str | list | tuple | None) -> list[str]:
     raise ValueError(f"无效的分潮参数: {constituents}。允许选项: 'all', 'major8', 或分潮名称列表。")
 
 
+def bbox_contains(
+    parent: Tuple[float, float, float, float],
+    child: Tuple[float, float, float, float],
+    tol: float = 1e-5
+) -> bool:
+    """
+    判断标准四元组 (lon_min, lat_min, lon_max, lat_max) 下 parent 是否在空间上完全包含 child。
+    经度在 [0, 360) 体系下，纬度在 [-90, 90] 体系下。
+    """
+    p_x0, p_y0, p_x1, p_y1 = parent
+    c_x0, c_y0, c_x1, c_y1 = child
+    lat_ok = (c_y0 >= p_y0 - tol) and (c_y1 <= p_y1 + tol)
+    lon_ok = (c_x0 >= p_x0 - tol) and (c_x1 <= p_x1 + tol)
+    return bool(lat_ok and lon_ok)
+
+
 class FESTidePredictor:
     """
     FES2022b 潮位预测引擎。
     采用自适应空间包围框与全球散点空间分块聚类技术。
+    支持生产级 ParentBBox / 局部空间作用域模型复用 (spatial_model_scope)。
     """
 
     def __init__(self, ns_grid_path: str = None):
@@ -90,13 +108,90 @@ class FESTidePredictor:
         if not os.path.exists(self.ns_grid_path):
             raise FileNotFoundError(f"未找到 FES2022b 原生非结构网格文件: {self.ns_grid_path}")
 
+        # 现有单精确包围框缓存 (向后兼容通用单点与无作用域调用)
         self._cached_model = None
         self._cached_bbox = None
         self._cached_constituents = None
 
+        # 空间作用域模型复用状态 (ParentBBox Reuse Scope)
+        self._active_parent_bboxes: Optional[List[Tuple[float, float, float, float]]] = None
+        self._parent_model_cache: Dict[Tuple[str, Tuple[float, float, float, float]], Any] = {}
+        self._scope_stack: List[Tuple[Optional[List[Tuple[float, float, float, float]]], Dict[Any, Any]]] = []
+
+    def begin_spatial_model_scope(
+        self,
+        lons: Optional[Any] = None,
+        lats: Optional[Any] = None,
+        bboxes: Optional[Union[Tuple[float, float, float, float], Sequence[Tuple[float, float, float, float]]]] = None,
+        buffer_deg: float = 1.0
+    ):
+        """
+        开启局部空间生命周期的 FES 模型作用域复用 (ParentBBox Reuse Scope)。
+        在同一作用域内，优先使用已加载且在几何上完全包含请求包围框的父模型，杜绝离散节点批次
+        频繁触发 LGP 模型反序列化 I/O。
+        """
+        self._scope_stack.append((self._active_parent_bboxes, self._parent_model_cache))
+
+        new_bboxes: List[Tuple[float, float, float, float]] = []
+        if bboxes is not None:
+            if isinstance(bboxes, tuple) and len(bboxes) == 4 and all(isinstance(x, (int, float, np.floating)) for x in bboxes):
+                new_bboxes = [(float(bboxes[0]), max(-90.0, float(bboxes[1])), float(bboxes[2]), min(90.0, float(bboxes[3])))]
+            else:
+                new_bboxes = [
+                    (float(b[0]), max(-90.0, float(b[1])), float(b[2]), min(90.0, float(b[3])))
+                    for b in bboxes
+                ]
+        elif lons is not None and lats is not None:
+            lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+            lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+            valid_mask = np.isfinite(lons_arr) & np.isfinite(lats_arr)
+            if np.any(valid_mask):
+                v_lons = lons_arr[valid_mask]
+                v_lats = lats_arr[valid_mask]
+                lons_norm = np.array([normalize_longitude(x, to_360=True) for x in v_lons], dtype=float)
+                new_bboxes = build_circular_fes_bboxes(lons_norm, v_lats, buffer_deg=buffer_deg)
+
+        self._active_parent_bboxes = new_bboxes
+        self._parent_model_cache = {}
+
+    def end_spatial_model_scope(self):
+        """
+        结束当前局部空间生命周期的 FES 模型作用域复用并清理父模型缓存。
+        """
+        if hasattr(self, '_parent_model_cache') and self._parent_model_cache:
+            self._parent_model_cache.clear()
+
+        if hasattr(self, '_scope_stack') and self._scope_stack:
+            prev_parents, prev_cache = self._scope_stack.pop()
+            self._active_parent_bboxes = prev_parents
+            self._parent_model_cache = prev_cache
+        else:
+            self._active_parent_bboxes = None
+            self._parent_model_cache = {}
+
+    @contextmanager
+    def spatial_model_scope(
+        self,
+        lons: Optional[Any] = None,
+        lats: Optional[Any] = None,
+        bboxes: Optional[Union[Tuple[float, float, float, float], Sequence[Tuple[float, float, float, float]]]] = None,
+        buffer_deg: float = 1.0
+    ):
+        """
+        FES 模型局部空间复用上下文管理器。
+        离开上下文或发生异常时，自动清理父缓存并恢复调用前状态。
+        """
+        self.begin_spatial_model_scope(lons=lons, lats=lats, bboxes=bboxes, buffer_deg=buffer_deg)
+        try:
+            yield self
+        finally:
+            self.end_spatial_model_scope()
+
     def _get_model(self, bbox: tuple[float, float, float, float], constituents: list):
         """
         获取或复用符合空间包围框与分潮要求的 TidalModel 实例。
+        若处于 spatial_model_scope 激活状态且父包围框包含当前请求区域，则优先复用父模型；
+        否则使用精确包围框加载并维护单例缓存。
         """
         target_bbox = (
             float(bbox[0]),
@@ -104,8 +199,34 @@ class FESTidePredictor:
             float(bbox[2]),
             min(90.0, float(bbox[3]))
         )
+        const_key = ",".join(sorted(constituents))
 
-        # 检查是否可命中内存缓存（相同包围框与分潮列表）
+        # 1. 处于激活的 Parent 作用域时，检查是否存在包含 target_bbox 的父包围框
+        if getattr(self, '_active_parent_bboxes', None):
+            matching_parent = None
+            for pb in self._active_parent_bboxes:
+                if bbox_contains(pb, target_bbox):
+                    matching_parent = pb
+                    break
+
+            if matching_parent is not None:
+                parent_cache_key = (const_key, matching_parent)
+                if parent_cache_key in self._parent_model_cache:
+                    return self._parent_model_cache[parent_cache_key]
+
+                # 首次加载该父包围框模型
+                lgp_config = cfg.LGP(
+                    path=self.ns_grid_path,
+                    type='lgp2',
+                    codes='lgp2',
+                    constituents=constituents,
+                    bbox=matching_parent
+                )
+                model = lgp_config.load()
+                self._parent_model_cache[parent_cache_key] = model
+                return model
+
+        # 2. 未激活作用域，或请求包围框超出当前父包围框范围：安全回退到单精确缓存加载
         if (self._cached_model is not None and
             self._cached_bbox == target_bbox and
             self._cached_constituents == sorted(constituents)):
@@ -120,7 +241,7 @@ class FESTidePredictor:
         )
         model = lgp_config.load()
 
-        # 更新缓存
+        # 更新精确缓存
         self._cached_model = model
         self._cached_bbox = target_bbox
         self._cached_constituents = sorted(constituents)

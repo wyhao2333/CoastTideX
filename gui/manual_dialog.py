@@ -1,5 +1,5 @@
 """
-CoastTideX 功能说明文档与操作手册对话框 (User Manual Dialog v1.6 Beta)
+CoastTideX 功能说明文档与操作手册对话框 (User Manual Dialog v1.7)
 为用户提供系统级科学原理、高程基准定义、操作指引、时区规范、露出时间域分析与内存配置说明。
 """
 
@@ -39,10 +39,10 @@ MANUAL_HTML = """
 </head>
 <body>
 
-<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta)</h1>
+<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7)</h1> <!-- CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta) -->
 
 <div class="callout-info">
-<b>CoastTideX (全球潮汐与高程基准空间模拟系统)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的高精度桌面与命令行解算系统。
+<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的高精度桌面与命令行解算系统。
 </div>
 
 <h2>一、 系统定位与科学用途 (System Overview & Scientific Scope)</h2>
@@ -299,16 +299,48 @@ MANUAL_HTML = """
 
 <h2>十五、 典型应用场景与推荐工作流 (Recommended Workflows)</h2>
 <ul>
-    <li><b>工作流 A: 沿海潮滩大范围潜在淹没频率反演</b>：
-        准备沿海 10m/30m DEM 文件夹 &rarr; 批量模式选择 <code>tide-inundation</code> &rarr; 基准设为 EGM2008 &rarr; 策略选择 <code>resume</code> &rarr; 运行生成淹没频率与质量掩膜。
+    <li><b>工作流 A: 沿海潮滩大范围潜在淹没频率反演 (v1.7 推荐规范)</b>：
+        准备沿海 DEM 文件夹 &rarr; 在「DEM 基准转换」标签页中将 EGM2008 DEM 转换至 MSL 基准 &rarr; 在栅格解算中基准面选择 MSL &rarr; 运行生成淹没频率与质量掩膜。
     </li>
-    <li><b>工作流 B: 潮间带生态/沙滩潜在露出时间域分析</b>：
-        若已有 <code>*_tide.nc</code> 缓存，选择 <code>exposure-from-cache</code>；若全新处理选择 <code>tide-exposure</code> 或 <code>all</code> &rarr; 运行生成 7 大时间域露出空间栅格产物。
+    <li><b>工作流 B: 潮间带生态/沙滩潜在露出时间域分析 (MSL 统一基准)</b>：
+        使用已转为 MSL 的 DEM &rarr; 选择 <code>tide-exposure</code> 或 <code>exposure-from-cache</code> &rarr; 运行生成 7 大时间域露出空间栅格产物。
     </li>
     <li><b>工作流 C: 遥感影像潮汐校正与瞬时水面高程反演</b>：
-        在 Tab 3 选择 <code>Snapshot</code> &rarr; 设定遥感卫星过轨时间（UTC）与空间 DEM &rarr; 解算瞬时水面高程栅格。
+        在 Tab 4 选择 <code>Snapshot</code> &rarr; 设定遥感卫星过轨时间（UTC）与空间 DEM &rarr; 解算瞬时水面高程栅格。
     </li>
 </ul>
+
+<h2>十六、 v1.7 架构重大升级：MSL 基准统一工作流 (MSL Reference Workflow)</h2>
+<div class="callout-success">
+<b>v1.7 科学范式变革 (Adapted from Seeger & Minderhoud, Nature, 2026):</b><br>
+传统潮滩水动力与淹没分析习惯将瞬时潮位由 MSL 转换为 EGM2008（经过复杂的 Tide + MDT + ΔN），再与 EGM2008 DEM 比较。这种传统模式在沿岸与陆上需要对海洋 MDT 进行未知精度的远距离外推，且容易因多重重力场模型差值引入空间系统偏差。<br>
+<b>CoastTideX v1.7 实现了全新的前置基准对齐工作流 (DEM_EGM2008 &rarr; DEM_MSL)</b>：将陆地高程基准统一到局部平均海平面 (MSL)，随后 FES 原生 MSL 潮位直接与 DEM_MSL 进行几何比较，不仅消除了潮位逐时空计算中的基准转换开销，更保证了潮间带潮水涨落与地形物理基准的严密一致。
+</div>
+
+<h3>1. 核心数学转换方程</h3>
+<pre>Z_MSL = Z_EGM2008 - MDT - ΔN</pre>
+<p>式中：</p>
+<ul>
+    <li><code>Z_EGM2008</code>: 原始 DEM 像元在 EGM2008 大地水准面下的正高（米）；</li>
+    <li><code>MDT</code>: 局部平均动态地形（采用 CNES-CLS22 / CMEMS2020 混合产品，大洋双线性插值，沿岸 3D-IDW 外推）；</li>
+    <li><code>ΔN</code>: 局部高程异常差值改正 <code>N_ref - N_EGM2008</code>（GOCO06s/EIGEN-6C4 与 EGM2008 的严密闭合差值）；</li>
+    <li><code>Z_MSL</code>: 转换后在局部平均海平面 (MSL) 基准下的绝对高程（米）。</li>
+</ul>
+
+<h3>2. 沿岸 MDT 空间外推与保守 100 km 门禁机制</h3>
+<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合潮间带工程的高精度要求，设定了<b>严格的 100 km 保守外推截断距离</b>（注：Nature 原文针对全球宏观尺度采用了 500 km 沿海缓冲区）：</p>
+<ul>
+    <li><b>大洋与近海区 (距离 = 0)</b>: 采用原生 CNES-CLS22 规则网格双线性插值 (Bilinear Interpolation)；</li>
+    <li><b>沿岸潮滩区 (0 &lt; 距离 &le; 100 km)</b>: 建立局部 3D 空间直角坐标球面 KD-Tree 索引，采用反距离加权 (IDW, k=8, p=2.0) 沿岸向陆外推，QC 标记为 1；</li>
+    <li><b>深陆区 (距离 &gt; 100 km)</b>: 严格判定超出有效外推边界，输出 NoData，QC 标记为 2，严禁深陆无物理约束的无限外推。</li>
+</ul>
+
+<h3>3. GUI 推荐操作流程 (One-Click Seamless Workflow)</h3>
+<ol>
+    <li><b>步骤 1 (DEM 转换)</b>：打开 <b>「📐 DEM 基准转换 (EGM2008→MSL)」</b> 标签页，载入 EGM2008 DEM，点击「🚀 开始 DEM 基准转换」，系统流式输出 <code>*_MSL.tif</code> 并自动内嵌 <code>DATUM=MSL</code> 元数据标签；</li>
+    <li><b>步骤 2 (一键直通)</b>：在转换完成卡片上点击<b>「📊 用于单影像淹没频率分析」</b>或<b>「⏳ 用于单影像露出时间分析」</b>；</li>
+    <li><b>步骤 3 (直接解算)</b>：系统自动切换至栅格分析标签页，自动加载 <code>*_MSL.tif</code>，并自动锁定 DEM 基准面为 <b>MSL</b>，即可直接展开高精度潜在淹没与露出分析。</li>
+</ol>
 
 </body>
 </html>
@@ -316,11 +348,11 @@ MANUAL_HTML = """
 
 
 class ManualDialog(QDialog):
-    """功能说明文档与操作手册弹窗 (v1.6 Beta)"""
+    """功能说明文档与操作手册弹窗 (v1.7)"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("CoastTideX 功能说明文档与操作手册 - v1.6 Beta")
+        self.setWindowTitle("CoastTideX 功能说明文档与操作手册 - v1.7")
         self.resize(920, 720)
 
         layout = QVBoxLayout(self)

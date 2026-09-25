@@ -5,7 +5,22 @@ CoastTideX v1.6 Beta - Real FES2022b Exposure Oracle Empirical Evaluation Script
 
 import os
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# 动态定位项目根目录 (必须包含 core/ 与 config.yaml)
+def find_project_root(start_path: str = __file__) -> str:
+    cur = os.path.abspath(start_path)
+    while True:
+        parent = os.path.dirname(cur)
+        if os.path.isdir(os.path.join(cur, "core")) and os.path.isfile(os.path.join(cur, "config.yaml")):
+            return cur
+        if parent == cur:
+            raise RuntimeError("Could not find CoastTideX project root containing core/ and config.yaml")
+        cur = parent
+
+PROJECT_ROOT = find_project_root()
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
 import json
 import tempfile
 import numpy as np
@@ -233,8 +248,9 @@ def run_evaluation(num_samples: int = 30):
         "records": records
     }
 
-    os.makedirs("outputs", exist_ok=True)
-    out_json = os.path.join("outputs", "empirical_fes_exposure_oracle_results.json")
+    out_dir = os.path.join(PROJECT_ROOT, "validation", "artifacts")
+    os.makedirs(out_dir, exist_ok=True)
+    out_json = os.path.join(out_dir, "empirical_fes_exposure_oracle_results.json")
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 

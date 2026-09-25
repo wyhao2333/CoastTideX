@@ -50,9 +50,9 @@ from core.utils import export_dataframe
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.6 Beta")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.7")
 
-    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
+    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), raster (空间栅格), 或 convert-dem (DEM 基准转换)")
 
     # 1. 单点模式参数
     p_single = subparsers.add_parser("single", help="单点时间序列预测 (支持自定义时段或整年模式)")
@@ -90,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap.add_argument("--input", "-i", "--dem", type=str, required=True, help="输入 GeoTIFF / DEM 路径")
     p_snap.add_argument("--output", "-o", type=str, required=True, help="输出 GeoTIFF 路径")
     p_snap.add_argument("--time", type=str, required=True, help="解算时刻 (如 '2024-06-15 12:00:00')")
-    p_snap.add_argument("--datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="目标垂直基准 (默认: egm2008)")
+    p_snap.add_argument("--datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="目标垂直基准 (默认: msl)")
     p_snap.add_argument("--constituents", type=str, default="all", help="分潮集合 (all 或 major8)")
     p_snap.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时刻时区 (默认: UTC)")
     p_snap.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
@@ -98,14 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # 3.2 栅格潜在淹没频率
     p_inund = raster_subparsers.add_parser("inundation", help="自适应控制网格潜在天文潮淹没频率 GeoTIFF 解算")
-    p_inund.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
+    p_inund.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (推荐输入已转换为 MSL 的 DEM)")
     p_inund.add_argument("--output", "-o", type=str, required=True, help="输出淹没频率 GeoTIFF 路径")
     p_inund.add_argument("--qc-output", type=str, default=None, help="输出质量掩膜 GeoTIFF 路径 (默认: <output>_qc.tif)")
     p_inund.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
     p_inund.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_inund.add_argument("--end", type=str, default=None, help="自定义结束时间")
     p_inund.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
-    p_inund.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_inund.add_argument("--dem-datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="DEM 高程基准 (默认: msl，支持旧版兼容 egm2008)")
+    p_inund.add_argument("--analysis-reference", type=str, default=None, help="分析基准参考系 (默认: msl)")
     p_inund.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
     p_inund.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时间时区 (默认: UTC)")
     p_inund.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
@@ -125,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_exposure.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_exposure.add_argument("--end", type=str, default=None, help="自定义结束时间")
     p_exposure.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
-    p_exposure.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_exposure.add_argument("--dem-datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="DEM 高程基准 (默认: msl)")
     p_exposure.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
     p_exposure.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时间时区 (默认: UTC)")
     p_exposure.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
@@ -158,6 +159,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch_raster.add_argument("--no-resume", action="store_true", help="禁用断点恢复")
     p_batch_raster.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
     p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
+
+    # 4. DEM 垂直基准转换模式 (v1.7 MSL Reference Workflow)
+    p_convert = subparsers.add_parser("convert-dem", help="将陆地高程 DEM (EGM2008) 严密转换为局部平均海平面基准 (DEM_MSL)")
+    p_convert.add_argument("--input", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (EGM2008 基准)")
+    p_convert.add_argument("--output", "-o", type=str, default=None, help="输出 DEM_MSL GeoTIFF 路径 (默认: <input>_msl.tif)")
+    p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (默认: <output>_conversion_qc.tif)")
+    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="MDT 沿岸外推最大物理距离上限 (公里，默认: 100.0)")
+    p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
+    p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
 
     return parser
 
@@ -381,7 +391,8 @@ def main(args_list: Optional[List[str]] = None):
                 strict=not args.non_strict,
                 progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}"),
                 target_mode=args.target_mode,
-                export_tide_cache_path=args.export_cache
+                export_tide_cache_path=args.export_cache,
+                analysis_reference=getattr(args, 'analysis_reference', None)
             )
             print(f"[OK] 潜在天文潮淹没频率解算成功！")
             print(f"     有效 DEM 像元数: {summary.valid_pixels:,} / {summary.total_pixels:,}")
@@ -502,6 +513,34 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     任务清单 (JSON): {res['manifest_json']}")
             print(f"     任务清单 (CSV):  {res['manifest_csv']}")
             print(f"     统计结果: 完成 {res['counts']['completed']}, 失败 {res['counts']['failed']}, 跳过 {res['counts']['skipped']}, 取消 {res['counts']['cancelled']}")
+
+    elif args.mode == "convert-dem":
+        from core.dem_datum_converter import convert_dem_to_msl
+        print(f"[*] 启动 DEM 垂直基准转换: EGM2008 -> MSL (Nature 2026 统一基准架构)...")
+        print(f"[*] 输入 DEM: {args.input}")
+        print(f"[*] 最大允许外推距离: {args.max_dist_km} km, 空间分块大小: {args.block_size}")
+
+        def _cli_convert_prog(p, m):
+            print(f"    -> [{p:3d}%] {m}")
+
+        summary = convert_dem_to_msl(
+            input_dem_path=args.input,
+            output_msl_path=args.output,
+            output_qc_path=args.qc_output,
+            max_extrapolation_distance_km=args.max_dist_km,
+            block_size=args.block_size,
+            allow_overwrite=args.overwrite,
+            progress_callback=_cli_convert_prog
+        )
+        print(f"[OK] DEM 垂直基准转换成功！")
+        print(f"     输出 DEM_MSL: {summary.output_path}")
+        print(f"     输出 QC 掩膜: {summary.qc_output_path}")
+        print(f"     网格规格: {summary.width} × {summary.height} (总计 {summary.total_pixels:,} 像元)")
+        print(f"     有效 DEM 像元: {summary.valid_dem_pixels:,}")
+        print(f"     - 大洋原生插值: {summary.native_mdt_pixels:,}")
+        print(f"     - 近岸空间外推: {summary.extrapolated_mdt_pixels:,}")
+        print(f"     - 截断/NoData:   {summary.nodata_pixels:,}")
+        print(f"     总耗时: {summary.elapsed_seconds:.2f} 秒")
 
 
 if __name__ == '__main__':
