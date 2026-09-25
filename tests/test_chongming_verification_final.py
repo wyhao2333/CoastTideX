@@ -64,8 +64,15 @@ class TestChongmingVerificationFinal(unittest.TestCase):
     """崇明岛基准支持与性能验证最终门禁测试套件"""
 
     def setUp(self):
+        self.mock_pyfes = MagicMock()
+        self.patch_modules = patch.dict(sys.modules, {'pyfes': self.mock_pyfes, 'pyfes.config': self.mock_pyfes.config})
+        self.patch_modules.start()
         self.patch_pyfes = patch('core.tide_engine.HAS_PYFES', True)
         self.patch_pyfes.start()
+        self.patch_tide_pyfes = patch('core.tide_engine.pyfes', self.mock_pyfes)
+        self.patch_tide_pyfes.start()
+        self.patch_tide_cfg = patch('core.tide_engine.cfg', self.mock_pyfes.config)
+        self.patch_tide_cfg.start()
         self.mock_config = {
             'paths': {
                 'fes_ns_grid': 'dummy/fes_ns_grid.nc'
@@ -82,7 +89,10 @@ class TestChongmingVerificationFinal(unittest.TestCase):
         }
 
     def tearDown(self):
+        self.patch_tide_cfg.stop()
+        self.patch_tide_pyfes.stop()
         self.patch_pyfes.stop()
+        self.patch_modules.stop()
 
     # 1. Instrumented predictor is actually injected into RasterTideEngine.
     def test_01_instrumented_predictor_injected(self):

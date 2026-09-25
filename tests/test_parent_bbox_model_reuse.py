@@ -32,11 +32,21 @@ class TestParentBBoxModelReuse(unittest.TestCase):
     """测试 FES ParentBBox 模型复用、分潮隔离与异常安全生命周期"""
 
     def setUp(self):
+        import sys
+        self.mock_pyfes = MagicMock()
+        self.patch_modules = patch.dict(sys.modules, {'pyfes': self.mock_pyfes, 'pyfes.config': self.mock_pyfes.config})
+        self.patch_modules.start()
+
         self.patch_pyfes = patch('core.tide_engine.HAS_PYFES', True)
         self.patch_pyfes.start()
 
-        self.mock_lgp_patch = patch('core.tide_engine.cfg.LGP')
-        self.mock_lgp_cls = self.mock_lgp_patch.start()
+        self.patch_tide_pyfes = patch('core.tide_engine.pyfes', self.mock_pyfes)
+        self.patch_tide_pyfes.start()
+
+        self.patch_tide_cfg = patch('core.tide_engine.cfg', self.mock_pyfes.config)
+        self.patch_tide_cfg.start()
+
+        self.mock_lgp_cls = self.mock_pyfes.config.LGP
 
         # 构造 mock LGP model
         self.mock_model = MagicMock()
@@ -57,8 +67,10 @@ class TestParentBBoxModelReuse(unittest.TestCase):
             self.predictor = FESTidePredictor()
 
     def tearDown(self):
-        self.mock_lgp_patch.stop()
+        self.patch_tide_cfg.stop()
+        self.patch_tide_pyfes.stop()
         self.patch_pyfes.stop()
+        self.patch_modules.stop()
 
     def test_01_bbox_contains_geometry(self):
         """测试几何包围框包含关系判定算法及微小数值容差"""

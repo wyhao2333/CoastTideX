@@ -168,6 +168,9 @@ class TestDEMMSLConversion(unittest.TestCase):
 
     def test_07_raster_streaming_conversion(self):
         """测试 7: 2D 矩形分块流式 GeoTIFF 转换、Profile 属性继承与原子临时文件安全"""
+        if not os.path.exists(self.converter.mdt_path):
+            self.skipTest("MDT NC 数据文件不存在，跳过基于真实 MDT 的栅格转换集成测试")
+
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dem = os.path.join(tmpdir, "test_dem_egm2008.tif")
             output_msl = os.path.join(tmpdir, "test_dem_msl.tif")
@@ -226,6 +229,50 @@ class TestDEMMSLConversion(unittest.TestCase):
                 tags = src_msl.tags()
                 self.assertEqual(tags.get('DATUM'), 'MSL')
                 self.assertEqual(tags.get('ANALYSIS_REFERENCE'), 'MSL')
+
+    def test_07b_synthetic_raster_streaming_conversion(self):
+        """测试 7b: 基于小型合成 MDT 的栅格流式转换全流程 (保证 CI 环境下 100% 真实执行)"""
+        import xarray as xr
+        with tempfile.TemporaryDirectory() as tmpdir:
+            synthetic_mdt = os.path.join(tmpdir, "synth_mdt.nc")
+            lats = np.linspace(30.0, 33.0, 10, dtype=np.float32)
+            lons = np.linspace(120.0, 123.0, 10, dtype=np.float32)
+            mdt_grid = np.full((1, len(lats), len(lons)), 0.5, dtype=np.float32)
+            ds = xr.Dataset(
+                {"mdt": (["time", "latitude", "longitude"], mdt_grid)},
+                coords={"latitude": lats, "longitude": lons, "time": [0]}
+            )
+            ds.to_netcdf(synthetic_mdt)
+
+            synth_converter = DEMDatumConverter(mdt_path=synthetic_mdt, max_extrapolation_distance_km=100.0)
+
+            input_dem = os.path.join(tmpdir, "synth_dem.tif")
+            output_msl = os.path.join(tmpdir, "synth_dem_msl.tif")
+            output_qc = os.path.join(tmpdir, "synth_dem_msl_qc.tif")
+
+            w, h = 32, 32
+            trans = from_origin(121.5, 31.5, 0.001, 0.001)
+            elevation_data = np.ones((h, w), dtype=np.float32) * 5.0
+            elevation_data[0:4, 0:4] = -9999.0
+
+            profile = {
+                'driver': 'GTiff', 'height': h, 'width': w, 'count': 1,
+                'dtype': rasterio.float32, 'crs': 'EPSG:4326', 'transform': trans, 'nodata': -9999.0
+            }
+            with rasterio.open(input_dem, 'w', **profile) as dst:
+                dst.write(elevation_data, 1)
+
+            summary = synth_converter.convert_raster(
+                input_dem_path=input_dem,
+                output_msl_path=output_msl,
+                output_qc_path=output_qc,
+                block_size=16,
+                allow_overwrite=True
+            )
+
+            self.assertTrue(os.path.exists(output_msl))
+            self.assertTrue(os.path.exists(output_qc))
+            self.assertEqual(summary.valid_dem_pixels, w * h - 16)
 
     def test_08_cli_convert_dem_parser(self):
         """测试 8: CLI 命令行工具 convert-dem 参数解析测试"""

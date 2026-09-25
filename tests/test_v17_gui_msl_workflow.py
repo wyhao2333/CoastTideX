@@ -8,6 +8,7 @@ import sys
 import unittest
 import tempfile
 import numpy as np
+from unittest.mock import patch, MagicMock
 
 # 启用无头模式 (Headless / Offscreen)
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -188,6 +189,7 @@ class TestV17GUIMSLWorkflow(unittest.TestCase):
     def test_conversion_worker_execution(self):
         """测试 DEMDatumConversionWorker 执行逻辑与 UI 回调更新"""
         from gui.main_window import DEMDatumConversionWorker
+        from core.dem_datum_converter import DEMConversionSummary
         egm_dem = self._create_synthetic_dem("convert_worker_test.tif", is_msl=False)
         out_msl = os.path.join(self.temp_dir.name, "convert_worker_test_MSL.tif")
 
@@ -202,20 +204,54 @@ class TestV17GUIMSLWorkflow(unittest.TestCase):
         }
         worker = DEMDatumConversionWorker(params)
 
-        results = []
-        worker.finished.connect(lambda s: results.append(s))
-        worker.run()
+        mock_summary = DEMConversionSummary(
+            input_path=egm_dem,
+            output_path=out_msl,
+            qc_output_path=None,
+            width=30,
+            height=30,
+            total_pixels=900,
+            valid_dem_pixels=900,
+            native_mdt_pixels=900,
+            extrapolated_mdt_pixels=0,
+            nodata_pixels=0,
+            elapsed_seconds=0.1,
+            max_extrapolation_distance_km=100.0,
+            metadata={'DATUM': 'MSL'}
+        )
 
-        self.assertEqual(len(results), 1)
-        summary = results[0]
-        self.assertEqual(summary.output_path, out_msl)
-        self.assertTrue(os.path.exists(out_msl))
+        def mock_convert_func(**kwargs):
+            with open(out_msl, 'w') as f:
+                f.write('dummy')
+            cb = kwargs.get('progress_callback')
+            if cb:
+                cb(50, "处理中...")
+                cb(100, "完成")
+            return mock_summary
 
-        # 测试 UI 槽函数响应
-        self.win._on_dem_conversion_finished(summary)
-        self.assertFalse(self.win.grp_dem_results.isHidden())
-        self.assertEqual(self.win.lbl_res_dem_path.text(), out_msl)
-        self.assertIn("30 × 30", self.win.lbl_res_dem_dims.text())
+        with patch('core.dem_datum_converter.convert_dem_to_msl', side_effect=mock_convert_func):
+            results = []
+            progresses = []
+            worker.progress.connect(lambda p, m: progresses.append((p, m)))
+            worker.finished.connect(lambda s: results.append(s))
+            worker.run()
+
+            self.assertEqual(len(results), 1)
+            summary = results[0]
+            self.assertEqual(summary.output_path, out_msl)
+            self.assertTrue(os.path.exists(out_msl))
+            self.assertGreaterEqual(len(progresses), 1)
+
+            # 测试 UI 槽函数响应
+            self.win._on_dem_conversion_finished(summary)
+            self.assertFalse(self.win.grp_dem_results.isHidden())
+            self.assertEqual(self.win.lbl_res_dem_path.text(), out_msl)
+            self.assertIn("30 × 30", self.win.lbl_res_dem_dims.text())
+
+        # 测试 worker 取消机制
+        worker.cancel()
+        self.assertTrue(worker._is_cancelled)
+        self.assertTrue(worker.cancel_event.is_set())
 
 
 if __name__ == "__main__":
