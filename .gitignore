@@ -46,3 +46,8 @@ data/geoid/height_anomaly_ell_*.tif
 *.swp
 .DS_Store
 Thumbs.db
+
+# Agent 指令文件 (仅本地保留，不纳入仓库跟踪)
+AGENTS.md
+AGENT.md
+
