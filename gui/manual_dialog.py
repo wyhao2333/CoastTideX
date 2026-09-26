@@ -1,5 +1,5 @@
 """
-CoastTideX 功能说明文档与操作手册对话框 (User Manual Dialog v1.7)
+CoastTideX 功能说明文档与操作手册对话框 (User Manual Dialog v1.7.1)
 为用户提供系统级科学原理、高程基准定义、操作指引、时区规范、露出时间域分析与内存配置说明。
 """
 
@@ -39,10 +39,10 @@ MANUAL_HTML = """
 </head>
 <body>
 
-<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7)</h1> <!-- CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta) -->
+<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7.1)</h1> <!-- CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta) -->
 
 <div class="callout-info">
-<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的高精度桌面与命令行解算系统。
+<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7.1)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的高精度桌面与命令行解算系统。
 </div>
 
 <h2>一、 系统定位与科学用途 (System Overview & Scientific Scope)</h2>
@@ -348,11 +348,11 @@ MANUAL_HTML = """
 
 
 class ManualDialog(QDialog):
-    """功能说明文档与操作手册弹窗 (v1.7)"""
+    """功能说明文档与操作手册弹窗 (v1.7.1)"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("CoastTideX 功能说明文档与操作手册 - v1.7")
+        self.setWindowTitle("CoastTideX 功能说明文档与操作手册 - v1.7.1")
         self.resize(920, 720)
 
         layout = QVBoxLayout(self)

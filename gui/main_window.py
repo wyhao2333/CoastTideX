@@ -27,7 +27,8 @@ from PyQt6.QtWidgets import (
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
     QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
-    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication, QRadioButton
+    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication, QRadioButton,
+    QSizePolicy
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor, QDesktopServices
 import threading
@@ -557,6 +558,21 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._set_default_values()
 
+    def _make_combo_responsive(self, combo: QComboBox, min_chars: int = 8) -> None:
+        """配置下拉框具备响应式压缩能力，避免长文本项撑破父面板宽度。"""
+        combo.setMinimumWidth(0)
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed
+        )
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(min_chars)
+        if combo.currentText():
+            combo.setToolTip(combo.currentText())
+        combo.currentTextChanged.connect(lambda t: combo.setToolTip(t))
+
     def _init_menu(self):
         menubar = self.menuBar()
 
@@ -611,7 +627,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.7 (MSL 统一基准架构)")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.7.1 (MSL 统一基准架构)")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -621,10 +637,13 @@ class MainWindow(QMainWindow):
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
         scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_left.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_left.setFixedWidth(390)
+        scroll_left.setMinimumWidth(370)
 
         left_panel = QWidget()
+        left_panel.setMinimumWidth(0)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout_left = QVBoxLayout(left_panel)
         layout_left.setContentsMargins(2, 2, 8, 2)
         layout_left.setSpacing(12)
@@ -640,6 +659,7 @@ class MainWindow(QMainWindow):
         for name in COASTAL_PRESETS.keys():
             self.combo_presets.addItem(name)
         self.combo_presets.currentIndexChanged.connect(self._on_preset_changed)
+        self._make_combo_responsive(self.combo_presets)
         layout_sp.addWidget(self.combo_presets, 0, 1)
 
         layout_sp.addWidget(QLabel("目标经度 (°):"), 1, 0)
@@ -662,6 +682,7 @@ class MainWindow(QMainWindow):
         self.combo_time_mode.addItem("自定义时段 (Custom Period)", "period")
         self.combo_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
         self.combo_time_mode.currentIndexChanged.connect(self._on_time_mode_changed)
+        self._make_combo_responsive(self.combo_time_mode)
         layout_time.addWidget(self.combo_time_mode, 0, 1)
 
         self.lbl_start = QLabel("起始时间:")
@@ -700,6 +721,7 @@ class MainWindow(QMainWindow):
         self.combo_freq.setCurrentIndex(4)  # 默认 30min
         self.combo_freq.currentIndexChanged.connect(self._update_sample_estimate)
         self.combo_freq.activated.connect(self._on_freq_user_changed)
+        self._make_combo_responsive(self.combo_freq)
         layout_time.addWidget(self.combo_freq, 4, 1)
 
         layout_time.addWidget(QLabel("输入时区:"), 5, 0)
@@ -707,6 +729,7 @@ class MainWindow(QMainWindow):
         self.combo_tz.addItem("UTC (世界标准时)", "UTC")
         self.combo_tz.addItem("本地时间 (Local Time)", "local")
         self.combo_tz.currentIndexChanged.connect(self._on_timezone_changed)
+        self._make_combo_responsive(self.combo_tz)
         layout_time.addWidget(self.combo_tz, 5, 1)
 
         layout_time.addWidget(QLabel("预期样本:"), 6, 0)
@@ -725,6 +748,7 @@ class MainWindow(QMainWindow):
         self.combo_const = QComboBox()
         self.combo_const.addItem("全部 34 个主分潮 (全精度)", "all")
         self.combo_const.addItem("8 个核心主分潮 (快速预览)", "major8")
+        self._make_combo_responsive(self.combo_const)
         layout_model.addWidget(self.combo_const, 0, 1)
 
         layout_model.addWidget(QLabel("计算基准面:"), 1, 0)
@@ -734,6 +758,7 @@ class MainWindow(QMainWindow):
         self.combo_compute_datum.addItem("仅 EGM2008 (大地水准面正高)", "egm2008")
         self.combo_compute_datum.addItem("仅 MSL (相对平均海平面)", "msl")
         self.combo_compute_datum.currentIndexChanged.connect(self._on_compute_datum_changed)
+        self._make_combo_responsive(self.combo_compute_datum)
         layout_model.addWidget(self.combo_compute_datum, 1, 1)
 
         layout_model.addWidget(QLabel("显示/统计基准:"), 2, 0)
@@ -743,6 +768,7 @@ class MainWindow(QMainWindow):
         self.combo_display_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco")
         self.combo_display_datum.addItem("WGS84 (空间几何椭球高)", "wgs")
         self.combo_display_datum.currentIndexChanged.connect(self._on_datum_display_changed)
+        self._make_combo_responsive(self.combo_display_datum)
         layout_model.addWidget(self.combo_display_datum, 2, 1)
 
         layout_left.addWidget(grp_model)
@@ -759,7 +785,7 @@ class MainWindow(QMainWindow):
         layout_left.addWidget(self.prog_single)
 
         # 统计卡片面板
-        grp_stat = QGroupBox("4. 统计极值指标 (当前选定基准)")
+        grp_stat = QGroupBox("4. 统计极值指标 (选定基准)")
         layout_stat = QGridLayout(grp_stat)
         self.lbl_stat_target = QLabel("EGM2008 基准")
         self.lbl_max = QLabel("-")
@@ -790,7 +816,7 @@ class MainWindow(QMainWindow):
 
         layout_left.addStretch()
         scroll_left.setWidget(left_panel)
-        layout.addWidget(scroll_left)
+        layout.addWidget(scroll_left, stretch=1)
 
         # 右侧图表与表格展示 (分割器)
         splitter_right = QSplitter(Qt.Orientation.Vertical)
@@ -834,7 +860,7 @@ class MainWindow(QMainWindow):
         splitter_right.addWidget(table_container)
         splitter_right.setSizes([450, 250])
 
-        layout.addWidget(splitter_right, stretch=1)
+        layout.addWidget(splitter_right, stretch=2)
 
     def _setup_batch_tab(self):
         layout = QVBoxLayout(self.tab_batch)
@@ -914,9 +940,13 @@ class MainWindow(QMainWindow):
         """配置 DEM 基准转换 (EGM2008 -> MSL) 选项卡 (v1.7 / v1.7.1 批量增强)"""
         scroll = QScrollArea(self.tab_dem_convert)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout_main = QVBoxLayout(panel)
         layout_main.setContentsMargins(10, 10, 10, 10)
         layout_main.setSpacing(12)
@@ -924,8 +954,10 @@ class MainWindow(QMainWindow):
         # 0. 模式选择器 (单影像 vs 批量目录)
         grp_mode = QGroupBox("模式选择 / Operation Mode")
         layout_mode = QHBoxLayout(grp_mode)
-        self.radio_dem_mode_single = QRadioButton("📄 单幅 DEM 影像转换 (Single DEM File)")
-        self.radio_dem_mode_batch = QRadioButton("📁 批量 DEM 目录转换 (Batch DEM Directory)")
+        self.radio_dem_mode_single = QRadioButton("📄 单幅 DEM 转换 (Single DEM)")
+        self.radio_dem_mode_single.setToolTip("单幅 DEM 影像垂直基准转换 (EGM2008 -> MSL)")
+        self.radio_dem_mode_batch = QRadioButton("📁 批量 DEM 转换 (Batch Directory)")
+        self.radio_dem_mode_batch.setToolTip("批量 DEM 目录扫描与队列转换 (EGM2008 -> MSL)")
         self.radio_dem_mode_single.setChecked(True)
         self.radio_dem_mode_single.toggled.connect(self._on_dem_mode_toggled)
         layout_mode.addWidget(self.radio_dem_mode_single)
@@ -947,6 +979,9 @@ class MainWindow(QMainWindow):
         layout_in.addWidget(QLabel("输入 DEM GeoTIFF:"), 0, 0)
         self.edit_dem_input = QLineEdit()
         self.edit_dem_input.setPlaceholderText("请选择基于 EGM2008 大地水准面正高的高程栅格 (GeoTIFF)...")
+        self.edit_dem_input.setMinimumWidth(0)
+        self.edit_dem_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_input.textChanged.connect(lambda t: self.edit_dem_input.setToolTip(t))
         self.edit_dem_input.textChanged.connect(self._on_dem_input_changed)
         layout_in.addWidget(self.edit_dem_input, 0, 1)
 
@@ -1019,13 +1054,17 @@ class MainWindow(QMainWindow):
 
         layout_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
         combo_target_datum = QComboBox()
-        combo_target_datum.addItem("EGM2008 → 局部平均海平面 (Local MSL) (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)", "msl")
+        combo_target_datum.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
+        combo_target_datum.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        self._make_combo_responsive(combo_target_datum)
         combo_target_datum.setEnabled(False)
         layout_params.addWidget(combo_target_datum, 0, 1, 1, 3)
 
         layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
         combo_mdt_source = QComboBox()
-        combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT (原生大洋双线性插值 + 沿岸 3D-IDW 外推)", "cnes_cls22")
+        combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT", "cnes_cls22")
+        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (上限 100 km)")
+        self._make_combo_responsive(combo_mdt_source)
         combo_mdt_source.setEnabled(False)
         layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
 
@@ -1046,15 +1085,16 @@ class MainWindow(QMainWindow):
         self.spin_dem_block_size.setSuffix(" px")
         layout_params.addWidget(self.spin_dem_block_size, 2, 3)
 
-        self.chk_dem_apply_deltan = QCheckBox("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 与 EGM2008 闭合改正)")
+        self.chk_dem_apply_deltan = QCheckBox("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 闭合改正)")
+        self.chk_dem_apply_deltan.setToolTip("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 与 EGM2008 闭合改正)")
         self.chk_dem_apply_deltan.setChecked(True)
         self.chk_dem_apply_deltan.setEnabled(False)
-        layout_params.addWidget(self.chk_dem_apply_deltan, 3, 0, 1, 2)
+        layout_params.addWidget(self.chk_dem_apply_deltan, 3, 0, 1, 4)
 
         self.chk_dem_save_qc = QCheckBox("保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask)")
         self.chk_dem_save_qc.setChecked(False)
         self.chk_dem_save_qc.stateChanged.connect(self._on_dem_save_qc_toggled)
-        layout_params.addWidget(self.chk_dem_save_qc, 3, 2, 1, 2)
+        layout_params.addWidget(self.chk_dem_save_qc, 4, 0, 1, 4)
 
         layout_single.addWidget(grp_params)
 
@@ -1066,6 +1106,9 @@ class MainWindow(QMainWindow):
         layout_exec.addWidget(QLabel("输出 DEM_MSL 文件:"), 0, 0)
         self.edit_dem_output = QLineEdit()
         self.edit_dem_output.setPlaceholderText("输出 DEM_MSL GeoTIFF 路径 (默认: <输入路径>_MSL.tif)...")
+        self.edit_dem_output.setMinimumWidth(0)
+        self.edit_dem_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_output.textChanged.connect(lambda t: self.edit_dem_output.setToolTip(t))
         layout_exec.addWidget(self.edit_dem_output, 0, 1)
 
         btn_browse_out = QPushButton("浏览...")
@@ -1077,6 +1120,9 @@ class MainWindow(QMainWindow):
         layout_exec.addWidget(self.lbl_dem_qc_output, 1, 0)
         self.edit_dem_qc_output = QLineEdit()
         self.edit_dem_qc_output.setPlaceholderText("输出 QC 掩膜 GeoTIFF 路径...")
+        self.edit_dem_qc_output.setMinimumWidth(0)
+        self.edit_dem_qc_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_qc_output.textChanged.connect(lambda t: self.edit_dem_qc_output.setToolTip(t))
         layout_exec.addWidget(self.edit_dem_qc_output, 1, 1)
 
         self.btn_browse_dem_qc = QPushButton("浏览...")
@@ -1199,6 +1245,9 @@ class MainWindow(QMainWindow):
         layout_batch_dirs.addWidget(QLabel("输入 DEM 文件夹:"), 0, 0)
         self.edit_batch_dem_input = QLineEdit()
         self.edit_batch_dem_input.setPlaceholderText("选择包含 EGM2008 DEM 瓦片的目录 (支持递归扫描子目录)...")
+        self.edit_batch_dem_input.setMinimumWidth(0)
+        self.edit_batch_dem_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_batch_dem_input.textChanged.connect(lambda t: self.edit_batch_dem_input.setToolTip(t))
         layout_batch_dirs.addWidget(self.edit_batch_dem_input, 0, 1)
 
         self.btn_browse_batch_dem_in = QPushButton("浏览目录...")
@@ -1218,6 +1267,9 @@ class MainWindow(QMainWindow):
         layout_batch_dirs.addWidget(QLabel("输出 DEM_MSL 文件夹:"), 2, 0)
         self.edit_batch_dem_output = QLineEdit()
         self.edit_batch_dem_output.setPlaceholderText("输出文件夹路径 (默认: <输入目录>/DEM_MSL_output)...")
+        self.edit_batch_dem_output.setMinimumWidth(0)
+        self.edit_batch_dem_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_batch_dem_output.textChanged.connect(lambda t: self.edit_batch_dem_output.setToolTip(t))
         layout_batch_dirs.addWidget(self.edit_batch_dem_output, 2, 1)
 
         self.btn_browse_batch_dem_out = QPushButton("更改目录...")
@@ -1234,7 +1286,9 @@ class MainWindow(QMainWindow):
 
         layout_batch_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
         combo_batch_target = QComboBox()
-        combo_batch_target.addItem("EGM2008 → 局部平均海平面 (Local MSL) (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)", "msl")
+        combo_batch_target.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
+        combo_batch_target.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        self._make_combo_responsive(combo_batch_target)
         combo_batch_target.setEnabled(False)
         layout_batch_params.addWidget(combo_batch_target, 0, 1, 1, 3)
 
@@ -1263,11 +1317,11 @@ class MainWindow(QMainWindow):
 
         self.chk_batch_dem_resume = QCheckBox("断点恢复 (Resume, 自动跳过已有完整产物并保留清单)")
         self.chk_batch_dem_resume.setChecked(True)
-        layout_batch_params.addWidget(self.chk_batch_dem_resume, 3, 0, 1, 2)
+        layout_batch_params.addWidget(self.chk_batch_dem_resume, 3, 0, 1, 4)
 
         self.chk_batch_dem_overwrite = QCheckBox("强制覆盖 (Overwrite, 强制重新转换所有瓦片)")
         self.chk_batch_dem_overwrite.setChecked(False)
-        layout_batch_params.addWidget(self.chk_batch_dem_overwrite, 3, 2, 1, 2)
+        layout_batch_params.addWidget(self.chk_batch_dem_overwrite, 4, 0, 1, 4)
 
         layout_batch.addWidget(grp_batch_params)
 
@@ -1783,9 +1837,13 @@ class MainWindow(QMainWindow):
     def _setup_raster_tab(self):
         scroll = QScrollArea(self.tab_raster)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout_main = QVBoxLayout(panel)
         layout_main.setContentsMargins(10, 10, 10, 10)
         layout_main.setSpacing(12)
@@ -1798,6 +1856,9 @@ class MainWindow(QMainWindow):
         layout_in.addWidget(QLabel("输入 GeoTIFF 文件:"), 0, 0)
         self.edit_raster_input = QLineEdit()
         self.edit_raster_input.setPlaceholderText("请选择具备有效坐标参考系 (CRS) 的 GeoTIFF 影像或 DEM...")
+        self.edit_raster_input.setMinimumWidth(0)
+        self.edit_raster_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_raster_input.textChanged.connect(lambda t: self.edit_raster_input.setToolTip(t))
         self.edit_raster_input.textChanged.connect(self._on_raster_input_changed)
         layout_in.addWidget(self.edit_raster_input, 0, 1)
 
@@ -2039,6 +2100,9 @@ class MainWindow(QMainWindow):
         layout_exec.addWidget(self.lbl_raster_output, 0, 0)
         self.edit_raster_output = QLineEdit()
         self.edit_raster_output.setPlaceholderText("输出 GeoTIFF 路径...")
+        self.edit_raster_output.setMinimumWidth(0)
+        self.edit_raster_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_raster_output.textChanged.connect(lambda t: self.edit_raster_output.setToolTip(t))
         layout_exec.addWidget(self.edit_raster_output, 0, 1)
 
         btn_browse_out = QPushButton("浏览...")
@@ -3003,7 +3067,7 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.7</h3>"
+            "<h3>CoastTideX v1.7.1</h3>"
             "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (MSL Reference Workflow)</b></p>"
             "<p>致力于为海洋工程、海岸带遥感、大地测量与潮滩生态演变建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
@@ -3043,54 +3107,72 @@ class MainWindow(QMainWindow):
 
 
     def _setup_batch_raster_tab(self):
-        """初始化 v1.5 批量潮间带栅格解算与 Tide Cache 选项卡"""
-        layout = QHBoxLayout(self.tab_batch_raster)
-        layout.setSpacing(10)
+        """初始化批量潮间带栅格解算与 Tide Cache 响应式界面。"""
+        layout = QVBoxLayout(self.tab_batch_raster)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
-        # 左侧控制面板 (包装在 QScrollArea 内)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        # 左侧控制面板 (包装在 QScrollArea 内，支持自适应垂直滚动与宽度拉伸)
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
         scroll_left.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_left.setMinimumWidth(390)
-        scroll_left.setMaximumWidth(450)
+        scroll_left.setMinimumWidth(340)
+        scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         panel_widget = QWidget()
+        panel_widget.setMinimumWidth(0)
+        panel_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         panel_layout = QVBoxLayout(panel_widget)
         panel_layout.setSpacing(10)
         panel_layout.setContentsMargins(5, 5, 5, 5)
 
         # 1. 文件夹输入
-        grp_input = QGroupBox("📂 批量输入与输出目录 / Directories")
+        grp_input = QGroupBox("📂 批量目录 / Directories")
         vbox_input = QVBoxLayout(grp_input)
         
-        vbox_input.addWidget(QLabel("输入 GeoTIFF 文件夹路径:"))
+        lbl_batch_in = QLabel("输入 GeoTIFF 文件夹路径:")
+        lbl_batch_in.setWordWrap(True)
+        vbox_input.addWidget(lbl_batch_in)
         h_in = QHBoxLayout()
         self.txt_batch_in_dir = QLineEdit()
         self.txt_batch_in_dir.setPlaceholderText("选择包含沙滩/潮滩 DEM 的文件夹...")
+        self.txt_batch_in_dir.setMinimumWidth(0)
+        self.txt_batch_in_dir.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.txt_batch_in_dir.textChanged.connect(lambda t: self.txt_batch_in_dir.setToolTip(t))
         self.btn_browse_batch_in = QPushButton("浏览...")
         self.btn_browse_batch_in.clicked.connect(self._on_browse_batch_input)
-        h_in.addWidget(self.txt_batch_in_dir)
-        h_in.addWidget(self.btn_browse_batch_in)
+        h_in.addWidget(self.txt_batch_in_dir, stretch=1)
+        h_in.addWidget(self.btn_browse_batch_in, stretch=0)
         vbox_input.addLayout(h_in)
 
         self.chk_batch_recursive = QCheckBox("递归扫描子目录 (Recursive)")
         vbox_input.addWidget(self.chk_batch_recursive)
 
-        self.btn_scan_batch = QPushButton("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch = QPushButton("🔍 扫描待解算影像 (Scan)")
         self.btn_scan_batch.setObjectName("btn_batch_scan")
         self.btn_scan_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scan_batch.setMinimumWidth(0)
         self.btn_scan_batch.setToolTip("扫描并预览当前目录中将参与批量解算的 GeoTIFF；不会开始潮位计算，只读取文件路径与 GeoTIFF 头信息。")
         self.btn_scan_batch.clicked.connect(self._on_scan_batch_rasters)
         vbox_input.addWidget(self.btn_scan_batch)
 
-        vbox_input.addWidget(QLabel("输出文件夹路径 (默认: <input>/CoastTideX_output):"))
+        lbl_batch_out = QLabel("输出文件夹路径 (默认: <input>/CoastTideX_output):")
+        lbl_batch_out.setWordWrap(True)
+        vbox_input.addWidget(lbl_batch_out)
         h_out = QHBoxLayout()
         self.txt_batch_out_dir = QLineEdit()
         self.txt_batch_out_dir.setPlaceholderText("留空自动在输入目录下创建 CoastTideX_output...")
+        self.txt_batch_out_dir.setMinimumWidth(0)
+        self.txt_batch_out_dir.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.txt_batch_out_dir.textChanged.connect(lambda t: self.txt_batch_out_dir.setToolTip(t))
         self.btn_browse_batch_out = QPushButton("更改...")
         self.btn_browse_batch_out.clicked.connect(self._on_browse_batch_output)
-        h_out.addWidget(self.txt_batch_out_dir)
-        h_out.addWidget(self.btn_browse_batch_out)
+        h_out.addWidget(self.txt_batch_out_dir, stretch=1)
+        h_out.addWidget(self.btn_browse_batch_out, stretch=0)
         vbox_input.addLayout(h_out)
 
         self.txt_batch_in_dir.textChanged.connect(self._invalidate_batch_scan)
@@ -3100,7 +3182,7 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(grp_input)
 
         # 2. 预测时间与时间步长
-        self.grp_batch_time = QGroupBox("⏱️ 预测时段与时间步长 / Temporal Scope")
+        self.grp_batch_time = QGroupBox("⏱️ 预测时段 / Temporal")
         vbox_time = QVBoxLayout(self.grp_batch_time)
 
         h_tm = QHBoxLayout()
@@ -3109,6 +3191,7 @@ class MainWindow(QMainWindow):
         self.combo_batch_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
         self.combo_batch_time_mode.addItem("自定义时段 (Custom Period)", "period")
         self.combo_batch_time_mode.currentIndexChanged.connect(self._on_batch_time_mode_changed)
+        self._make_combo_responsive(self.combo_batch_time_mode)
         h_tm.addWidget(self.combo_batch_time_mode)
         vbox_time.addLayout(h_tm)
 
@@ -3126,23 +3209,24 @@ class MainWindow(QMainWindow):
         self.wgt_batch_period = QWidget()
         vbox_period = QVBoxLayout(self.wgt_batch_period)
         vbox_period.setContentsMargins(0, 0, 0, 0)
-        h_st = QHBoxLayout()
-        h_st.addWidget(QLabel("起始时间 (UTC):"))
+        vbox_period.setSpacing(4)
+        vbox_period.addWidget(QLabel("起始时间 (UTC):"))
         self.time_batch_start = QDateTimeEdit(QDateTime.currentDateTimeUtc())
         self.time_batch_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_batch_start.setCalendarPopup(True)
+        self.time_batch_start.setMinimumWidth(0)
+        self.time_batch_start.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.time_batch_start.dateTimeChanged.connect(self._update_batch_expected_samples)
-        h_st.addWidget(self.time_batch_start)
-        vbox_period.addLayout(h_st)
+        vbox_period.addWidget(self.time_batch_start)
 
-        h_et = QHBoxLayout()
-        h_et.addWidget(QLabel("结束时间 (UTC):"))
+        vbox_period.addWidget(QLabel("结束时间 (UTC):"))
         self.time_batch_end = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(30))
         self.time_batch_end.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_batch_end.setCalendarPopup(True)
+        self.time_batch_end.setMinimumWidth(0)
+        self.time_batch_end.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.time_batch_end.dateTimeChanged.connect(self._update_batch_expected_samples)
-        h_et.addWidget(self.time_batch_end)
-        vbox_period.addLayout(h_et)
+        vbox_period.addWidget(self.time_batch_end)
 
         self.wgt_batch_period.setVisible(False)
         vbox_time.addWidget(self.wgt_batch_period)
@@ -3152,6 +3236,7 @@ class MainWindow(QMainWindow):
         self.cmb_batch_step = QComboBox()
         self.cmb_batch_step.addItems(["30min (推荐)", "1h", "15min", "10min", "2h", "Custom... (自定义)"])
         self.cmb_batch_step.currentIndexChanged.connect(self._on_batch_step_changed)
+        self._make_combo_responsive(self.cmb_batch_step)
         h_step.addWidget(self.cmb_batch_step)
         vbox_time.addLayout(h_step)
 
@@ -3163,32 +3248,40 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.grp_batch_time)
 
         # 3. 科学参数与目标感知
-        self.grp_batch_sci = QGroupBox("⚙️ 科学参数与目标模式 / Scientific Options")
+        self.grp_batch_sci = QGroupBox("⚙️ 科学参数 / Options")
         vbox_sci = QVBoxLayout(self.grp_batch_sci)
 
         h_datum = QHBoxLayout()
         h_datum.addWidget(QLabel("DEM 高程基准:"))
         self.cmb_batch_datum = QComboBox()
-        self.cmb_batch_datum.addItems(["MSL (推荐 - v1.7 统一基准)", "EGM2008 (兼容模式)", "GOCO06s (全球大洋)", "WGS84 椭球高"])
+        self.cmb_batch_datum.addItem("MSL (推荐 - v1.7 统一基准)", "msl")
+        self.cmb_batch_datum.addItem("EGM2008 (兼容模式)", "egm2008")
+        self.cmb_batch_datum.addItem("GOCO06s (全球大洋)", "goco06s")
+        self.cmb_batch_datum.addItem("WGS84 椭球高", "wgs84")
+        self._make_combo_responsive(self.cmb_batch_datum)
         h_datum.addWidget(self.cmb_batch_datum)
         vbox_sci.addLayout(h_datum)
 
         h_const = QHBoxLayout()
         h_const.addWidget(QLabel("天文分潮集合:"))
         self.cmb_batch_const = QComboBox()
-        self.cmb_batch_const.addItems(["all (全套 34 分潮)", "major8 (8大主分潮)"])
+        self.cmb_batch_const.addItem("all (全套 34 分潮)", "all")
+        self.cmb_batch_const.addItem("major8 (8大主分潮)", "major8")
+        self._make_combo_responsive(self.cmb_batch_const)
         h_const.addWidget(self.cmb_batch_const)
         vbox_sci.addLayout(h_const)
 
         h_target = QHBoxLayout()
         h_target.addWidget(QLabel("目标区域模式:"))
         self.cmb_batch_target_mode = QComboBox()
-        self.cmb_batch_target_mode.addItems(["intertidal (沙滩/潮间带目标感知, 默认)", "standard (标准全网格自适应)"])
+        self.cmb_batch_target_mode.addItem("intertidal (潮间带感知, 默认)", "intertidal")
+        self.cmb_batch_target_mode.addItem("standard (标准全网格自适应)", "standard")
+        self._make_combo_responsive(self.cmb_batch_target_mode)
         h_target.addWidget(self.cmb_batch_target_mode)
         vbox_sci.addLayout(h_target)
 
         # 沿岸外推 Fallback (根据审查结果禁用)
-        self.chk_batch_fallback = QCheckBox("允许官方沿岸外推 FES 回退 (Coastal Fallback)")
+        self.chk_batch_fallback = QCheckBox("FES 沿岸回退 (当前禁用)")
         self.chk_batch_fallback.setChecked(False)
         self.chk_batch_fallback.setEnabled(False)
         self.chk_batch_fallback.setToolTip("【只读审查结论】本地 ocean_tide_extrapolated 均为 .nc.xz 压缩包且掩膜为规则网格，Phase 1 维持原生 LGP2 高阶非结构有限元网格，回退机制暂未激活。")
@@ -3197,19 +3290,20 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.grp_batch_sci)
 
         # 4. 任务模式与调度
-        grp_job = QGroupBox("📋 运行模式与输出策略 / Job Mode & Policy")
+        grp_job = QGroupBox("📋 运行策略 / Job Policy")
         vbox_job = QVBoxLayout(grp_job)
 
         h_jm = QHBoxLayout()
         h_jm.addWidget(QLabel("解算流程:"))
         self.cmb_batch_job_mode = QComboBox()
-        self.cmb_batch_job_mode.addItem("1. 完整流程: Tide Cache + 潜在淹没频率 (默认)", "tide-inundation")
-        self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (生成 *_tide.nc)", "tide")
-        self.cmb_batch_job_mode.addItem("3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)", "inundation-from-cache")
-        self.cmb_batch_job_mode.addItem("4. 完整流程: Tide Cache + 潜在露出分析 (tide-exposure)", "tide-exposure")
-        self.cmb_batch_job_mode.addItem("5. 基于已有 Tide Cache 解算潜在露出 (零 FES 开销)", "exposure-from-cache")
-        self.cmb_batch_job_mode.addItem("6. 全要素产物包 (Tide Cache + 淹没频率 + 潜在露出)", "all")
+        self.cmb_batch_job_mode.addItem("1. 完整流程: Cache + 潜在淹没 (默认)", "tide-inundation")
+        self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (*_tide.nc)", "tide")
+        self.cmb_batch_job_mode.addItem("3. Cache → 淹没频率 (零 FES)", "inundation-from-cache")
+        self.cmb_batch_job_mode.addItem("4. 完整流程: Cache + 潜在露出分析", "tide-exposure")
+        self.cmb_batch_job_mode.addItem("5. Cache → 露出分析 (零 FES)", "exposure-from-cache")
+        self.cmb_batch_job_mode.addItem("6. 全要素产物包 (Cache+淹没+露出)", "all")
         self.cmb_batch_job_mode.currentIndexChanged.connect(self._on_batch_job_mode_changed)
+        self._make_combo_responsive(self.cmb_batch_job_mode)
         h_jm.addWidget(self.cmb_batch_job_mode)
         vbox_job.addLayout(h_jm)
 
@@ -3223,16 +3317,17 @@ class MainWindow(QMainWindow):
         h_policy = QHBoxLayout()
         h_policy.addWidget(QLabel("已有产物策略:"))
         self.cmb_batch_existing_policy = QComboBox()
-        self.cmb_batch_existing_policy.addItem("断点恢复 (Resume, 跳过已有完整产物) [默认]", "resume")
-        self.cmb_batch_existing_policy.addItem("冲突报错 (Error if exists, 拒绝覆写)", "error_if_exists")
-        self.cmb_batch_existing_policy.addItem("强制覆盖 (Overwrite, 重新计算并替换)", "overwrite")
+        self.cmb_batch_existing_policy.addItem("断点恢复 (Resume, 跳过已有) [默认]", "resume")
+        self.cmb_batch_existing_policy.addItem("冲突报错 (Error if exists)", "error_if_exists")
+        self.cmb_batch_existing_policy.addItem("强制覆盖 (Overwrite)", "overwrite")
+        self._make_combo_responsive(self.cmb_batch_existing_policy)
         h_policy.addWidget(self.cmb_batch_existing_policy)
         vbox_job.addLayout(h_policy)
 
         panel_layout.addWidget(grp_job)
 
         # 5. 执行控制与进度
-        grp_exec = QGroupBox("🚀 批处理调度控制 / Execution Control")
+        grp_exec = QGroupBox("🚀 调度控制 / Execution")
         vbox_exec = QVBoxLayout(grp_exec)
 
         h_btns = QHBoxLayout()
@@ -3252,12 +3347,12 @@ class MainWindow(QMainWindow):
         h_btns.addWidget(self.btn_cancel_batch)
         vbox_exec.addLayout(h_btns)
 
-        vbox_exec.addWidget(QLabel("总览进度 (Overall Progress):"))
+        vbox_exec.addWidget(QLabel("总览进度 (Overall):"))
         self.bar_batch_overall = QProgressBar()
         self.bar_batch_overall.setValue(0)
         vbox_exec.addWidget(self.bar_batch_overall)
 
-        vbox_exec.addWidget(QLabel("当前瓦片进度 (Current Tile):"))
+        vbox_exec.addWidget(QLabel("当前瓦片 (Current):"))
         self.bar_batch_tile = QProgressBar()
         self.bar_batch_tile.setValue(0)
         vbox_exec.addWidget(self.bar_batch_tile)
@@ -3268,13 +3363,14 @@ class MainWindow(QMainWindow):
 
         self.lbl_batch_counts = QLabel("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
         self.lbl_batch_counts.setStyleSheet("font-weight: bold;")
+        self.lbl_batch_counts.setWordWrap(True)
         vbox_exec.addWidget(self.lbl_batch_counts)
 
         panel_layout.addWidget(grp_exec)
         panel_layout.addStretch()
 
         scroll_left.setWidget(panel_widget)
-        layout.addWidget(scroll_left)
+        splitter.addWidget(scroll_left)
 
         # 右侧：影像文件表格视图
         grp_right = QGroupBox("📋 影像文件清单与实时解算状态 / Raster Tiles Queue")
@@ -3297,7 +3393,12 @@ class MainWindow(QMainWindow):
         h_bot_right.addWidget(self.btn_open_batch_out)
         vbox_right.addLayout(h_bot_right)
 
-        layout.addWidget(grp_right, stretch=1)
+        splitter.addWidget(grp_right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([450, 700])
+
+        layout.addWidget(splitter)
 
         self.batch_worker = None
         self.scan_worker = None
@@ -3479,7 +3580,7 @@ class MainWindow(QMainWindow):
         self.btn_start_batch.setEnabled(False)
         self.lbl_batch_status.setText("⚠️ 目录或扫描配置已改变，请点击“扫描文件夹”构建/刷新任务队列。")
         self.lbl_batch_counts.setText("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
-        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch.setText("🔍 扫描待解算影像 (Scan)")
 
     def _on_browse_batch_input(self):
         d = QFileDialog.getExistingDirectory(self, "选择输入 GeoTIFF 目录")
@@ -3514,7 +3615,7 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, discovered_list, spec=None):
         QApplication.restoreOverrideCursor()
         self.btn_scan_batch.setEnabled(True)
-        self.btn_scan_batch.setText("🔄 重新扫描 / 刷新队列 (Refresh Queue)")
+        self.btn_scan_batch.setText("🔄 刷新任务队列 (Refresh)")
 
         cur_in = self.txt_batch_in_dir.text().strip()
         cur_out = self._get_effective_batch_output_dir()
@@ -3576,7 +3677,7 @@ class MainWindow(QMainWindow):
     def _on_scan_error(self, err_msg):
         QApplication.restoreOverrideCursor()
         self.btn_scan_batch.setEnabled(True)
-        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch.setText("🔍 扫描待解算影像 (Scan)")
         self._invalidate_batch_scan()
         QMessageBox.critical(self, "扫描错误", f"后台扫描目录失败: {err_msg}")
 
