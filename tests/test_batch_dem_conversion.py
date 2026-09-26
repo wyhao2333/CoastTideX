@@ -348,6 +348,36 @@ class TestBatchDEMConversion(unittest.TestCase):
         self.assertTrue(worker._is_cancelled)
         self.assertTrue(worker.cancel_event.is_set())
 
+    def test_10_convert_raster_signature_compatibility(self):
+        """测试 10: DEMDatumConverter.convert_raster 接受 max_extrapolation_distance_km 关键字参数"""
+        from core.dem_datum_converter import DEMDatumConverter
+        tile = self._create_synthetic_dem("sig_test.tif")
+        out_msl = self.out_dir / "sig_test_MSL.tif"
+
+        converter = DEMDatumConverter(max_extrapolation_distance_km=100.0)
+
+        def fake_convert_points(lons, lats, z_egm):
+            n = len(z_egm)
+            return (
+                (z_egm - 0.5).astype(np.float32),
+                (np.ones(n, dtype=np.float32) * 0.5),
+                np.zeros(n, dtype=np.float32),
+                np.zeros(n, dtype=np.uint8)
+            )
+
+        with patch.object(converter, "convert_points", side_effect=fake_convert_points), \
+             patch.object(converter, "_ensure_mdt_spatial_index"):
+            summary = converter.convert_raster(
+                input_dem_path=str(tile),
+                output_msl_path=str(out_msl),
+                max_extrapolation_distance_km=75.0,
+                block_size=128
+            )
+            self.assertEqual(converter.max_extrapolation_distance_km, 75.0)
+            self.assertEqual(converter.max_extrapolation_distance_m, 75000.0)
+            self.assertEqual(summary.max_extrapolation_distance_km, 75.0)
+            self.assertTrue(out_msl.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

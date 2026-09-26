@@ -331,6 +331,7 @@ class DEMDatumConverter:
         input_dem_path: str,
         output_msl_path: Optional[str] = None,
         output_qc_path: Optional[str] = None,
+        max_extrapolation_distance_km: Optional[float] = None,
         block_size: int = 1024,
         allow_overwrite: bool = True,
         progress_callback: Optional[Callable[[int, str], None]] = None,
@@ -341,6 +342,10 @@ class DEMDatumConverter:
             将输入 DEM_EGM2008.tif 转换为 DEM_MSL.tif 及 conversion_qc.tif。
         """
         t0 = time.time()
+        if max_extrapolation_distance_km is not None:
+            self.max_extrapolation_distance_km = float(max_extrapolation_distance_km)
+            self.max_extrapolation_distance_m = self.max_extrapolation_distance_km * 1000.0
+
         if not os.path.exists(input_dem_path):
             raise FileNotFoundError(f"未找到输入 DEM 文件: {input_dem_path}")
 

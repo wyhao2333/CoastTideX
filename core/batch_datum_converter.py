@@ -264,6 +264,8 @@ class BatchDEMDatumConverter:
         """
         t0 = time.time()
         eff_max_dist = float(max_dist_km if max_dist_km is not None else self.max_extrapolation_distance_km)
+        self.converter.max_extrapolation_distance_km = eff_max_dist
+        self.converter.max_extrapolation_distance_m = eff_max_dist * 1000.0
         in_path = Path(input_dir).resolve()
         out_path = Path(output_dir).resolve()
         out_path.mkdir(parents=True, exist_ok=True)
