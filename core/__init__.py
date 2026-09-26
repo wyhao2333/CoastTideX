@@ -16,6 +16,11 @@ from .dem_datum_converter import (
     DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
     MAX_MDT_EXTRAPOLATION_DISTANCE_KM, QC_MDT_NATIVE, QC_MDT_EXTRAPOLATED, QC_MDT_NODATA
 )
+from .batch_datum_converter import (
+    BatchDEMDatumConverter, BatchConversionManifest, BatchConversionSummary,
+    scan_dem_directory, is_dem_already_msl,
+    STATUS_SUCCESS, STATUS_FAILED, STATUS_SKIPPED_MSL, STATUS_SKIPPED_RESUME
+)
 from .raster_engine import (
     RasterTideEngine, RasterInfo, RasterResultSummary,
     RasterMemoryLimitError, estimate_control_node_memory, LeafCellSpatialIndex,
@@ -43,7 +48,7 @@ except ImportError:
     FESTidePredictor = None
     HAS_PYFES = False
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 __all__ = [
     '__version__',
@@ -53,6 +58,10 @@ __all__ = [
     'DEMDatumConverter',
     'convert_dem_to_msl',
     'DEMConversionSummary',
+    'BatchDEMDatumConverter',
+    'BatchConversionManifest',
+    'BatchConversionSummary',
+    'scan_dem_directory',
     'MAX_MDT_EXTRAPOLATION_DISTANCE_KM',
     'QC_MDT_NATIVE',
     'QC_MDT_EXTRAPOLATED',

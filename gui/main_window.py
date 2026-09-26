@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
     QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
-    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication
+    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication, QRadioButton
 )
 from PyQt6.QtGui import QIcon, QFont, QAction, QColor, QDesktopServices
 import threading
@@ -38,6 +38,9 @@ from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary
 from core.dem_datum_converter import (
     DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
     MAX_MDT_EXTRAPOLATION_DISTANCE_KM
+)
+from core.batch_datum_converter import (
+    BatchDEMDatumConverter, scan_dem_directory, BatchConversionSummary
 )
 from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
@@ -477,12 +480,64 @@ class DEMDatumConversionWorker(QThread):
                 self.error.emit(str(e))
 
 
+class BatchDEMDatumConversionWorker(QThread):
+    """后台批量 DEM 垂直基准转换工作线程 (EGM2008 -> MSL, v1.7.1)"""
+    progress = pyqtSignal(int, int, str, str, dict)  # (current_idx, total_count, cur_file, msg, stats)
+    finished = pyqtSignal(object)  # BatchConversionSummary
+    error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            from core.batch_datum_converter import BatchDEMDatumConverter
+
+            def p_cb(idx, total, cur_file, msg, stats):
+                if not self._is_cancelled:
+                    self.progress.emit(idx, total, cur_file, msg, stats)
+
+            converter = BatchDEMDatumConverter(
+                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                block_size=self.params.get('block_size', 512)
+            )
+
+            summary = converter.run_batch(
+                input_dir=self.params['input_dir'],
+                output_dir=self.params['output_dir'],
+                max_dist_km=self.params.get('max_dist_km', 100.0),
+                resume=self.params.get('resume', True),
+                overwrite=self.params.get('overwrite', False),
+                workers=self.params.get('workers', 1),
+                progress_callback=p_cb,
+                cancel_event=self.cancel_event
+            )
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(summary)
+        except Exception as e:
+            if self._is_cancelled or "取消" in str(e):
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """CoastTideX 桌面客户端主窗口"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX v1.7 - 全球海岸带潮位模拟与高程基准转换系统")
+        self.setWindowTitle("CoastTideX v1.7.1 - 全球海岸带潮位模拟与高程基准转换系统")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -495,6 +550,8 @@ class MainWindow(QMainWindow):
         self.current_raster_info = None
         self.dem_worker = None
         self.current_dem_summary = None
+        self.batch_dem_worker = None
+        self.current_batch_dem_summary = None
 
         self._init_menu()
         self._init_ui()
@@ -854,7 +911,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(layout_batch_table)
 
     def _setup_dem_convert_tab(self):
-        """配置 DEM 基准转换 (EGM2008 -> MSL) 选项卡 (v1.7 新增)"""
+        """配置 DEM 基准转换 (EGM2008 -> MSL) 选项卡 (v1.7 / v1.7.1 批量增强)"""
         scroll = QScrollArea(self.tab_dem_convert)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -864,7 +921,25 @@ class MainWindow(QMainWindow):
         layout_main.setContentsMargins(10, 10, 10, 10)
         layout_main.setSpacing(12)
 
-        # 1. 输入 DEM 栅格与元数据检查卡片
+        # 0. 模式选择器 (单影像 vs 批量目录)
+        grp_mode = QGroupBox("模式选择 / Operation Mode")
+        layout_mode = QHBoxLayout(grp_mode)
+        self.radio_dem_mode_single = QRadioButton("📄 单幅 DEM 影像转换 (Single DEM File)")
+        self.radio_dem_mode_batch = QRadioButton("📁 批量 DEM 目录转换 (Batch DEM Directory)")
+        self.radio_dem_mode_single.setChecked(True)
+        self.radio_dem_mode_single.toggled.connect(self._on_dem_mode_toggled)
+        layout_mode.addWidget(self.radio_dem_mode_single)
+        layout_mode.addWidget(self.radio_dem_mode_batch)
+        layout_mode.addStretch()
+        layout_main.addWidget(grp_mode)
+
+        # ==================== 1. 单幅 DEM 影像转换面板 ====================
+        self.widget_dem_single = QWidget()
+        layout_single = QVBoxLayout(self.widget_dem_single)
+        layout_single.setContentsMargins(0, 0, 0, 0)
+        layout_single.setSpacing(12)
+
+        # 1.1 输入 DEM 栅格与元数据检查卡片
         grp_in = QGroupBox("1. 输入 DEM 栅格 (EGM2008 基准)")
         layout_in = QGridLayout(grp_in)
         layout_in.setSpacing(8)
@@ -935,9 +1010,9 @@ class MainWindow(QMainWindow):
         self.frame_dem_warning.setVisible(False)
         layout_in.addWidget(self.frame_dem_warning, 2, 0, 1, 4)
 
-        layout_main.addWidget(grp_in)
+        layout_single.addWidget(grp_in)
 
-        # 2. 转换科学范式与参数配置
+        # 1.2 转换科学范式与参数配置
         grp_params = QGroupBox("2. 转换科学范式与参数配置 (Seeger & Minderhoud, Nature, 2026 理论范式改编)")
         layout_params = QGridLayout(grp_params)
         layout_params.setSpacing(8)
@@ -981,9 +1056,9 @@ class MainWindow(QMainWindow):
         self.chk_dem_save_qc.stateChanged.connect(self._on_dem_save_qc_toggled)
         layout_params.addWidget(self.chk_dem_save_qc, 3, 2, 1, 2)
 
-        layout_main.addWidget(grp_params)
+        layout_single.addWidget(grp_params)
 
-        # 3. 输出路径配置与任务控制
+        # 1.3 输出路径配置与任务控制
         grp_exec = QGroupBox("3. 输出路径配置与任务执行")
         layout_exec = QGridLayout(grp_exec)
         layout_exec.setSpacing(8)
@@ -1039,9 +1114,9 @@ class MainWindow(QMainWindow):
         self.lbl_dem_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
         layout_exec.addWidget(self.lbl_dem_status, 4, 0, 1, 3)
 
-        layout_main.addWidget(grp_exec)
+        layout_single.addWidget(grp_exec)
 
-        # 4. 转换结果摘要与下游分析直通卡片
+        # 1.4 转换结果摘要与下游分析直通卡片
         self.grp_dem_results = QGroupBox("4. 转换结果摘要与下游分析直通")
         layout_res = QVBoxLayout(self.grp_dem_results)
         layout_res.setSpacing(10)
@@ -1105,8 +1180,215 @@ class MainWindow(QMainWindow):
         box_handoff.addWidget(self.btn_dem_open_folder, stretch=1)
         layout_res.addLayout(box_handoff)
 
-        layout_main.addWidget(self.grp_dem_results)
+        layout_single.addWidget(self.grp_dem_results)
         self.grp_dem_results.setVisible(False)
+
+        layout_main.addWidget(self.widget_dem_single)
+
+        # ==================== 2. 批量 DEM 目录转换面板 (v1.7.1 新增) ====================
+        self.widget_dem_batch = QWidget()
+        layout_batch = QVBoxLayout(self.widget_dem_batch)
+        layout_batch.setContentsMargins(0, 0, 0, 0)
+        layout_batch.setSpacing(12)
+
+        # 2.1 批量输入与输出目录
+        grp_batch_dirs = QGroupBox("1. 批量输入与输出目录 / Batch Directories")
+        layout_batch_dirs = QGridLayout(grp_batch_dirs)
+        layout_batch_dirs.setSpacing(8)
+
+        layout_batch_dirs.addWidget(QLabel("输入 DEM 文件夹:"), 0, 0)
+        self.edit_batch_dem_input = QLineEdit()
+        self.edit_batch_dem_input.setPlaceholderText("选择包含 EGM2008 DEM 瓦片的目录 (支持递归扫描子目录)...")
+        layout_batch_dirs.addWidget(self.edit_batch_dem_input, 0, 1)
+
+        self.btn_browse_batch_dem_in = QPushButton("浏览目录...")
+        self.btn_browse_batch_dem_in.setObjectName("btn_secondary")
+        self.btn_browse_batch_dem_in.clicked.connect(self._browse_batch_dem_input)
+        layout_batch_dirs.addWidget(self.btn_browse_batch_dem_in, 0, 2)
+
+        self.btn_scan_batch_dem = QPushButton("🔍 扫描 DEM 目录")
+        self.btn_scan_batch_dem.setObjectName("btn_secondary")
+        self.btn_scan_batch_dem.clicked.connect(lambda: self._scan_batch_dem_folder())
+        layout_batch_dirs.addWidget(self.btn_scan_batch_dem, 0, 3)
+
+        self.lbl_batch_dem_scan_status = QLabel("尚未扫描目录。请选择输入文件夹并点击扫描。")
+        self.lbl_batch_dem_scan_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_batch_dirs.addWidget(self.lbl_batch_dem_scan_status, 1, 0, 1, 4)
+
+        layout_batch_dirs.addWidget(QLabel("输出 DEM_MSL 文件夹:"), 2, 0)
+        self.edit_batch_dem_output = QLineEdit()
+        self.edit_batch_dem_output.setPlaceholderText("输出文件夹路径 (默认: <输入目录>/DEM_MSL_output)...")
+        layout_batch_dirs.addWidget(self.edit_batch_dem_output, 2, 1)
+
+        self.btn_browse_batch_dem_out = QPushButton("更改目录...")
+        self.btn_browse_batch_dem_out.setObjectName("btn_secondary")
+        self.btn_browse_batch_dem_out.clicked.connect(self._browse_batch_dem_output)
+        layout_batch_dirs.addWidget(self.btn_browse_batch_dem_out, 2, 2)
+
+        layout_batch.addWidget(grp_batch_dirs)
+
+        # 2.2 批量参数与运行策略
+        grp_batch_params = QGroupBox("2. 批量转换参数与策略 / Parameters & Policies")
+        layout_batch_params = QGridLayout(grp_batch_params)
+        layout_batch_params.setSpacing(8)
+
+        layout_batch_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
+        combo_batch_target = QComboBox()
+        combo_batch_target.addItem("EGM2008 → 局部平均海平面 (Local MSL) (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)", "msl")
+        combo_batch_target.setEnabled(False)
+        layout_batch_params.addWidget(combo_batch_target, 0, 1, 1, 3)
+
+        layout_batch_params.addWidget(QLabel("沿岸外推距离上限:"), 1, 0)
+        self.spin_batch_dem_max_dist = QDoubleSpinBox()
+        self.spin_batch_dem_max_dist.setRange(0.0, 100.0)
+        self.spin_batch_dem_max_dist.setValue(100.0)
+        self.spin_batch_dem_max_dist.setSingleStep(5.0)
+        self.spin_batch_dem_max_dist.setSuffix(" km")
+        layout_batch_params.addWidget(self.spin_batch_dem_max_dist, 1, 1)
+
+        layout_batch_params.addWidget(QLabel("2D 分块流式大小:"), 1, 2)
+        self.spin_batch_dem_block_size = QSpinBox()
+        self.spin_batch_dem_block_size.setRange(64, 4096)
+        self.spin_batch_dem_block_size.setValue(512)
+        self.spin_batch_dem_block_size.setSingleStep(64)
+        self.spin_batch_dem_block_size.setSuffix(" px")
+        layout_batch_params.addWidget(self.spin_batch_dem_block_size, 1, 3)
+
+        layout_batch_params.addWidget(QLabel("并行工作线程:"), 2, 0)
+        self.spin_batch_dem_workers = QSpinBox()
+        self.spin_batch_dem_workers.setRange(1, 16)
+        self.spin_batch_dem_workers.setValue(1)
+        self.spin_batch_dem_workers.setToolTip("推荐保持 1（单瓦片顺序流式），确保最低内存占用与高并发隔离。")
+        layout_batch_params.addWidget(self.spin_batch_dem_workers, 2, 1)
+
+        self.chk_batch_dem_resume = QCheckBox("断点恢复 (Resume, 自动跳过已有完整产物并保留清单)")
+        self.chk_batch_dem_resume.setChecked(True)
+        layout_batch_params.addWidget(self.chk_batch_dem_resume, 3, 0, 1, 2)
+
+        self.chk_batch_dem_overwrite = QCheckBox("强制覆盖 (Overwrite, 强制重新转换所有瓦片)")
+        self.chk_batch_dem_overwrite.setChecked(False)
+        layout_batch_params.addWidget(self.chk_batch_dem_overwrite, 3, 2, 1, 2)
+
+        layout_batch.addWidget(grp_batch_params)
+
+        # 2.3 批量执行与实时监控
+        grp_batch_exec = QGroupBox("3. 批量执行控制与进度 / Execution & Progress")
+        layout_batch_exec = QGridLayout(grp_batch_exec)
+        layout_batch_exec.setSpacing(8)
+
+        btn_batch_box = QHBoxLayout()
+        self.btn_run_batch_dem = QPushButton("🚀 开始批量 DEM 基准转换")
+        self.btn_run_batch_dem.setFixedHeight(40)
+        self.btn_run_batch_dem.setStyleSheet("background-color: #059669; color: white; font-weight: bold; font-size: 13px;")
+        self.btn_run_batch_dem.clicked.connect(self._run_batch_dem_conversion)
+
+        self.btn_cancel_batch_dem = QPushButton("🛑 取消任务")
+        self.btn_cancel_batch_dem.setFixedHeight(40)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.btn_cancel_batch_dem.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_cancel_batch_dem.clicked.connect(self._cancel_batch_dem_conversion)
+
+        btn_batch_box.addWidget(self.btn_run_batch_dem, stretch=3)
+        btn_batch_box.addWidget(self.btn_cancel_batch_dem, stretch=1)
+        layout_batch_exec.addLayout(btn_batch_box, 0, 0, 1, 4)
+
+        self.prog_batch_dem_overall = QProgressBar()
+        self.prog_batch_dem_overall.setValue(0)
+        self.prog_batch_dem_overall.setTextVisible(True)
+        layout_batch_exec.addWidget(self.prog_batch_dem_overall, 1, 0, 1, 4)
+
+        self.lbl_batch_dem_status = QLabel("就绪 - 请选择输入文件夹并开始批量转换")
+        self.lbl_batch_dem_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_batch_exec.addWidget(self.lbl_batch_dem_status, 2, 0, 1, 4)
+
+        # 统计指标卡片
+        frame_batch_stats = QFrame()
+        frame_batch_stats.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 6px;")
+        layout_bstats = QGridLayout(frame_batch_stats)
+        layout_bstats.setSpacing(6)
+
+        layout_bstats.addWidget(QLabel("总瓦片数:"), 0, 0)
+        self.lbl_batch_dem_stat_total = QLabel("0")
+        self.lbl_batch_dem_stat_total.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_total, 0, 1)
+
+        layout_bstats.addWidget(QLabel("当前处理:"), 0, 2)
+        self.lbl_batch_dem_stat_current = QLabel("-")
+        self.lbl_batch_dem_stat_current.setStyleSheet("font-weight: bold; color: #f1f5f9;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_current, 0, 3)
+
+        layout_bstats.addWidget(QLabel("转换成功:"), 1, 0)
+        self.lbl_batch_dem_stat_success = QLabel("0")
+        self.lbl_batch_dem_stat_success.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_success, 1, 1)
+
+        layout_bstats.addWidget(QLabel("转换失败:"), 1, 2)
+        self.lbl_batch_dem_stat_failed = QLabel("0")
+        self.lbl_batch_dem_stat_failed.setStyleSheet("font-weight: bold; color: #ef4444;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_failed, 1, 3)
+
+        layout_bstats.addWidget(QLabel("跳过 (已是MSL):"), 2, 0)
+        self.lbl_batch_dem_stat_skipped_msl = QLabel("0")
+        self.lbl_batch_dem_stat_skipped_msl.setStyleSheet("font-weight: bold; color: #facc15;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_skipped_msl, 2, 1)
+
+        layout_bstats.addWidget(QLabel("跳过 (断点恢复):"), 2, 2)
+        self.lbl_batch_dem_stat_skipped_resume = QLabel("0")
+        self.lbl_batch_dem_stat_skipped_resume.setStyleSheet("font-weight: bold; color: #a78bfa;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_skipped_resume, 2, 3)
+
+        layout_batch_exec.addWidget(frame_batch_stats, 3, 0, 1, 4)
+
+        layout_batch.addWidget(grp_batch_exec)
+
+        # 2.4 批量结果与下游直通
+        self.grp_batch_dem_results = QGroupBox("4. 批量结果清单与下游分析直通")
+        layout_batch_res = QVBoxLayout(self.grp_batch_dem_results)
+        layout_batch_res.setSpacing(10)
+
+        frame_batch_summary = QFrame()
+        frame_batch_summary.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 8px;")
+        layout_bsum = QGridLayout(frame_batch_summary)
+        layout_bsum.setSpacing(6)
+
+        layout_bsum.addWidget(QLabel("清单文件路径:"), 0, 0)
+        self.lbl_batch_dem_manifest_csv = QLabel("-")
+        self.lbl_batch_dem_manifest_csv.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_bsum.addWidget(self.lbl_batch_dem_manifest_csv, 0, 1, 1, 3)
+
+        layout_bsum.addWidget(QLabel("总执行耗时:"), 1, 0)
+        self.lbl_batch_dem_elapsed = QLabel("-")
+        self.lbl_batch_dem_elapsed.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_bsum.addWidget(self.lbl_batch_dem_elapsed, 1, 1)
+
+        layout_batch_res.addWidget(frame_batch_summary)
+
+        box_batch_handoff = QHBoxLayout()
+        self.btn_batch_dem_open_out = QPushButton("📂 打开输出文件夹")
+        self.btn_batch_dem_open_out.setFixedHeight(38)
+        self.btn_batch_dem_open_out.setObjectName("btn_secondary")
+        self.btn_batch_dem_open_out.clicked.connect(self._open_batch_dem_output_folder)
+
+        self.btn_batch_dem_open_manifest = QPushButton("📄 查看清单 (Manifest CSV)")
+        self.btn_batch_dem_open_manifest.setFixedHeight(38)
+        self.btn_batch_dem_open_manifest.setObjectName("btn_secondary")
+        self.btn_batch_dem_open_manifest.clicked.connect(self._open_batch_dem_manifest)
+
+        self.btn_batch_dem_handoff_batch_raster = QPushButton("📊 将输出目录载入批量潮间带栅格解算")
+        self.btn_batch_dem_handoff_batch_raster.setFixedHeight(38)
+        self.btn_batch_dem_handoff_batch_raster.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_batch_dem_handoff_batch_raster.clicked.connect(self._handoff_batch_dem_to_batch_raster)
+
+        box_batch_handoff.addWidget(self.btn_batch_dem_open_out, stretch=1)
+        box_batch_handoff.addWidget(self.btn_batch_dem_open_manifest, stretch=1)
+        box_batch_handoff.addWidget(self.btn_batch_dem_handoff_batch_raster, stretch=2)
+        layout_batch_res.addLayout(box_batch_handoff)
+
+        layout_batch.addWidget(self.grp_batch_dem_results)
+        self.grp_batch_dem_results.setVisible(False)
+
+        layout_main.addWidget(self.widget_dem_batch)
+        self.widget_dem_batch.setVisible(False)
 
         layout_main.addStretch()
 
@@ -1356,6 +1638,147 @@ class MainWindow(QMainWindow):
         folder = os.path.dirname(os.path.abspath(out_path)) if out_path else os.getcwd()
         if os.path.exists(folder):
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _on_dem_mode_toggled(self):
+        is_single = self.radio_dem_mode_single.isChecked()
+        self.widget_dem_single.setVisible(is_single)
+        self.widget_dem_batch.setVisible(not is_single)
+
+    def _browse_batch_dem_input(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输入 DEM 文件夹 (包含待转换的 EGM2008 DEM)")
+        if d:
+            self.edit_batch_dem_input.setText(d)
+            if not self.edit_batch_dem_output.text().strip():
+                self.edit_batch_dem_output.setText(os.path.join(d, "DEM_MSL_output"))
+            self._scan_batch_dem_folder(d)
+
+    def _browse_batch_dem_output(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出 DEM_MSL 保存文件夹")
+        if d:
+            self.edit_batch_dem_output.setText(d)
+
+    def _scan_batch_dem_folder(self, folder=None):
+        in_dir = folder or self.edit_batch_dem_input.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "目录无效", "请先选择有效的输入 DEM 文件夹。")
+            return
+        try:
+            from core.batch_datum_converter import scan_dem_directory
+            tiles = scan_dem_directory(in_dir, recursive=True)
+            count = len(tiles)
+            self.lbl_batch_dem_scan_status.setText(f"已发现 {count} 个待转换 DEM 影像瓦片 (*.tif)。")
+            self.lbl_batch_dem_scan_status.setStyleSheet("color: #4ade80; font-weight: bold;")
+            self.lbl_batch_dem_stat_total.setText(str(count))
+            self.lbl_batch_dem_status.setText(f"扫描完成: 发现 {count} 个 DEM 瓦片，就绪可转换。")
+            self.status_bar.showMessage(f"DEM 批量扫描完成: {count} 个待转换文件")
+        except Exception as e:
+            self.lbl_batch_dem_scan_status.setText(f"扫描异常: {e}")
+            self.lbl_batch_dem_scan_status.setStyleSheet("color: #ef4444;")
+            QMessageBox.critical(self, "扫描失败", f"扫描 DEM 文件夹失败:\n{e}")
+
+    def _run_batch_dem_conversion(self):
+        in_dir = self.edit_batch_dem_input.text().strip()
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "输入目录无效", "请先选择有效的输入 DEM 文件夹。")
+            return
+        if not out_dir:
+            out_dir = os.path.join(in_dir, "DEM_MSL_output")
+            self.edit_batch_dem_output.setText(out_dir)
+
+        max_dist_km = min(100.0, float(self.spin_batch_dem_max_dist.value()))
+        block_size = int(self.spin_batch_dem_block_size.value())
+        workers = int(self.spin_batch_dem_workers.value())
+        resume = self.chk_batch_dem_resume.isChecked()
+        overwrite = self.chk_batch_dem_overwrite.isChecked()
+
+        params = {
+            'input_dir': in_dir,
+            'output_dir': out_dir,
+            'max_dist_km': max_dist_km,
+            'block_size': block_size,
+            'workers': workers,
+            'resume': resume,
+            'overwrite': overwrite
+        }
+
+        self.btn_run_batch_dem.setEnabled(False)
+        self.btn_cancel_batch_dem.setEnabled(True)
+        self.prog_batch_dem_overall.setValue(0)
+        self.lbl_batch_dem_status.setText("准备开始批量 DEM 垂直基准转换...")
+        self.status_bar.showMessage("批量 DEM 垂直基准转换进行中...")
+
+        self.batch_dem_worker = BatchDEMDatumConversionWorker(params)
+        self.batch_dem_worker.progress.connect(self._on_batch_dem_progress)
+        self.batch_dem_worker.finished.connect(self._on_batch_dem_finished)
+        self.batch_dem_worker.error.connect(self._on_batch_dem_error)
+        self.batch_dem_worker.cancelled.connect(self._on_batch_dem_cancelled)
+        self.batch_dem_worker.start()
+
+    def _cancel_batch_dem_conversion(self):
+        if self.batch_dem_worker and self.batch_dem_worker.isRunning():
+            self.lbl_batch_dem_status.setText("正在取消批量 DEM 基准转换任务...")
+            self.btn_cancel_batch_dem.setEnabled(False)
+            self.batch_dem_worker.cancel()
+
+    def _on_batch_dem_progress(self, idx, total, cur_file, msg, stats):
+        pct = int((idx / max(1, total)) * 100) if total > 0 else 0
+        self.prog_batch_dem_overall.setValue(pct)
+        self.lbl_batch_dem_status.setText(msg)
+        self.lbl_batch_dem_stat_total.setText(str(stats.get("total", total)))
+        self.lbl_batch_dem_stat_current.setText(os.path.basename(cur_file))
+        self.lbl_batch_dem_stat_success.setText(str(stats.get("success", 0)))
+        self.lbl_batch_dem_stat_failed.setText(str(stats.get("failed", 0)))
+        self.lbl_batch_dem_stat_skipped_msl.setText(str(stats.get("skipped_msl", 0)))
+        self.lbl_batch_dem_stat_skipped_resume.setText(str(stats.get("skipped_resume", 0)))
+
+    def _on_batch_dem_finished(self, summary):
+        self.current_batch_dem_summary = summary
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.prog_batch_dem_overall.setValue(100)
+        self.lbl_batch_dem_status.setText(
+            f"批量转换完成！成功: {summary.success_count}, 失败: {summary.failed_count}, "
+            f"跳过(MSL): {summary.skipped_msl_count}, 跳过(Resume): {summary.skipped_resume_count}。"
+        )
+        self.status_bar.showMessage(f"批量 DEM 基准转换完成 (耗时: {summary.elapsed_seconds:.2f}s)")
+
+        self.grp_batch_dem_results.setVisible(True)
+        self.lbl_batch_dem_manifest_csv.setText(summary.manifest_csv)
+        self.lbl_batch_dem_elapsed.setText(f"{summary.elapsed_seconds:.2f} s")
+
+    def _on_batch_dem_error(self, err_msg):
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.lbl_batch_dem_status.setText(f"批量转换异常: {err_msg}")
+        self.status_bar.showMessage("批量 DEM 基准转换失败")
+        QMessageBox.critical(self, "批量转换失败", f"批量 DEM 转换发生异常:\n{err_msg}")
+
+    def _on_batch_dem_cancelled(self):
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.lbl_batch_dem_status.setText("批量 DEM 转换已被用户取消。")
+        self.status_bar.showMessage("批量 DEM 基准转换已取消")
+
+    def _open_batch_dem_output_folder(self):
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if out_dir and os.path.exists(out_dir):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(out_dir)))
+
+    def _open_batch_dem_manifest(self):
+        csv_p = self.lbl_batch_dem_manifest_csv.text().strip()
+        if csv_p and os.path.exists(csv_p):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(csv_p)))
+
+    def _handoff_batch_dem_to_batch_raster(self):
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if not out_dir or not os.path.exists(out_dir):
+            QMessageBox.warning(self, "输出目录不存在", "批量转换输出目录尚不存在，请先执行转换。")
+            return
+        # 切换到第5个选项卡 (批量潮间带栅格解算)
+        self.tabs.setCurrentIndex(4)
+        self.txt_batch_in_dir.setText(out_dir)
+        self._on_scan_batch_rasters()
 
     def _setup_raster_tab(self):
         scroll = QScrollArea(self.tab_raster)

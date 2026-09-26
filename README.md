@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
-  <img src="https://img.shields.io/badge/Release-v1.7-0284c7.svg" alt="Release v1.7">
+  <img src="https://img.shields.io/badge/Release-v1.7.1-0284c7.svg" alt="Release v1.7.1">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -23,10 +23,10 @@
 
 系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，有效降低了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由网格台阶逼近带来的近岸潮位误差。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部平均海平面参考 (MSL)、大地水准面高程与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
 
-在 **CoastTideX v1.7** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**，通过前置 DEM 垂直基准转换 ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) 与近岸 100 km 球面 IDW 外推门禁，实现空间网格淹没与露出解算过程中的零 MDT 重复查询与 100% 决策等价性，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。
+在 **CoastTideX v1.7 / v1.7.1** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**，通过前置 DEM 垂直基准转换 ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) 与近岸 100 km 球面 IDW 外推门禁，实现空间网格淹没与露出解算过程中的零 MDT 重复查询与 100% 决策等价性，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。v1.7.1 进一步新增**大规模海量潮滩 DEM 瓦片批量流式转换引擎 (`convert-dem-batch`)**，支持断点续传、失败瓦片物理隔离与双格式 Manifest 自动化跟踪。
 
 > [!NOTE]
-> 当前版本为 **CoastTideX v1.7**。系统具备严密分层防御架构与自动化验证套件，已全面通过真实海岸带千万级像元 DEM 端到端科学闭环验证。
+> 当前版本为 **CoastTideX v1.7.1**。系统具备严密分层防御架构与自动化验证套件，已全面通过真实海岸带千万级像元 DEM 端到端科学闭环验证。
 
 ---
 
@@ -289,7 +289,9 @@ pip install -r requirements.txt
 
 CoastTideX 提供完整无头运行能力的命令行工具 `cli.py`：
 
-### 0. DEM 垂直基准转换: EGM2008 -> MSL (v1.7 推荐基准统一流程)
+### 0. DEM 垂直基准转换: EGM2008 -> MSL (v1.7 / v1.7.1 批量增强)
+
+#### 单幅 DEM 影像转换:
 ```bash
 # 将任意 EGM2008 基准陆地高程 DEM 严密转换为局部平均海平面 MSL 基准 (Nature 2026 统一架构)
 python cli.py convert-dem \
@@ -298,6 +300,17 @@ python cli.py convert-dem \
     --qc-output path/to/coastal_dem_msl_qc.tif \
     --max-dist-km 100.0 \
     --block-size 1024
+```
+
+#### 批量 DEM 目录转换 (v1.7.1 新增):
+```bash
+# 批量扫描文件夹并转换所有 EGM2008 DEM 瓦片为 MSL 基准 (支持递归扫描、断点恢复与自动化 Manifest 清单)
+python cli.py convert-dem-batch \
+    --input-dir path/to/egm2008_dems/ \
+    --output-dir path/to/msl_dems/ \
+    --max-dist-km 100.0 \
+    --workers 1 \
+    --resume
 ```
 
 ### 1. 潜在天文潮露出时间域分析 (v1.6 新增)

@@ -169,6 +169,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
     p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
 
+    # 5. 批量 DEM 垂直基准转换模式 (v1.7.1)
+    p_batch_convert = subparsers.add_parser("convert-dem-batch", help="批量将 DEM 文件夹从 EGM2008 基准转换为局域 MSL 基准 (v1.7.1)")
+    p_batch_convert.add_argument("--input-dir", "-i", type=str, required=True, help="输入包含待转换 DEM (*.tif) 的文件夹路径")
+    p_batch_convert.add_argument("--output-dir", "-o", type=str, required=True, help="转换后 MSL DEM 输出目录")
+    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="MDT 近岸空间外推最大物理截断距离 (km, 默认: 100.0)")
+    p_batch_convert.add_argument("--workers", type=int, default=1, help="并发工作线程/任务数 (默认: 1, 逐瓦片顺序执行)")
+    p_batch_convert.add_argument("--resume", action="store_true", help="开启断点恢复模式 (跳过清单中已成功的瓦片)")
+    p_batch_convert.add_argument("--overwrite", action="store_true", help="允许覆盖既有输出文件")
+
     return parser
 
 
@@ -540,6 +549,40 @@ def main(args_list: Optional[List[str]] = None):
         print(f"     - 大洋原生插值: {summary.native_mdt_pixels:,}")
         print(f"     - 近岸空间外推: {summary.extrapolated_mdt_pixels:,}")
         print(f"     - 截断/NoData:   {summary.nodata_pixels:,}")
+        print(f"     总耗时: {summary.elapsed_seconds:.2f} 秒")
+
+    elif args.mode == "convert-dem-batch":
+        from core.batch_datum_converter import BatchDEMDatumConverter
+        print(f"[*] 启动批量 DEM 垂直基准转换: EGM2008 -> MSL (v1.7.1)...")
+        print(f"[*] 输入目录: {args.input_dir}")
+        print(f"[*] 输出目录: {args.output_dir}")
+        print(f"[*] 最大外推距离门禁: {args.max_dist_km} km, 并发 Workers: {args.workers}")
+        print(f"[*] 断点恢复 (--resume): {args.resume}, 允许覆盖 (--overwrite): {args.overwrite}")
+
+        def _cli_batch_convert_prog(idx, total, cur_file, msg, stats):
+            pct = int((idx / max(1, total)) * 100)
+            fname = os.path.basename(cur_file) if cur_file else ""
+            print(f"    [{pct:3d}%] ({idx}/{total}) {fname} -> {msg}")
+
+        batch_converter = BatchDEMDatumConverter(max_extrapolation_distance_km=args.max_dist_km)
+        summary = batch_converter.run_batch(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            max_dist_km=args.max_dist_km,
+            workers=args.workers,
+            resume=args.resume,
+            overwrite=args.overwrite,
+            progress_callback=_cli_batch_convert_prog
+        )
+
+        print(f"[OK] 批量 DEM 垂直基准转换完成！")
+        print(f"     总文件数: {summary.total_tiles}")
+        print(f"     成功转换: {summary.success_count}")
+        print(f"     转换失败: {summary.failed_count}")
+        print(f"     跳过 (已是 MSL): {summary.skipped_msl_count}")
+        print(f"     跳过 (断点恢复): {summary.skipped_resume_count}")
+        print(f"     任务清单 (CSV): {summary.manifest_csv}")
+        print(f"     任务清单 (JSON): {summary.manifest_json}")
         print(f"     总耗时: {summary.elapsed_seconds:.2f} 秒")
 
 

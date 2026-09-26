@@ -2,7 +2,7 @@
 
 <p align="center">
   <a href="https://github.com/wyhao2333/CoastTideX/actions"><img src="https://github.com/wyhao2333/CoastTideX/actions/workflows/ci.yml/badge.svg" alt="GitHub Actions CI"></a>
-  <img src="https://img.shields.io/badge/Release-v1.7-0284c7.svg" alt="Release v1.7">
+  <img src="https://img.shields.io/badge/Release-v1.7.1-0284c7.svg" alt="Release v1.7.1">
   <img src="https://img.shields.io/badge/Python-3.11-blue.svg" alt="Python 3.11">
   <img src="https://img.shields.io/badge/GUI-PyQt6-green.svg" alt="PyQt6">
   <img src="https://img.shields.io/badge/Tide%20Model-FES2022b%20LGP2-0284c7.svg" alt="FES2022b LGP2">
@@ -23,10 +23,10 @@
 
 Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX mitigates the nearshore staircase distortions and land contamination errors associated with conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' global geoid undulation**, providing a mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
 
-In **CoastTideX v1.7**, based on the coastal geodetic framework proposed by **Seeger & Minderhoud (Nature, 2026)**, the system officially establishes the **MSL Reference Workflow**. By pre-converting terrestrial DEM to the local MSL datum ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) with a rigorous 100 km spherical IDW coastal extrapolation barrier, CoastTideX achieves zero repeated MDT lookups during adaptive control grid evaluation, strict 100% decision equivalence, and ParentBBox model-reuse optimization.
+In **CoastTideX v1.7 / v1.7.1**, based on the coastal geodetic framework proposed by **Seeger & Minderhoud (Nature, 2026)**, the system officially establishes the **MSL Reference Workflow**. By pre-converting terrestrial DEM to the local MSL datum ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) with a rigorous 100 km spherical IDW coastal extrapolation barrier, CoastTideX achieves zero repeated MDT lookups during adaptive control grid evaluation, strict 100% decision equivalence, and ParentBBox model-reuse optimization. v1.7.1 further enhances throughput with a **Batch DEM Datum Conversion Engine (`convert-dem-batch`)**, providing resume checkpointing, failure isolation, and dual-format manifest tracking.
 
 > [!NOTE]
-> Current release: **CoastTideX v1.7**. The system features layered defensive architecture, complete unit test coverage, and end-to-end scientific verification on 150M+ pixel coastal DEM datasets.
+> Current release: **CoastTideX v1.7.1**. The system features layered defensive architecture, complete unit test coverage, and end-to-end scientific verification on 150M+ pixel coastal DEM datasets.
 
 ---
 
@@ -265,13 +265,22 @@ pip install -r requirements.txt
 ## 15. Quick Start: CLI Guide
 
 ```bash
-# 0. DEM Datum Conversion: EGM2008 -> MSL (v1.7 Recommended Baseline Unification)
+# 0. DEM Datum Conversion: EGM2008 -> MSL (v1.7 / v1.7.1 Batch Enhancement)
+# Single DEM tile conversion:
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
     --output path/to/coastal_dem_msl.tif \
     --qc-output path/to/coastal_dem_msl_qc.tif \
     --max-dist-km 100.0 \
     --block-size 1024
+
+# Batch DEM folder conversion (New in v1.7.1, recursive scanning, resume, manifest):
+python cli.py convert-dem-batch \
+    --input-dir path/to/egm2008_dems/ \
+    --output-dir path/to/msl_dems/ \
+    --max-dist-km 100.0 \
+    --workers 1 \
+    --resume
 
 # 1. Potential Tidal Exposure Duration Analysis (New in v1.6)
 python cli.py raster exposure \

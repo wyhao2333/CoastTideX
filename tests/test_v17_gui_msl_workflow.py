@@ -253,6 +253,73 @@ class TestV17GUIMSLWorkflow(unittest.TestCase):
         self.assertTrue(worker._is_cancelled)
         self.assertTrue(worker.cancel_event.is_set())
 
+    def test_batch_dem_mode_toggle_and_gui_workflow(self):
+        """测试 v1.7.1 批量 DEM 转换模式切换、目录扫描与指标卡更新"""
+        # 初始应为单幅模式
+        self.assertTrue(self.win.radio_dem_mode_single.isChecked())
+        self.assertFalse(self.win.widget_dem_single.isHidden())
+        self.assertTrue(self.win.widget_dem_batch.isHidden())
+
+        # 切换到批量模式
+        self.win.radio_dem_mode_batch.setChecked(True)
+        self.assertTrue(self.win.widget_dem_single.isHidden())
+        self.assertFalse(self.win.widget_dem_batch.isHidden())
+
+        # 创建测试 DEM 文件
+        self._create_synthetic_dem("tile_1.tif")
+        self._create_synthetic_dem("tile_2.tif")
+
+        self.win.edit_batch_dem_input.setText(self.temp_dir.name)
+        self.win._scan_batch_dem_folder(self.temp_dir.name)
+
+        self.assertIn("2", self.win.lbl_batch_dem_scan_status.text())
+        self.assertEqual(self.win.lbl_batch_dem_stat_total.text(), "2")
+
+        # 测试进度回调槽函数
+        stats = {
+            "total": 2,
+            "success": 1,
+            "failed": 0,
+            "skipped_msl": 0,
+            "skipped_resume": 1,
+            "current_file": "tile_1.tif"
+        }
+        self.win._on_batch_dem_progress(1, 2, "tile_1.tif", "正在转换...", stats)
+        self.assertEqual(self.win.prog_batch_dem_overall.value(), 50)
+        self.assertEqual(self.win.lbl_batch_dem_stat_success.text(), "1")
+        self.assertEqual(self.win.lbl_batch_dem_stat_skipped_resume.text(), "1")
+
+        # 测试完成槽函数
+        from core.batch_datum_converter import BatchConversionSummary
+        summary = BatchConversionSummary(
+            input_dir=self.temp_dir.name,
+            output_dir=os.path.join(self.temp_dir.name, "out"),
+            total_tiles=2,
+            success_count=1,
+            failed_count=0,
+            skipped_msl_count=0,
+            skipped_resume_count=1,
+            elapsed_seconds=1.23,
+            manifest_csv=os.path.join(self.temp_dir.name, "out", "conversion_manifest.csv"),
+            manifest_json=os.path.join(self.temp_dir.name, "out", "conversion_manifest.json")
+        )
+        self.win._on_batch_dem_finished(summary)
+        self.assertEqual(self.win.prog_batch_dem_overall.value(), 100)
+        self.assertFalse(self.win.grp_batch_dem_results.isHidden())
+        self.assertEqual(self.win.lbl_batch_dem_manifest_csv.text(), summary.manifest_csv)
+
+    def test_batch_dem_handoff_to_batch_raster(self):
+        """测试批量 DEM 产物目录一键直通载入 Tab 4 批量潮间带栅格解算"""
+        out_dir = os.path.join(self.temp_dir.name, "out_msl")
+        os.makedirs(out_dir, exist_ok=True)
+        self.win.edit_batch_dem_output.setText(out_dir)
+
+        with patch.object(self.win, "_on_scan_batch_rasters") as mock_scan:
+            self.win._handoff_batch_dem_to_batch_raster()
+            self.assertEqual(self.win.tabs.currentIndex(), 4)
+            self.assertEqual(self.win.txt_batch_in_dir.text(), out_dir)
+            mock_scan.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
