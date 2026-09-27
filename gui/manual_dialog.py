@@ -341,9 +341,9 @@ MANUAL_HTML = """
 </ul>
 
 <h3>3. 批量转换引擎与断点恢复 (v1.7.1 Batch Engine & Multi-Factor Resume)</h3>
-<p>v1.7.1 引入全新批量 DEM 垂直基准转换引擎，具备工业级可靠性：</p>
+<p>v1.7.1 引入批量 DEM 垂直基准转换引擎，具备工程鲁棒性：</p>
 <ul>
-    <li><b>多线程独立隔离 (Thread-Safe Workers)</b>: 支持并发 Workers &gt; 1 处理，采用线程私有独立 Converter 实例，彻底消除局部网格缓存竞态污染；</li>
+    <li><b>多线程独立隔离 (Thread-Safe Workers)</b>: 支持并发 Workers &gt; 1 处理，采用线程私有独立 Converter 实例，避免局部网格缓存竞态污染；</li>
     <li><b>多因子严格断点恢复 (Strict Resume Skip)</b>: 结合 SHA-256 参数签名、输入文件大小与修改时间、输出 GeoTIFF 头部完整性与元数据标签，实现严密的跳过验证，参数变更或文件损坏时自动强制重算；</li>
     <li><b>质量控制掩膜优化 (write_qc 开关)</b>: 默认关闭质量控制掩膜 GeoTIFF 的落盘写入，减少 50% 磁盘占用与大量 I/O 开销，需要诊断时可一键勾选开启。</li>
 </ul>
