@@ -451,6 +451,7 @@ class DEMDatumConversionWorker(QThread):
                 if not self._is_cancelled:
                     self.progress.emit(percent, msg)
 
+            save_qc = self.params.get('save_qc', False)
             summary = convert_dem_to_msl(
                 input_dem_path=self.params['input_path'],
                 output_msl_path=self.params.get('output_path'),
@@ -458,17 +459,10 @@ class DEMDatumConversionWorker(QThread):
                 max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
                 block_size=self.params.get('block_size', 512),
                 allow_overwrite=self.params.get('allow_overwrite', True),
+                write_qc=save_qc,
                 progress_callback=p_cb,
                 cancel_event=self.cancel_event
             )
-
-            # 若未勾选保存 QC 掩膜，清理临时生成的 QC 产物
-            save_qc = self.params.get('save_qc', False)
-            if not save_qc and summary.qc_output_path and os.path.exists(summary.qc_output_path):
-                try:
-                    os.remove(summary.qc_output_path)
-                except Exception:
-                    pass
 
             if self._is_cancelled:
                 self.cancelled.emit()
@@ -518,6 +512,7 @@ class BatchDEMDatumConversionWorker(QThread):
                 resume=self.params.get('resume', True),
                 overwrite=self.params.get('overwrite', False),
                 workers=self.params.get('workers', 1),
+                write_qc=self.params.get('write_qc', False),
                 progress_callback=p_cb,
                 cancel_event=self.cancel_event
             )
@@ -1070,11 +1065,11 @@ class MainWindow(QMainWindow):
 
         layout_params.addWidget(QLabel("沿岸外推距离上限:"), 2, 0)
         self.spin_dem_max_dist = QDoubleSpinBox()
-        self.spin_dem_max_dist.setRange(0.0, 100.0)
+        self.spin_dem_max_dist.setRange(0.0, 500.0)
         self.spin_dem_max_dist.setValue(100.0)
-        self.spin_dem_max_dist.setSingleStep(5.0)
+        self.spin_dem_max_dist.setSingleStep(10.0)
         self.spin_dem_max_dist.setSuffix(" km")
-        self.spin_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推保守截断上限，严格限制在 0.0 ~ 100.0 km。\n(Seeger & Minderhoud 2026 原研究针对全球宏观尺度采用 500 km)")
+        self.spin_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
         layout_params.addWidget(self.spin_dem_max_dist, 2, 1)
 
         layout_params.addWidget(QLabel("2D 分块流式大小:"), 2, 2)
@@ -1294,10 +1289,11 @@ class MainWindow(QMainWindow):
 
         layout_batch_params.addWidget(QLabel("沿岸外推距离上限:"), 1, 0)
         self.spin_batch_dem_max_dist = QDoubleSpinBox()
-        self.spin_batch_dem_max_dist.setRange(0.0, 100.0)
+        self.spin_batch_dem_max_dist.setRange(0.0, 500.0)
         self.spin_batch_dem_max_dist.setValue(100.0)
-        self.spin_batch_dem_max_dist.setSingleStep(5.0)
+        self.spin_batch_dem_max_dist.setSingleStep(10.0)
         self.spin_batch_dem_max_dist.setSuffix(" km")
+        self.spin_batch_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
         layout_batch_params.addWidget(self.spin_batch_dem_max_dist, 1, 1)
 
         layout_batch_params.addWidget(QLabel("2D 分块流式大小:"), 1, 2)
@@ -1322,6 +1318,10 @@ class MainWindow(QMainWindow):
         self.chk_batch_dem_overwrite = QCheckBox("强制覆盖 (Overwrite, 强制重新转换所有瓦片)")
         self.chk_batch_dem_overwrite.setChecked(False)
         layout_batch_params.addWidget(self.chk_batch_dem_overwrite, 4, 0, 1, 4)
+
+        self.chk_batch_dem_save_qc = QCheckBox("保存每幅瓦片的转换质量控制掩膜 GeoTIFF (Conversion QC Mask)")
+        self.chk_batch_dem_save_qc.setChecked(False)
+        layout_batch_params.addWidget(self.chk_batch_dem_save_qc, 5, 0, 1, 4)
 
         layout_batch.addWidget(grp_batch_params)
 
@@ -1575,7 +1575,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输出路径无效", "请指定输出 DEM_MSL GeoTIFF 路径。")
             return
 
-        max_dist_km = min(100.0, float(self.spin_dem_max_dist.value()))
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            max_dist_km = validate_mdt_extrapolation_distance(float(self.spin_dem_max_dist.value()))
+        except ValueError as e:
+            QMessageBox.warning(self, "参数错误", str(e))
+            return
+
         block_size = int(self.spin_dem_block_size.value())
         save_qc = self.chk_dem_save_qc.isChecked()
         qc_out = self.edit_dem_qc_output.text().strip() if save_qc else None
@@ -1740,11 +1746,18 @@ class MainWindow(QMainWindow):
             out_dir = os.path.join(in_dir, "DEM_MSL_output")
             self.edit_batch_dem_output.setText(out_dir)
 
-        max_dist_km = min(100.0, float(self.spin_batch_dem_max_dist.value()))
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            max_dist_km = validate_mdt_extrapolation_distance(float(self.spin_batch_dem_max_dist.value()))
+        except ValueError as e:
+            QMessageBox.warning(self, "参数错误", str(e))
+            return
+
         block_size = int(self.spin_batch_dem_block_size.value())
         workers = int(self.spin_batch_dem_workers.value())
         resume = self.chk_batch_dem_resume.isChecked()
         overwrite = self.chk_batch_dem_overwrite.isChecked()
+        write_qc = self.chk_batch_dem_save_qc.isChecked()
 
         params = {
             'input_dir': in_dir,
@@ -1753,7 +1766,8 @@ class MainWindow(QMainWindow):
             'block_size': block_size,
             'workers': workers,
             'resume': resume,
-            'overwrite': overwrite
+            'overwrite': overwrite,
+            'write_qc': write_qc
         }
 
         self.btn_run_batch_dem.setEnabled(False)

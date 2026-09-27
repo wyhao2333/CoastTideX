@@ -164,19 +164,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_convert = subparsers.add_parser("convert-dem", help="将陆地高程 DEM (EGM2008) 严密转换为局部平均海平面基准 (DEM_MSL)")
     p_convert.add_argument("--input", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (EGM2008 基准)")
     p_convert.add_argument("--output", "-o", type=str, default=None, help="输出 DEM_MSL GeoTIFF 路径 (默认: <input>_msl.tif)")
-    p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (默认: <output>_conversion_qc.tif)")
-    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="MDT 沿岸外推最大物理距离上限 (公里，默认: 100.0)")
+    p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (仅在 --write-qc 时生效)")
+    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
     p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
     p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
+    p_convert.add_argument("--write-qc", action="store_true", default=False, help="保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
 
     # 5. 批量 DEM 垂直基准转换模式 (v1.7.1)
     p_batch_convert = subparsers.add_parser("convert-dem-batch", help="批量将 DEM 文件夹从 EGM2008 基准转换为局域 MSL 基准 (v1.7.1)")
     p_batch_convert.add_argument("--input-dir", "-i", type=str, required=True, help="输入包含待转换 DEM (*.tif) 的文件夹路径")
     p_batch_convert.add_argument("--output-dir", "-o", type=str, required=True, help="转换后 MSL DEM 输出目录")
-    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="MDT 近岸空间外推最大物理截断距离 (km, 默认: 100.0)")
+    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
     p_batch_convert.add_argument("--workers", type=int, default=1, help="并发工作线程/任务数 (默认: 1, 逐瓦片顺序执行)")
     p_batch_convert.add_argument("--resume", action="store_true", help="开启断点恢复模式 (跳过清单中已成功的瓦片)")
     p_batch_convert.add_argument("--overwrite", action="store_true", help="允许覆盖既有输出文件")
+    p_batch_convert.add_argument("--write-qc", action="store_true", default=False, help="保存每幅瓦片的转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
 
     return parser
 
@@ -524,10 +526,16 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     统计结果: 完成 {res['counts']['completed']}, 失败 {res['counts']['failed']}, 跳过 {res['counts']['skipped']}, 取消 {res['counts']['cancelled']}")
 
     elif args.mode == "convert-dem":
-        from core.dem_datum_converter import convert_dem_to_msl
-        print(f"[*] 启动 DEM 垂直基准转换: EGM2008 -> MSL (Nature 2026 统一基准架构)...")
+        from core.dem_datum_converter import convert_dem_to_msl, validate_mdt_extrapolation_distance
+        try:
+            eff_dist_km = validate_mdt_extrapolation_distance(args.max_dist_km)
+        except ValueError as e:
+            print(f"[ERROR] 命令行参数 --max-dist-km 非法: {e}", file=sys.stderr)
+            sys.exit(2)
+
+        print(f"[*] 启动 DEM 垂直基准转换: EGM2008 -> MSL (Adapted from Seeger & Minderhoud, Nature, 2026)...")
         print(f"[*] 输入 DEM: {args.input}")
-        print(f"[*] 最大允许外推距离: {args.max_dist_km} km, 空间分块大小: {args.block_size}")
+        print(f"[*] 最大允许外推距离: {eff_dist_km:.1f} km, 空间分块大小: {args.block_size}, 输出 QC 掩膜: {args.write_qc}")
 
         def _cli_convert_prog(p, m):
             print(f"    -> [{p:3d}%] {m}")
@@ -536,14 +544,16 @@ def main(args_list: Optional[List[str]] = None):
             input_dem_path=args.input,
             output_msl_path=args.output,
             output_qc_path=args.qc_output,
-            max_extrapolation_distance_km=args.max_dist_km,
+            max_extrapolation_distance_km=eff_dist_km,
             block_size=args.block_size,
             allow_overwrite=args.overwrite,
+            write_qc=args.write_qc or (args.qc_output is not None),
             progress_callback=_cli_convert_prog
         )
         print(f"[OK] DEM 垂直基准转换成功！")
         print(f"     输出 DEM_MSL: {summary.output_path}")
-        print(f"     输出 QC 掩膜: {summary.qc_output_path}")
+        if summary.qc_output_path:
+            print(f"     输出 QC 掩膜: {summary.qc_output_path}")
         print(f"     网格规格: {summary.width} × {summary.height} (总计 {summary.total_pixels:,} 像元)")
         print(f"     有效 DEM 像元: {summary.valid_dem_pixels:,}")
         print(f"     - 大洋原生插值: {summary.native_mdt_pixels:,}")
@@ -553,10 +563,17 @@ def main(args_list: Optional[List[str]] = None):
 
     elif args.mode == "convert-dem-batch":
         from core.batch_datum_converter import BatchDEMDatumConverter
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            eff_dist_km = validate_mdt_extrapolation_distance(args.max_dist_km)
+        except ValueError as e:
+            print(f"[ERROR] 命令行参数 --max-dist-km 非法: {e}", file=sys.stderr)
+            sys.exit(2)
+
         print(f"[*] 启动批量 DEM 垂直基准转换: EGM2008 -> MSL (v1.7.1)...")
         print(f"[*] 输入目录: {args.input_dir}")
         print(f"[*] 输出目录: {args.output_dir}")
-        print(f"[*] 最大外推距离门禁: {args.max_dist_km} km, 并发 Workers: {args.workers}")
+        print(f"[*] 最大外推距离门禁: {eff_dist_km:.1f} km, 并发 Workers: {args.workers}, 保存 QC: {args.write_qc}")
         print(f"[*] 断点恢复 (--resume): {args.resume}, 允许覆盖 (--overwrite): {args.overwrite}")
 
         def _cli_batch_convert_prog(idx, total, cur_file, msg, stats):
@@ -564,14 +581,15 @@ def main(args_list: Optional[List[str]] = None):
             fname = os.path.basename(cur_file) if cur_file else ""
             print(f"    [{pct:3d}%] ({idx}/{total}) {fname} -> {msg}")
 
-        batch_converter = BatchDEMDatumConverter(max_extrapolation_distance_km=args.max_dist_km)
+        batch_converter = BatchDEMDatumConverter(max_extrapolation_distance_km=eff_dist_km)
         summary = batch_converter.run_batch(
             input_dir=args.input_dir,
             output_dir=args.output_dir,
-            max_dist_km=args.max_dist_km,
+            max_dist_km=eff_dist_km,
             workers=args.workers,
             resume=args.resume,
             overwrite=args.overwrite,
+            write_qc=args.write_qc,
             progress_callback=_cli_batch_convert_prog
         )
 

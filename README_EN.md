@@ -74,7 +74,7 @@ $$\text{Tide}_{\text{MSL}}(t) > \text{DEM}_{\text{MSL}}$$
 
 #### Key Architectural & Scientific Highlights:
 1. **Two-Stage MDT Spatial Reconstruction**: Open ocean regions utilize CNES-CLS22 native bilinear interpolation (`QC=0: native_mdt`); nearshore and terrestrial data voids employ spherical 3D Cartesian Inverse Distance Weighting (`QC=1: idw_extrapolated`);
-2. **Conservative 100 km Physical Extrapolation Cutoff**: While the original global macro-scale study by Seeger & Minderhoud (2026) utilized a 500 km coastal buffer, CoastTideX enforces a more conservative application-specific **100 km** cutoff for high-resolution intertidal wetland analysis, masking inland pixels $> 100\text{ km}$ from valid ocean points as NoData (`QC=2: nodata`) to prevent deep-inland extrapolation;
+2. **Configurable 0–500 km Physical Extrapolation Cutoff (Default 100 km)**: Supports user-configured cutoff distances between 0.0 and 500.0 km (default: 100.0 km; 0.0 km disables extrapolation and relies solely on native ocean MDT). Pixels beyond the specified distance are assigned NoData (`QC=2: nodata`), preventing unrealistic deep-inland extrapolation. (*Note: Adapted from Seeger & Minderhoud, Nature, 2026; CoastTideX implements a spherical 3D k-NN IDW extrapolation framework and is not an exact pixel-by-pixel reproduction of the ArcGIS Smooth Neighborhood IDW tool*);
 3. **Stage 1 Zero-MDT-Lookup**: During quadtree adaptive control grid evaluation, control nodes compute pure astronomical tides directly without querying gravity geoids or MDT models;
 4. **100% Strict Decision Equivalence**: Rigorously verified across Chongming Island's 150M-pixel dataset with 10,000 spatial samples (240,000 temporal evaluations), confirming **100.0000%** decision consistency (elevation residual at float32 limit $\sim 10^{-7}\text{ m}$);
 5. **Smooth Backward Compatibility**: Retains `dem_datum="egm2008"` as a deprecated compatibility mode (`DeprecationWarning`), with `dem_datum="msl"` now being the default production standard.
@@ -270,16 +270,16 @@ pip install -r requirements.txt
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
     --output path/to/coastal_dem_msl.tif \
-    --qc-output path/to/coastal_dem_msl_qc.tif \
     --max-dist-km 100.0 \
-    --block-size 1024
+    --block-size 1024 \
+    --write-qc
 
-# Batch DEM folder conversion (New in v1.7.1, recursive scanning, resume, manifest):
+# Batch DEM folder conversion (New in v1.7.1, multi-worker, strict resume, manifest):
 python cli.py convert-dem-batch \
     --input-dir path/to/egm2008_dems/ \
     --output-dir path/to/msl_dems/ \
     --max-dist-km 100.0 \
-    --workers 1 \
+    --workers 2 \
     --resume
 
 # 1. Potential Tidal Exposure Duration Analysis (New in v1.6)

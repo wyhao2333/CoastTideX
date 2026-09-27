@@ -74,7 +74,7 @@ $$\text{Tide}_{\text{MSL}}(t) > \text{DEM}_{\text{MSL}}$$
 
 #### 关键技术特性与科学保证：
 1. **开阔大洋与近岸外推两阶段 MDT 重构**：开阔大洋海域采用 CNES-CLS22 原生网格高精度双线性插值（标记 `QC=0: native_mdt`）；近岸与陆地缺失区采用球面三维空间直角坐标反距离加权（IDW，标记 `QC=1: idw_extrapolated`）；
-2. **严密 100 km 物理距离门禁阻断**：Seeger & Minderhoud (2026) 原研究针对全球宏观尺度采用 500 km 沿岸范围；CoastTideX 针对高分辨率滨海湿地与潮滩遥感，引入了更为保守的 **100 km** 空间门禁上限，距离有效大洋点 $> 100\text{ km}$ 的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推；
+2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认推荐 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现*）；
 3. **Stage 1 控制节点零 MDT 查询 (Zero-MDT-Lookup)**：在自适应控制网格求解淹没频率与露出时长时，节点直接解算纯天文潮序列，完全消除数百次重力大地水准面重复采样开销；
 4. **决策等价性 100% 严密闭环**：基于崇明岛 1.5 亿像元高分辨率真实地形进行 10,000 点抽样（240,000 次判定测试），验证代数变换前后淹没判定一致率达到 **100.0000%**（残差仅为单精度浮点极限 $\sim 10^{-7}\text{ m}$）；
 5. **平滑向后兼容**：保留 `dem_datum="egm2008"` 作为向后兼容选项（触发 `DeprecationWarning`），系统默认全面推荐并切换至 `dem_datum="msl"`。
@@ -293,23 +293,23 @@ CoastTideX 提供完整无头运行能力的命令行工具 `cli.py`：
 
 #### 单幅 DEM 影像转换:
 ```bash
-# 将任意 EGM2008 基准陆地高程 DEM 严密转换为局部平均海平面 MSL 基准 (Nature 2026 统一架构)
+# 将任意 EGM2008 基准陆地高程 DEM 严密转换为局部平均海平面 MSL 基准 (Adapted from Nature 2026 统一架构)
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
     --output path/to/coastal_dem_msl.tif \
-    --qc-output path/to/coastal_dem_msl_qc.tif \
     --max-dist-km 100.0 \
-    --block-size 1024
+    --block-size 1024 \
+    --write-qc
 ```
 
 #### 批量 DEM 目录转换 (v1.7.1 新增):
 ```bash
-# 批量扫描文件夹并转换所有 EGM2008 DEM 瓦片为 MSL 基准 (支持递归扫描、断点恢复与自动化 Manifest 清单)
+# 批量扫描文件夹并转换所有 EGM2008 DEM 瓦片为 MSL 基准 (支持多线程 Workers、严格特征签名断点恢复与自动化 Manifest 清单)
 python cli.py convert-dem-batch \
     --input-dir path/to/egm2008_dems/ \
     --output-dir path/to/msl_dems/ \
     --max-dist-km 100.0 \
-    --workers 1 \
+    --workers 2 \
     --resume
 ```
 

@@ -1,4 +1,4 @@
-# CoastTideX v1.7 — MSL Reference Workflow 架构设计与用户指南
+# CoastTideX v1.7.1 — MSL Reference Workflow 架构设计与用户指南
 
 ---
 
@@ -14,8 +14,8 @@ $$\text{Tide}_{\text{EGM2008}}(t) = \text{Tide}_{\text{MSL}}(t) + \text{MDT} + \
 1. **统一物理几何基准**：借鉴 Seeger & Minderhoud (2026) 提出的基准统一思想，将陆面 DEM 前置转换为局部平均海平面基准，彻底消除水动力模型与静态地形比较时的基准错位；
 2. **计算解耦与消除冗余**：前置基准转换使得在后续自适应四叉树控制网格解算中，控制节点无需反复查询 MDT 与大地水准面，实现纯动力学潮位的零冗余快速评估。
 
-### v1.7 核心范式跃迁 (Paradigm Shift)
-**CoastTideX v1.7** 正式实现基准统一框架跃迁：**将陆地 DEM 前置转换为局部平均海平面 (Local Mean Sea Level, MSL) 基准**（Adapted from Seeger & Minderhoud, 2026）：
+### v1.7 / v1.7.1 核心范式跃迁 (Paradigm Shift)
+**CoastTideX v1.7.1** 正式实现基准统一框架跃迁：**将陆地 DEM 前置转换为局部平均海平面 (Local Mean Sea Level, MSL) 基准**（Adapted from Seeger & Minderhoud, 2026）：
 
 $$Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$$
 
@@ -36,7 +36,7 @@ $$\text{Tide}_{\text{MSL}}(t) > \text{DEM}_{\text{MSL}}$$
 代数转换满足绝对可逆恒等关系：
 $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \iff (\text{Tide}_{\text{MSL}}(t) > Z_{\text{MSL}})$$
 
-### 2.2 两阶段 MDT 空间重构与 100 km 门禁机制
+### 2.2 两阶段 MDT 空间重构与可配置 0–500 km 门禁机制
 1. **阶段 1 (Native Ocean MDT)**：
    - 对于开阔大洋与有效海域，采用 CNES-CLS22 原生网格高精度双线性插值（Bilinear Interpolation）；
    - 质量控制编码标记为：`QC = 0 (native_mdt)`。
@@ -45,49 +45,84 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
      $$X = R \cos\varphi \cos\lambda, \quad Y = R \cos\varphi \sin\lambda, \quad Z = R \sin\varphi$$
    - 基于 `scipy.spatial.cKDTree` 构建大洋有效边界点的高维空间索引，进行反距离加权（IDW，幂次 $p=2.0$，近邻点数 $k=8$）空间外推；
    - 质量控制编码标记为：`QC = 1 (idw_extrapolated)`。
-3. **物理距离硬截断门禁 (100 km Hard Cutoff Guard)**：
-   - 常量设定：`MAX_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
-   - **特别说明**：Seeger & Minderhoud (2026) 原研究针对全球宏观尺度采用了 500 km 沿岸范围；CoastTideX 针对高分辨率沿海潮滩与滨海湿地生态模拟，引入了更为保守的 **100 km** 空间门禁上限；
-   - 凡至最近有效大洋网格点的测地空间距离 $> 100\text{ km}$ 的深陆区，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
-   - 质量控制编码标记为：`QC = 2 (nodata_or_exceeded_100km)`，坚决杜绝内陆无限外推造成的失真。
+3. **可配置 0–500 km 物理距离门禁阻断 (Configurable Extrapolation Guard)**：
+   - 默认推荐：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
+   - 允许配置范围：`0.0 ~ 500.0 km`（非数值或超出范围抛出 `ValueError`，杜绝静默截断）；
+   - **0 km 模式**：若配置距离为 0.0 km，则完全禁用 IDW 空间外推，纯使用大洋原生插值，陆地缺失区直接标记 NoData (`QC = 2`)；
+   - **特别说明**：*Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推算法，并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异*；
+   - 凡至最近有效大洋网格点的测地空间距离大于门禁距离的深陆区，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
+   - 质量控制编码标记为：`QC = 2 (nodata)`，坚决杜绝内陆无限外推造成的失真。
+
+### 2.3 动态空间索引与 ±180° 国际日界线支持 (Dynamic Window & Antimeridian Support)
+- **动态支持窗口**：系统根据配置的外推距离 $d$ 动态计算球面角距离半径 $\theta = \text{degrees}(d / R)$，并在高纬度区域根据 $\cos(\varphi)$ 自适应扩展经度缓冲带（$\Delta\lambda = \theta / \cos\varphi$），彻底消除边缘截断效应；
+- **跨越 ±180° 日界线**：内嵌圆周最小区间自适应解算器 (`compute_minimal_circular_longitude_interval`)，自动识别斐济、汤加、白令海峡等跨越国际日界线的区域，通过双切片展开拼接，实现跨越 ±180° 的无缝空间连续插值与 KDTree 检索。
 
 ---
 
 ## 3. 架构优势与性能收益 (Architectural Advantages & Performance)
 
-| 评估维度 | v1.6 旧架构 (Tide to EGM2008) | v1.7 新架构 (DEM to MSL) | 科学与工程收益 |
+| 评估维度 | v1.6 旧架构 (Tide to EGM2008) | v1.7.1 新架构 (DEM to MSL) | 科学与工程收益 |
 | :--- | :--- | :--- | :--- |
 | **比较物理基准** | EGM2008 大地水准面 | 局部平均海平面 (MSL) | 消除近岸水准面阶梯畸变 |
 | **Stage 1 控制节点 MDT 查询** | 逐节点频繁查询 (78+ 次) | **零查询 (0 次)** | Stage 1 纯潮位解算零额外依赖 |
-| **MDT 沿岸外推边界** | 无明确物理距离截断 | **严格 100 km 球面空间门禁** | 消除深陆区无限外推风险 |
+| **MDT 沿岸外推边界** | 无明确物理距离截断 | **可配置 0–500 km (默认 100 km)** | 消除深陆区无限外推风险 |
 | **决策边界一致性** | 基准一致 | **100.0000% 严密等价** | 240,000 次判定残差 $< 10^{-7}\text{ m}$ |
 | **批处理流式吞吐** | 重复解算基准偏移量 | 一次转换 DEM，后续零开销复用 | 显著提升多方案/多时段分析效率 |
+| **多线程并发安全性** | 单线程 | **Thread-Local 实例隔离** | 消除 Workers 并发全局缓存竞态污染 |
+| **断点恢复鲁棒性** | 单纯文件存在判断 | **SHA-256 参数签名 + 多因子校验** | 参数变更或损坏自动触发重算 |
 
 ---
 
 ## 4. 命令行 CLI 使用完全指南 (CLI Usage Guide)
 
-### 4.1 DEM 垂直基准前置转换 (`convert-dem`)
+### 4.1 单 DEM 垂直基准前置转换 (`convert-dem`)
 ```bash
 python cli.py convert-dem \
     --input F:/data/coastal_dem_egm2008.tif \
     --output F:/data/coastal_dem_msl.tif \
-    --qc-output F:/data/coastal_dem_msl_qc.tif \
     --max-dist-km 100.0 \
     --block-size 1024 \
+    --write-qc \
     --overwrite
 ```
 
 **参数说明**：
 - `--input`, `-i`: 待转换的原始 DEM GeoTIFF（必须为 EGM2008 基准）；
-- `--output`, `-o`: 输出 DEM_MSL GeoTIFF 路径（默认在输入文件名后附加 `_msl.tif`）；
-- `--qc-output`: 输出转换质量控制掩膜 GeoTIFF 路径（默认附加 `_conversion_qc.tif`）；
-- `--max-dist-km`: MDT 空间外推允许的最大物理距离（公里，默认 100.0）；
+- `--output`, `-o`: 输出 DEM_MSL GeoTIFF 路径（默认附加 `_MSL.tif`）；
+- `--qc-output`: 输出转换质量控制掩膜 GeoTIFF 路径（仅在需要自定义路径时指定）；
+- `--write-qc`: 是否输出质量控制掩膜 GeoTIFF（默认 False，节省 50% 磁盘 I/O）；
+- `--max-dist-km`: MDT 空间外推允许的最大物理距离（0.0 - 500.0 km，默认 100.0）；
 - `--block-size`: 2D 空间流式分块边长（默认 1024 像元，内存占用平稳）；
 - `--overwrite`: 覆盖已存在同名输出。
 
-### 4.2 基于 MSL DEM 运行淹没频率解算 (`raster inundation`)
+### 4.2 批量 DEM 目录流式转换 (`convert-dem-batch`)
 ```bash
+python cli.py convert-dem-batch \
+    --input-dir F:/data/egm2008_dems/ \
+    --output-dir F:/data/msl_dems/ \
+    --max-dist-km 100.0 \
+    --workers 2 \
+    --resume
+```
+
+**参数说明**：
+- `--input-dir`: 待转换的 DEM 文件夹；
+- `--output-dir`: 输出 DEM_MSL 文件夹；
+- `--max-dist-km`: 最大外推距离门禁（0.0 - 500.0 km，默认 100.0 km）；
+- `--workers`: 并发解算线程数（默认 1，多线程下各 Worker 拥有私有独立 Converter）；
+- `--resume`: 严格断点恢复模式（校验 SHA-256 参数签名、文件尺寸、mtime 与 TIFF 完整性）；
+- `--write-qc`: 是否写出质量控制掩膜 GeoTIFF（默认 False）；
+- `--overwrite`: 允许覆盖同名输出。
+
+### 4.3 基于 MSL DEM 运行淹没频率解算 (`raster inundation`)
+```bash
+python cli.py raster inundation \
+    --dem F:/data/msl_dems/coastal_dem_MSL.tif \
+    --output F:/data/inundation_freq.tif \
+    --year 2024 \
+    --step 30min \
+    --dem-datum msl
+```
 python cli.py raster inundation \
     --dem F:/data/coastal_dem_msl.tif \
     --output F:/data/inundation_freq.tif \
@@ -149,23 +184,25 @@ for i in range(len(lons)):
 
 ## 6. 质量控制掩膜与元数据规范 (QC Specification & Metadata Tags)
 
-### 6.1 转换 QC 掩膜编码 (`*_conversion_qc.tif`)
+### 6.1 转换 QC 掩膜编码 (`*_conversion_qc.tif` / `*_MSL_qc.tif`)
 | QC 数值 | 宏定义常量 | 几何与物理涵义 | 处理机制 |
 | :---: | :--- | :--- | :--- |
 | **0** | `QC_MDT_NATIVE` | 原始 CNES-CLS22 大洋开阔海域覆盖点 | 双线性插值，高精度保证 |
-| **1** | `QC_MDT_EXTRAPOLATED` | 近岸滩涂与陆地缺失点（距离有效海域 $\le 100\text{ km}$） | 球面 3D 空间 IDW 外推 |
-| **2** | `QC_MDT_NODATA` | 输入 DEM 原生 NoData 或距离大洋有效海域 $> 100\text{ km}$ | 严密物理阻断，赋 NoData |
+| **1** | `QC_MDT_EXTRAPOLATED` | 近岸滩涂与陆地缺失点（距离有效海域 $\le \text{max\_dist}$） | 球面 3D 空间 k-NN IDW 外推 |
+| **2** | `QC_MDT_NODATA` | 输入 DEM 原生 NoData 或距离大洋有效海域 $> \text{max\_dist}$ | 严密物理阻断，赋 NoData |
 
 ### 6.2 输出 GeoTIFF 元数据溯源标签 (Provenance Tags)
-转换生成的 `*_msl.tif` 自动注入完备的科学溯源元数据：
-- `SOFTWARE`: `CoastTideX v1.7`
+转换生成的 `*_MSL.tif` 自动注入完备的科学溯源元数据：
+- `SOFTWARE`: `CoastTideX v1.7.1`
 - `CONVERTER`: `DEMDatumConverter`
 - `DATUM`: `MSL`
 - `ANALYSIS_REFERENCE`: `MSL`
 - `SOURCE_VERTICAL_DATUM`: `EGM2008`
 - `TARGET_VERTICAL_DATUM`: `MSL`
 - `MDT_MODEL`: `CNES-CLS22`
-- `MDT_METHOD`: `bilinear_native_plus_idw_extrapolated`
-- `MAX_EXTRAPOLATION_DISTANCE_KM`: `100.0`
+- `MDT_METHOD`: `bilinear_native_plus_spherical_knn_idw`
+- `MAX_EXTRAPOLATION_DISTANCE_KM`: 配置的外推距离 (如 `100.0` 或 `50.0`)
 - `EQUATION`: `Z_MSL = Z_EGM2008 - MDT - DeltaN`
 - `SCIENTIFIC_CITATION`: `Adapted from Seeger & Minderhoud (Nature, 2026)`
+- `METHOD_RELATION`: `Adapted from Seeger & Minderhoud (2026); spherical 3D k-NN IDW, not exact reproduction of ArcGIS Smooth Neighborhood IDW`
+- `QC_ENCODING`: `UInt8: 0=native_mdt, 1=idw_extrapolated, 2=nodata`

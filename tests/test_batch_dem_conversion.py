@@ -224,7 +224,26 @@ class TestBatchDEMConversion(unittest.TestCase):
             call_count += 1
             out_p = Path(kwargs["output_msl_path"])
             out_p.parent.mkdir(parents=True, exist_ok=True)
-            out_p.write_text("fake geotiff content")
+            transform = from_bounds(121.5, 31.0, 121.8, 31.3, 20, 20)
+            data = np.ones((1, 20, 20), dtype=np.float32) * 4.0
+            with rasterio.open(
+                str(out_p), "w",
+                driver="GTiff",
+                height=20,
+                width=20,
+                count=1,
+                dtype=rasterio.float32,
+                crs="EPSG:4326",
+                transform=transform,
+                nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL",
+                    TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008",
+                    MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
             return self._mock_dem_summary(kwargs["input_dem_path"], str(out_p))
 
         with patch.object(converter.converter, "convert_raster", side_effect=fake_convert):

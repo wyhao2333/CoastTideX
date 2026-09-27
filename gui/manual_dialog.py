@@ -327,17 +327,30 @@ MANUAL_HTML = """
     <li><code>Z_MSL</code>: 转换后在局部平均海平面 (MSL) 基准下的绝对高程（米）。</li>
 </ul>
 
-<h3>2. 沿岸 MDT 空间外推与保守 100 km 门禁机制</h3>
-<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合潮间带工程的高精度要求，设定了<b>严格的 100 km 保守外推截断距离</b>（注：Nature 原文针对全球宏观尺度采用了 500 km 沿海缓冲区）：</p>
+<h3>2. 沿岸 MDT 空间外推与可配置 0–500 km 门禁机制 (Adapted from Seeger & Minderhoud, Nature, 2026)</h3>
+<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合潮间带工程的高精度要求，设定了<b>可配置的 0.0 ~ 500.0 km 空间外推门禁（默认推荐 100.0 km）</b>：</p>
+<div class="callout-info">
+<b>科学实现方法定位说明：</b> 本系统采用球面三维空间直角坐标 k-NN 反距离加权外推算法（Adapted from Seeger & Minderhoud, Nature, 2026），并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异。
+</div>
 <ul>
-    <li><b>大洋与近海区 (距离 = 0)</b>: 采用原生 CNES-CLS22 规则网格双线性插值 (Bilinear Interpolation)；</li>
-    <li><b>沿岸潮滩区 (0 &lt; 距离 &le; 100 km)</b>: 建立局部 3D 空间直角坐标球面 KD-Tree 索引，采用反距离加权 (IDW, k=8, p=2.0) 沿岸向陆外推，QC 标记为 1；</li>
-    <li><b>深陆区 (距离 &gt; 100 km)</b>: 严格判定超出有效外推边界，输出 NoData，QC 标记为 2，严禁深陆无物理约束的无限外推。</li>
+    <li><b>大洋与近海区 (距离 = 0)</b>: 采用原生 CNES-CLS22 规则网格双线性插值 (Bilinear Interpolation)，QC 标记为 0；</li>
+    <li><b>0 km 模式 (纯大洋原生模式)</b>: 若设置外推距离为 0.0 km，则完全禁用 IDW 空间外推，仅保留大洋原生插值，陆地缺失区直接标记 NoData (QC=2)；</li>
+    <li><b>沿岸潮滩区 (0 &lt; 距离 &le; 门禁距离)</b>: 建立局部 3D 空间直角坐标球面 KD-Tree 索引，采用反距离加权 (IDW, k=8, p=2.0) 沿岸向陆外推，QC 标记为 1；</li>
+    <li><b>深陆区 (距离 &gt; 门禁距离)</b>: 严格判定超出有效外推边界，强制输出 NoData，QC 标记为 2，严禁深陆无物理约束的无限外推；</li>
+    <li><b>国际日界线支持</b>: 算法内嵌环形圆周最小区间自适应解算，无缝支持跨越 ±180° 经线的海岛与海岸区域。</li>
 </ul>
 
-<h3>3. GUI 推荐操作流程 (One-Click Seamless Workflow)</h3>
+<h3>3. 批量转换引擎与断点恢复 (v1.7.1 Batch Engine & Multi-Factor Resume)</h3>
+<p>v1.7.1 引入全新批量 DEM 垂直基准转换引擎，具备工业级可靠性：</p>
+<ul>
+    <li><b>多线程独立隔离 (Thread-Safe Workers)</b>: 支持并发 Workers &gt; 1 处理，采用线程私有独立 Converter 实例，彻底消除局部网格缓存竞态污染；</li>
+    <li><b>多因子严格断点恢复 (Strict Resume Skip)</b>: 结合 SHA-256 参数签名、输入文件大小与修改时间、输出 GeoTIFF 头部完整性与元数据标签，实现严密的跳过验证，参数变更或文件损坏时自动强制重算；</li>
+    <li><b>质量控制掩膜优化 (write_qc 开关)</b>: 默认关闭质量控制掩膜 GeoTIFF 的落盘写入，减少 50% 磁盘占用与大量 I/O 开销，需要诊断时可一键勾选开启。</li>
+</ul>
+
+<h3>4. GUI 推荐操作流程 (One-Click Seamless Workflow)</h3>
 <ol>
-    <li><b>步骤 1 (DEM 转换)</b>：打开 <b>「📐 DEM 基准转换 (EGM2008→MSL)」</b> 标签页，载入 EGM2008 DEM，点击「🚀 开始 DEM 基准转换」，系统流式输出 <code>*_MSL.tif</code> 并自动内嵌 <code>DATUM=MSL</code> 元数据标签；</li>
+    <li><b>步骤 1 (DEM 转换)</b>：打开 <b>「📐 DEM 基准转换 (EGM2008→MSL)」</b> 标签页，支持单文件转换或批量文件夹转换，点击「🚀 开始 DEM 基准转换」，系统流式输出 <code>*_MSL.tif</code> 并自动内嵌 <code>DATUM=MSL</code> 等元数据标签；</li>
     <li><b>步骤 2 (一键直通)</b>：在转换完成卡片上点击<b>「📊 用于单影像淹没频率分析」</b>或<b>「⏳ 用于单影像露出时间分析」</b>；</li>
     <li><b>步骤 3 (直接解算)</b>：系统自动切换至栅格分析标签页，自动加载 <code>*_MSL.tif</code>，并自动锁定 DEM 基准面为 <b>MSL</b>，即可直接展开高精度潜在淹没与露出分析。</li>
 </ol>

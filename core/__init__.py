@@ -14,11 +14,14 @@ potential tidal exposure duration and events analysis, and batch processing.
 from .datum_engine import DatumTransformer
 from .dem_datum_converter import (
     DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
-    MAX_MDT_EXTRAPOLATION_DISTANCE_KM, QC_MDT_NATIVE, QC_MDT_EXTRAPOLATED, QC_MDT_NODATA
+    DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM, MIN_MDT_EXTRAPOLATION_DISTANCE_KM,
+    MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM, MAX_MDT_EXTRAPOLATION_DISTANCE_KM,
+    validate_mdt_extrapolation_distance, compute_minimal_circular_longitude_interval,
+    QC_MDT_NATIVE, QC_MDT_EXTRAPOLATED, QC_MDT_NODATA
 )
 from .batch_datum_converter import (
     BatchDEMDatumConverter, BatchConversionManifest, BatchConversionSummary,
-    scan_dem_directory, is_dem_already_msl,
+    scan_dem_directory, is_dem_already_msl, compute_conversion_signature,
     STATUS_SUCCESS, STATUS_FAILED, STATUS_SKIPPED_MSL, STATUS_SKIPPED_RESUME
 )
 from .raster_engine import (
@@ -62,7 +65,13 @@ __all__ = [
     'BatchConversionManifest',
     'BatchConversionSummary',
     'scan_dem_directory',
+    'DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM',
+    'MIN_MDT_EXTRAPOLATION_DISTANCE_KM',
+    'MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM',
     'MAX_MDT_EXTRAPOLATION_DISTANCE_KM',
+    'validate_mdt_extrapolation_distance',
+    'compute_minimal_circular_longitude_interval',
+    'compute_conversion_signature',
     'QC_MDT_NATIVE',
     'QC_MDT_EXTRAPOLATED',
     'QC_MDT_NODATA',

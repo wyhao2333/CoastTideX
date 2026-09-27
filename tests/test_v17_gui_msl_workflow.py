@@ -104,15 +104,19 @@ class TestV17GUIMSLWorkflow(unittest.TestCase):
         self.assertTrue(hasattr(self.win, "btn_dem_open_folder"))
 
     def test_spin_dem_max_dist_capped_at_100(self):
-        """测试沿岸外推距离上限控件严格锁定在 100.0 km (Seeger & Minderhoud 2026 保守阈值)"""
+        """测试沿岸外推距离控件范围为 0.0 ~ 500.0 km，默认 100.0 km (Seeger & Minderhoud 2026 全球 500 km)"""
         spin = self.win.spin_dem_max_dist
-        self.assertEqual(spin.maximum(), 100.0)
+        self.assertEqual(spin.maximum(), 500.0)
         self.assertEqual(spin.minimum(), 0.0)
         self.assertEqual(spin.value(), 100.0)
 
-        # 尝试设置超出 100 km 的数值，应被截断在 100.0
+        # 尝试设置 500 km 合法数值
         spin.setValue(500.0)
-        self.assertEqual(spin.value(), 100.0)
+        self.assertEqual(spin.value(), 500.0)
+
+        # 尝试设置超出 500 km 的数值，应被截断在 500.0
+        spin.setValue(600.0)
+        self.assertEqual(spin.value(), 500.0)
 
     def test_inundation_exposure_defaults_to_msl(self):
         """测试单影像栅格分析中 DEM 基准面默认且优先推荐 MSL"""
