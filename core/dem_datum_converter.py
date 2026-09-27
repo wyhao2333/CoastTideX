@@ -30,9 +30,13 @@ import os
 import time
 import json
 import hashlib
+import threading
 import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, Dict, Any, Callable, Union, List
+
+# 全局 MDT 数据文件访问锁 (消除 Linux 下非线程安全 libnetcdf/libhdf5 并发读取导致的 SIGSEGV 竞态)
+_MDT_ACCESS_LOCK = threading.Lock()
 
 import numpy as np
 import rasterio
@@ -314,50 +318,51 @@ class DEMDatumConverter:
         final_lon_min = q_lon_min_unwrapped - cache_pad_deg
         final_lon_max = q_lon_max_unwrapped + cache_pad_deg
 
-        with xr.open_dataset(self.mdt_path) as ds:
-            mdt_lon_min = float(ds.longitude.min())
-            is_360_convention = (mdt_lon_min >= 0.0)
+        with _MDT_ACCESS_LOCK:
+            with xr.open_dataset(self.mdt_path) as ds:
+                mdt_lon_min = float(ds.longitude.min())
+                is_360_convention = (mdt_lon_min >= 0.0)
 
-            if not needs_antimeridian:
-                # 标准无日界线切片
-                sub_ds = ds.sel(
-                    latitude=slice(float(final_lat_min), float(final_lat_max)),
-                    longitude=slice(float(max(-180.0, final_lon_min)), float(min(180.0, final_lon_max)))
-                )
-                sub_lats = sub_ds.latitude.values.astype(np.float64)
-                sub_lons = sub_ds.longitude.values.astype(np.float64)
-                sub_mdt = sub_ds.mdt.values[0].astype(np.float64)
-                self._crosses_antimeridian = False
-            else:
-                # 跨越 ±180° 日界线切片 (两个局部 slice + unwrapped concatenate)
-                # 切片 1: 正经度侧 [final_lon_min_norm, 180.0]
-                slice1_min = max(-180.0, ((final_lon_min + 180.0) % 360.0) - 180.0) if final_lon_min < 0 else min(179.99, final_lon_min)
-                slice2_max = min(180.0, ((final_lon_max + 180.0) % 360.0) - 180.0)
+                if not needs_antimeridian:
+                    # 标准无日界线切片
+                    sub_ds = ds.sel(
+                        latitude=slice(float(final_lat_min), float(final_lat_max)),
+                        longitude=slice(float(max(-180.0, final_lon_min)), float(min(180.0, final_lon_max)))
+                    )
+                    sub_lats = sub_ds.latitude.values.astype(np.float64)
+                    sub_lons = sub_ds.longitude.values.astype(np.float64)
+                    sub_mdt = sub_ds.mdt.values[0].astype(np.float64)
+                    self._crosses_antimeridian = False
+                else:
+                    # 跨越 ±180° 日界线切片 (两个局部 slice + unwrapped concatenate)
+                    # 切片 1: 正经度侧 [final_lon_min_norm, 180.0]
+                    slice1_min = max(-180.0, ((final_lon_min + 180.0) % 360.0) - 180.0) if final_lon_min < 0 else min(179.99, final_lon_min)
+                    slice2_max = min(180.0, ((final_lon_max + 180.0) % 360.0) - 180.0)
 
-                sub1 = ds.sel(
-                    latitude=slice(float(final_lat_min), float(final_lat_max)),
-                    longitude=slice(float(slice1_min), 180.0)
-                )
-                sub2 = ds.sel(
-                    latitude=slice(float(final_lat_min), float(final_lat_max)),
-                    longitude=slice(-180.0, float(slice2_max))
-                )
+                    sub1 = ds.sel(
+                        latitude=slice(float(final_lat_min), float(final_lat_max)),
+                        longitude=slice(float(slice1_min), 180.0)
+                    )
+                    sub2 = ds.sel(
+                        latitude=slice(float(final_lat_min), float(final_lat_max)),
+                        longitude=slice(-180.0, float(slice2_max))
+                    )
 
-                sub1_lons = sub1.longitude.values.astype(np.float64)
-                sub2_lons = sub2.longitude.values.astype(np.float64) + 360.0
-                sub1_mdt = sub1.mdt.values[0].astype(np.float64)
-                sub2_mdt = sub2.mdt.values[0].astype(np.float64)
+                    sub1_lons = sub1.longitude.values.astype(np.float64)
+                    sub2_lons = sub2.longitude.values.astype(np.float64) + 360.0
+                    sub1_mdt = sub1.mdt.values[0].astype(np.float64)
+                    sub2_mdt = sub2.mdt.values[0].astype(np.float64)
 
-                # 若网格包含 -180° 与 +180° 重叠点，剔除拼接重叠边界保证严格单调递增
-                if len(sub1_lons) > 0 and len(sub2_lons) > 0 and sub2_lons[0] <= sub1_lons[-1]:
-                    keep_mask = sub2_lons > sub1_lons[-1]
-                    sub2_lons = sub2_lons[keep_mask]
-                    sub2_mdt = sub2_mdt[:, keep_mask]
+                    # 若网格包含 -180° 与 +180° 重叠点，剔除拼接重叠边界保证严格单调递增
+                    if len(sub1_lons) > 0 and len(sub2_lons) > 0 and sub2_lons[0] <= sub1_lons[-1]:
+                        keep_mask = sub2_lons > sub1_lons[-1]
+                        sub2_lons = sub2_lons[keep_mask]
+                        sub2_mdt = sub2_mdt[:, keep_mask]
 
-                sub_lons = np.concatenate([sub1_lons, sub2_lons])
-                sub_lats = sub1.latitude.values.astype(np.float64)
-                sub_mdt = np.concatenate([sub1_mdt, sub2_mdt], axis=1)
-                self._crosses_antimeridian = True
+                    sub_lons = np.concatenate([sub1_lons, sub2_lons])
+                    sub_lats = sub1.latitude.values.astype(np.float64)
+                    sub_mdt = np.concatenate([sub1_mdt, sub2_mdt], axis=1)
+                    self._crosses_antimeridian = True
 
         if len(sub_lats) < 2 or len(sub_lons) < 2:
             raise ValueError(f"指定区域所截取的 MDT 网格过于狭窄或越界: {bounds_wgs84}")
@@ -462,7 +467,7 @@ class DEMDatumConverter:
             targets_3d = np.column_stack([xt, yt, zt])
 
             k_query = min(self.idw_k, len(self._ocean_mdt_values))
-            dists, indices = self._ocean_kdtree.query(targets_3d, k=k_query, workers=-1)
+            dists, indices = self._ocean_kdtree.query(targets_3d, k=k_query, workers=1)
 
             if k_query == 1:
                 dists = dists[:, np.newaxis]
