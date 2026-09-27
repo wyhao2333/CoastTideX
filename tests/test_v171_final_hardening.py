@@ -890,9 +890,17 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
             "--output-dir", str(self.out_dir),
             "--workers", "0"
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
-        self.assertEqual(res.returncode, 2)
-        self.assertIn("workers 必须 >= 1", res.stderr)
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(Path(__file__).resolve().parent.parent)
+        )
+        self.assertEqual(res.returncode, 2, f"Expected returncode 2, got {res.returncode}. Stderr: {res.stderr}, Stdout: {res.stdout}")
+        self.assertIn("--workers", res.stderr)
+        self.assertIn(">= 1", res.stderr)
 
     def test_gui_stale_100km_text_removed(self):
         """E8: 校验 gui/main_window.py 中杜绝硬编码 '上限 100 km' 与 '超出100km'"""

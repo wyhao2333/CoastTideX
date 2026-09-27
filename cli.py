@@ -37,6 +37,11 @@ if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 # 将项目根目录加入模块检索路径
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -191,10 +196,9 @@ def main(args_list: Optional[List[str]] = None):
         parser.print_help()
         sys.exit(0)
 
-    predictor = FESTidePredictor()
-    transformer = DatumTransformer()
-
     if args.mode == "single":
+        predictor = FESTidePredictor()
+        transformer = DatumTransformer()
         print(f"[*] 启动单点潮位预测: ({args.lon}°, {args.lat}°)")
 
         if args.year is not None:
@@ -275,6 +279,8 @@ def main(args_list: Optional[List[str]] = None):
         print(f"[OK] 预测成功，共生成 {len(df):,} 行记录，结果已保存至: {args.output}")
 
     elif args.mode == "batch":
+        predictor = FESTidePredictor()
+        transformer = DatumTransformer()
         print(f"[*] 读取批量输入文件: {args.input}")
         df_records = pd.read_csv(args.input)
         print(f"[*] 总记录数: {len(df_records)}, 时区: {args.tz}")
