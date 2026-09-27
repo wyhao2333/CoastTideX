@@ -20,6 +20,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from unittest.mock import patch, MagicMock
 import numpy as np
 
@@ -184,6 +185,45 @@ class TestDynamicSupportWindowAndAntimeridian(unittest.TestCase):
         _, _, e_high, _ = converter._compute_dynamic_support_window((0.0, 60.0, 0.0, 60.0), 100.0)
         self.assertGreater(e_high, e_eq * 1.5)
 
+    def test_end_to_end_synthetic_mdt_antimeridian_continuity(self):
+        """E9 (B1): 端到端跨 180° 日界线合成 MDT NetCDF 解算与外推测试 (不 mock 空间索引与 KDTree)"""
+        import xarray as xr
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            nc_path = Path(tmp_dir) / "synthetic_mdt_antimeridian.nc"
+            lons = np.arange(-180.0, 180.1, 0.5)
+            lats = np.arange(-25.0, -15.0, 0.5)
+            shape = (1, len(lats), len(lons))
+            mdt_data = np.full(shape, 0.85, dtype=np.float64)
+            # 在 180° 经线附近构造模拟岛屿缺失区 (NaN)，验证跨日界线 IDW 空间邻近检索
+            lon_indices = np.where((lons >= 179.5) | (lons <= -179.5))[0]
+            lat_indices = np.where((lats >= -20.5) & (lats <= -19.5))[0]
+            for r in lat_indices:
+                for c in lon_indices:
+                    mdt_data[0, r, c] = np.nan
+
+            ds = xr.Dataset(
+                data_vars={"mdt": (("time", "latitude", "longitude"), mdt_data)},
+                coords={"time": [np.datetime64("2003-01-01")], "latitude": lats, "longitude": lons}
+            )
+            ds.to_netcdf(str(nc_path))
+
+            # 使用真实未经 mock 的 DEMDatumConverter
+            conv = DEMDatumConverter(mdt_path=str(nc_path), max_extrapolation_distance_km=100.0)
+
+            # 点 1 & 2: 原生海洋点 (178.5°E, -20.0°S) 与 (-178.5°W, -20.0°S)
+            # 点 3 & 4: 跨越 180° 日界线两侧的近岸岛屿点 (179.9°E, -20.0°S) 与 (-179.9°W, -20.0°S)
+            test_lons = np.array([178.5, -178.5, 179.9, -179.9])
+            test_lats = np.array([-20.0, -20.0, -20.0, -20.0])
+
+            mdt_vals, qc_flags = conv.evaluate_mdt_with_idw(test_lons, test_lats)
+
+            self.assertTrue(conv._crosses_antimeridian)
+            self.assertEqual(qc_flags[0], QC_MDT_NATIVE)
+            self.assertEqual(qc_flags[1], QC_MDT_NATIVE)
+            self.assertEqual(qc_flags[2], QC_MDT_EXTRAPOLATED)
+            self.assertEqual(qc_flags[3], QC_MDT_EXTRAPOLATED)
+            np.testing.assert_allclose(mdt_vals, 0.85, atol=1e-4)
+
 
 @unittest.skipUnless(HAS_RASTERIO, "需要 rasterio 环境")
 class TestThreadSafetyAndBatchConversion(unittest.TestCase):
@@ -310,6 +350,73 @@ class TestThreadSafetyAndBatchConversion(unittest.TestCase):
                     a2 = d2.read(1)
                     np.testing.assert_allclose(a1, a2, rtol=1e-7, atol=1e-7)
 
+    def test_real_multi_worker_numerical_equivalence_unmocked(self):
+        """E10 (B2): 真实无 mock convert_raster 的 multi-worker (1 vs 2 vs 4) 数值严密等价性测试"""
+        import xarray as xr
+        in_d = self.tmp_path / "in_real_b2"
+        out_w1 = self.tmp_path / "out_real_w1"
+        out_w2 = self.tmp_path / "out_real_w2"
+        out_w4 = self.tmp_path / "out_real_w4"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_w1.mkdir(parents=True, exist_ok=True)
+        out_w2.mkdir(parents=True, exist_ok=True)
+        out_w4.mkdir(parents=True, exist_ok=True)
+
+        nc_path = self.tmp_path / "synthetic_mdt_b2.nc"
+        lons = np.arange(121.0, 122.5, 0.1)
+        lats = np.arange(30.5, 32.0, 0.1)
+        mdt_data = np.full((1, len(lats), len(lons)), 0.65, dtype=np.float64)
+        mdt_data[0, :3, :3] = np.nan
+        ds = xr.Dataset(
+            data_vars={"mdt": (("time", "latitude", "longitude"), mdt_data)},
+            coords={"time": [np.datetime64("2003-01-01")], "latitude": lats, "longitude": lons}
+        )
+        ds.to_netcdf(str(nc_path))
+
+        coords = [
+            (121.5, 31.0),
+            (121.6, 31.0),
+            (121.5, 31.1),
+            (121.6, 31.1),
+        ]
+        for idx, (lon, lat) in enumerate(coords):
+            tile_path = in_d / f"tile_real_{idx}.tif"
+            tf = from_bounds(lon, lat, lon + 0.05, lat + 0.05, 16, 16)
+            data = np.ones((1, 16, 16), dtype=np.float32) * (5.0 + idx)
+            data[0, 0:2, 0:2] = -9999.0
+            with rasterio.open(
+                str(tile_path), "w", driver="GTiff", height=16, width=16, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=tf, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(DATUM="EGM2008")
+
+        batch = BatchDEMDatumConverter(mdt_path=str(nc_path), max_extrapolation_distance_km=100.0)
+        s1 = batch.run_batch(str(in_d), str(out_w1), workers=1, resume=False, write_qc=True)
+        s2 = batch.run_batch(str(in_d), str(out_w2), workers=2, resume=False, write_qc=True)
+        s4 = batch.run_batch(str(in_d), str(out_w4), workers=4, resume=False, write_qc=True)
+
+        self.assertEqual(s1.success_count, 4)
+        self.assertEqual(s2.success_count, 4)
+        self.assertEqual(s4.success_count, 4)
+
+        for f in in_d.glob("*.tif"):
+            f_msl = f"{f.stem}_MSL.tif"
+            f_qc = f"{f.stem}_MSL_conversion_qc.tif"
+            with rasterio.open(str(out_w1 / f_msl)) as d1, \
+                 rasterio.open(str(out_w2 / f_msl)) as d2, \
+                 rasterio.open(str(out_w4 / f_msl)) as d4:
+                a1 = d1.read(1)
+                a2 = d2.read(1)
+                a4 = d4.read(1)
+                np.testing.assert_allclose(a1, a2, rtol=1e-7, atol=1e-7)
+                np.testing.assert_allclose(a1, a4, rtol=1e-7, atol=1e-7)
+            with rasterio.open(str(out_w1 / f_qc)) as q1, \
+                 rasterio.open(str(out_w2 / f_qc)) as q2, \
+                 rasterio.open(str(out_w4 / f_qc)) as q4:
+                np.testing.assert_array_equal(q1.read(1), q2.read(1))
+                np.testing.assert_array_equal(q1.read(1), q4.read(1))
+
 
 @unittest.skipUnless(HAS_RASTERIO, "需要 rasterio 环境")
 class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
@@ -329,8 +436,9 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
         except Exception:
             pass
 
-    def _create_synthetic_dem(self, name: str) -> Path:
-        p = self.in_dir / name
+    def _create_synthetic_dem(self, name: str, target_dir: Optional[Path] = None) -> Path:
+        p = (target_dir or self.in_dir) / name
+        p.parent.mkdir(parents=True, exist_ok=True)
         transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
         data = np.ones((1, 10, 10), dtype=np.float32) * 5.0
         with rasterio.open(
@@ -505,6 +613,293 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
             s2 = b.run_batch(str(self.in_dir), str(self.out_dir), resume=True)
             self.assertEqual(s2.success_count, 1)
             self.assertEqual(call_count, 2, "损坏的输出文件必须触发重算以保证数据完备性")
+
+    def test_resume_write_qc_false_then_true_recomputes(self):
+        """E1: 第一次 write_qc=False, 第二次 write_qc=True 时必须触发重算生成 QC，不能跳过"""
+        in_d = self.tmp_path / "in_e1"
+        out_d = self.tmp_path / "out_e1"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_resume_qctest.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, output_qc_path=None, write_qc=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 4.5
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+
+            qc_written = ""
+            if write_qc:
+                if not output_qc_path:
+                    base, ext = os.path.splitext(output_msl_path)
+                    output_qc_path = f"{base}_qc{ext}"
+                qc_p = Path(output_qc_path)
+                with rasterio.open(
+                    str(qc_p), "w", driver="GTiff", height=10, width=10, count=1,
+                    dtype=rasterio.uint8, crs="EPSG:4326", transform=transform, nodata=255
+                ) as dst_qc:
+                    dst_qc.write(np.zeros((1, 10, 10), dtype=np.uint8))
+                qc_written = str(qc_p)
+
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path=qc_written,
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            # 第 1 次运行: write_qc=False
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=False)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+            qc_p = out_d / "tile_resume_qctest_MSL_qc.tif"
+            self.assertFalse(qc_p.exists())
+
+            # 第 2 次运行: resume=True, write_qc=True -> 必须重算生成 QC，绝不能错误跳过
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s2.success_count, 1, "当请求 write_qc=True 但缺少 QC 产物时必须重算")
+            self.assertEqual(call_count, 2)
+            self.assertTrue(qc_p.exists())
+
+    def test_resume_write_qc_true_then_true_skips(self):
+        """E2: 当 MSL 与 QC 均完整存在且健康时，write_qc=True 的断点恢复必须成功跳过"""
+        in_d = self.tmp_path / "in_e2"
+        out_d = self.tmp_path / "out_e2"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_skip_qctest.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, output_qc_path=None, write_qc=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 4.5
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+
+            qc_written = ""
+            if write_qc:
+                if not output_qc_path:
+                    base, ext = os.path.splitext(output_msl_path)
+                    output_qc_path = f"{base}_qc{ext}"
+                qc_p = Path(output_qc_path)
+                with rasterio.open(
+                    str(qc_p), "w", driver="GTiff", height=10, width=10, count=1,
+                    dtype=rasterio.uint8, crs="EPSG:4326", transform=transform, nodata=255
+                ) as dst_qc:
+                    dst_qc.write(np.zeros((1, 10, 10), dtype=np.uint8))
+                qc_written = str(qc_p)
+
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path=qc_written,
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            # 第 1 轮生成 MSL + QC
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            # 第 2 轮 resume=True, write_qc=True -> 均完整，必须跳过
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s2.skipped_resume_count, 1)
+            self.assertEqual(s2.success_count, 0)
+            self.assertEqual(call_count, 1)
+
+            # 第 3 轮 resume=True, write_qc=False -> 历史存有 QC，但当前不需要，允许安全跳过且不删历史 QC
+            s3 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=False)
+            self.assertEqual(s3.skipped_resume_count, 1)
+            self.assertEqual(call_count, 1)
+
+    def test_resume_missing_required_qc_recomputes(self):
+        """E3: 历史任务成功生成 QC，但后续 QC 文件被人工删除时，write_qc=True 必须触发重算"""
+        in_d = self.tmp_path / "in_e3"
+        out_d = self.tmp_path / "out_e3"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_del_qctest.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, output_qc_path=None, write_qc=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 4.5
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+
+            qc_written = ""
+            if write_qc:
+                if not output_qc_path:
+                    base, ext = os.path.splitext(output_msl_path)
+                    output_qc_path = f"{base}_qc{ext}"
+                qc_p = Path(output_qc_path)
+                with rasterio.open(
+                    str(qc_p), "w", driver="GTiff", height=10, width=10, count=1,
+                    dtype=rasterio.uint8, crs="EPSG:4326", transform=transform, nodata=255
+                ) as dst_qc:
+                    dst_qc.write(np.zeros((1, 10, 10), dtype=np.uint8))
+                qc_written = str(qc_p)
+
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path=qc_written,
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            qc_p = out_d / "tile_del_qctest_MSL_qc.tif"
+            self.assertTrue(qc_p.exists())
+            # 人工删除 QC 文件
+            qc_p.unlink()
+            self.assertFalse(qc_p.exists())
+
+            # 再次运行断点恢复，要求 write_qc=True -> 必须重算并补全 QC
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s2.success_count, 1, "QC 文件被误删时必须触发重算补全")
+            self.assertEqual(call_count, 2)
+            self.assertTrue(qc_p.exists())
+
+    def test_resume_corrupt_required_qc_recomputes(self):
+        """E4: QC 文件损坏时，write_qc=True 必须触发重算"""
+        in_d = self.tmp_path / "in_e4"
+        out_d = self.tmp_path / "out_e4"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_corrupt_qctest.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, output_qc_path=None, write_qc=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 4.5
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+
+            qc_written = ""
+            if write_qc:
+                if not output_qc_path:
+                    base, ext = os.path.splitext(output_msl_path)
+                    output_qc_path = f"{base}_qc{ext}"
+                qc_p = Path(output_qc_path)
+                with rasterio.open(
+                    str(qc_p), "w", driver="GTiff", height=10, width=10, count=1,
+                    dtype=rasterio.uint8, crs="EPSG:4326", transform=transform, nodata=255
+                ) as dst_qc:
+                    dst_qc.write(np.zeros((1, 10, 10), dtype=np.uint8))
+                qc_written = str(qc_p)
+
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path=qc_written,
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            qc_p = out_d / "tile_corrupt_qctest_MSL_qc.tif"
+            self.assertTrue(qc_p.exists())
+            # 人工损坏 QC 文件
+            qc_p.write_bytes(b"bad_qc_data")
+
+            # 再次运行断点恢复，要求 write_qc=True -> 必须重算
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True, write_qc=True)
+            self.assertEqual(s2.success_count, 1, "QC 文件损坏时必须触发重算")
+            self.assertEqual(call_count, 2)
+
+    def test_batch_rejects_zero_workers(self):
+        """E5: BatchDEMDatumConverter.run_batch 必须拒绝 workers=0"""
+        b = BatchDEMDatumConverter()
+        with self.assertRaises(ValueError) as ctx:
+            b.run_batch(str(self.in_dir), str(self.out_dir), workers=0)
+        self.assertIn("workers 必须 >= 1", str(ctx.exception))
+
+    def test_batch_rejects_negative_workers(self):
+        """E6: BatchDEMDatumConverter.run_batch 必须拒绝负数 workers"""
+        b = BatchDEMDatumConverter()
+        with self.assertRaises(ValueError) as ctx:
+            b.run_batch(str(self.in_dir), str(self.out_dir), workers=-2)
+        self.assertIn("workers 必须 >= 1", str(ctx.exception))
+
+    def test_cli_rejects_invalid_workers(self):
+        """E7: CLI 命令 convert-dem-batch 遇到 --workers 0 必须以状态码 2 退出"""
+        import subprocess
+        cmd = [
+            sys.executable,
+            "cli.py",
+            "convert-dem-batch",
+            "--input-dir", str(self.in_dir),
+            "--output-dir", str(self.out_dir),
+            "--workers", "0"
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, cwd=str(Path(__file__).resolve().parent.parent))
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("workers 必须 >= 1", res.stderr)
+
+    def test_gui_stale_100km_text_removed(self):
+        """E8: 校验 gui/main_window.py 中杜绝硬编码 '上限 100 km' 与 '超出100km'"""
+        gui_file = Path(__file__).resolve().parent.parent / "gui" / "main_window.py"
+        content = gui_file.read_text(encoding="utf-8")
+        self.assertNotIn("上限 100 km", content)
+        self.assertNotIn("超出100km", content)
 
 
 @unittest.skipUnless(HAS_RASTERIO, "需要 rasterio 环境")

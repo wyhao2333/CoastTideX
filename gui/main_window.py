@@ -1058,7 +1058,7 @@ class MainWindow(QMainWindow):
         layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
         combo_mdt_source = QComboBox()
         combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT", "cnes_cls22")
-        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (上限 100 km)")
+        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认 100 km, 可配置 0–500 km)")
         self._make_combo_responsive(combo_mdt_source)
         combo_mdt_source.setEnabled(False)
         layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
@@ -1189,7 +1189,7 @@ class MainWindow(QMainWindow):
         self.lbl_res_dem_extrap = QLabel("-")
         layout_sum.addWidget(self.lbl_res_dem_extrap, 2, 3)
 
-        layout_sum.addWidget(QLabel("超出100km/NoData:"), 3, 0)
+        layout_sum.addWidget(QLabel("超出门禁 / NoData:"), 3, 0)
         self.lbl_res_dem_nodata = QLabel("-")
         layout_sum.addWidget(self.lbl_res_dem_nodata, 3, 1)
 
@@ -3088,7 +3088,7 @@ class MainWindow(QMainWindow):
             "<li><b>v1.7 MSL 统一基准架构</b>: "
             "<ul>"
             "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
-            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 理论范式，大洋区双线性插值，沿岸 100 km 球面 3D-IDW 保守外推；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 理论范式，大洋区双线性插值，沿岸默认 100 km (可配置 0–500 km) 球面 3D-IDW 保守外推；</li>"
             "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界严密一致；</li>"
             "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
             "</ul></li>"

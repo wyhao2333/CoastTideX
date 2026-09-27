@@ -570,6 +570,10 @@ def main(args_list: Optional[List[str]] = None):
             print(f"[ERROR] 命令行参数 --max-dist-km 非法: {e}", file=sys.stderr)
             sys.exit(2)
 
+        if args.workers < 1:
+            print(f"[ERROR] 命令行参数 --workers 必须 >= 1，收到: {args.workers}", file=sys.stderr)
+            sys.exit(2)
+
         print(f"[*] 启动批量 DEM 垂直基准转换: EGM2008 -> MSL (v1.7.1)...")
         print(f"[*] 输入目录: {args.input_dir}")
         print(f"[*] 输出目录: {args.output_dir}")

@@ -270,7 +270,8 @@ def verify_resume_skip(
     out_tile_path: str,
     manifest_entry: Optional[Dict[str, Any]],
     current_signature: str,
-    expected_max_dist_km: float
+    expected_max_dist_km: float,
+    expected_write_qc: bool = False
 ) -> Tuple[bool, str]:
     """
     严格多维验证是否满足断点跳过 (Resume Skip) 条件:
@@ -283,6 +284,10 @@ def verify_resume_skip(
        - 尺寸、CRS、Transform 与输入 DEM 一致
        - 标签 DATUM == MSL, TARGET_VERTICAL_DATUM == MSL, SOURCE_VERTICAL_DATUM == EGM2008
        - 标签 MAX_EXTRAPOLATION_DISTANCE_KM 与当前请求一致
+    6. 当 expected_write_qc 为 True 时:
+       - manifest_entry 中必须记录有效的 qc_output_file
+       - 对应 QC 文件物理存在且大小 > 0
+       - QC GeoTIFF 可被 rasterio 正常打开，count == 1，dtype 为 uint8，尺寸、CRS、Transform 与输入 DEM 一致
 
     若任一条件不满足，返回 (False, reason) 触发重新解算。
     """
@@ -355,6 +360,29 @@ def verify_resume_skip(
                         return False, f"输出栅格内嵌外推距离标签 ({tag_dist} km) 与当前请求 ({expected_max_dist_km} km) 不符"
                 except ValueError:
                     return False, "输出栅格内嵌外推距离标签解析异常"
+
+            # 4. 当期望生成 QC 时，校验 QC 产物健康状态
+            if expected_write_qc:
+                qc_path_str = str(manifest_entry.get("qc_output_file", "")).strip()
+                if not qc_path_str:
+                    return False, "任务请求 write_qc=True，但历史清单中无 QC 产物记录"
+                qc_file = Path(qc_path_str)
+                if not qc_file.exists() or qc_file.stat().st_size == 0:
+                    return False, f"任务请求 write_qc=True，但 QC 产物文件缺失或为空: {qc_path_str}"
+                try:
+                    with rasterio.open(qc_path_str) as qc_src:
+                        if qc_src.count != 1:
+                            return False, f"QC 栅格波段数异常 ({qc_src.count} != 1)"
+                        if qc_src.dtypes[0] != rasterio.uint8:
+                            return False, f"QC 栅格数据类型异常 ({qc_src.dtypes[0]} != uint8)"
+                        if qc_src.width != in_src.width or qc_src.height != in_src.height:
+                            return False, f"QC 栅格规格与输入不匹配 ({qc_src.width}x{qc_src.height} vs {in_src.width}x{in_src.height})"
+                        if qc_src.crs != in_src.crs:
+                            return False, "QC 栅格 CRS 与输入不匹配"
+                        if qc_src.transform != in_src.transform:
+                            return False, "QC 栅格仿射变换 Transform 与输入不匹配"
+                except Exception as e:
+                    return False, f"QC 栅格读取损坏或异常: {e}"
     except Exception as e:
         return False, f"输出栅格读取损坏或异常: {e}"
 
@@ -456,6 +484,13 @@ class BatchDEMDatumConverter:
         :param cancel_event: 任务取消事件句柄
         """
         t0 = time.time()
+        try:
+            workers = int(workers)
+        except (TypeError, ValueError):
+            raise ValueError(f"workers 必须为正整数，收到: {workers}")
+        if workers < 1:
+            raise ValueError(f"workers 必须 >= 1，收到: {workers}")
+
         eff_max_dist = validate_mdt_extrapolation_distance(
             max_dist_km if max_dist_km is not None else self.max_extrapolation_distance_km
         )
@@ -564,7 +599,8 @@ class BatchDEMDatumConverter:
                     out_tile_path=out_tile_str,
                     manifest_entry=existing_entry,
                     current_signature=current_sig,
-                    expected_max_dist_km=eff_max_dist
+                    expected_max_dist_km=eff_max_dist,
+                    expected_write_qc=write_qc
                 )
                 if can_skip:
                     with self._stats_lock:

@@ -345,11 +345,17 @@ class DEMDatumConverter:
 
                 sub1_lons = sub1.longitude.values.astype(np.float64)
                 sub2_lons = sub2.longitude.values.astype(np.float64) + 360.0
-                sub_lons = np.concatenate([sub1_lons, sub2_lons])
-                sub_lats = sub1.latitude.values.astype(np.float64)
-
                 sub1_mdt = sub1.mdt.values[0].astype(np.float64)
                 sub2_mdt = sub2.mdt.values[0].astype(np.float64)
+
+                # 若网格包含 -180° 与 +180° 重叠点，剔除拼接重叠边界保证严格单调递增
+                if len(sub1_lons) > 0 and len(sub2_lons) > 0 and sub2_lons[0] <= sub1_lons[-1]:
+                    keep_mask = sub2_lons > sub1_lons[-1]
+                    sub2_lons = sub2_lons[keep_mask]
+                    sub2_mdt = sub2_mdt[:, keep_mask]
+
+                sub_lons = np.concatenate([sub1_lons, sub2_lons])
+                sub_lats = sub1.latitude.values.astype(np.float64)
                 sub_mdt = np.concatenate([sub1_mdt, sub2_mdt], axis=1)
                 self._crosses_antimeridian = True
 
