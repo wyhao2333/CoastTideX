@@ -1,0 +1,177 @@
+# CoastTideX 更新日志 / Changelog
+
+本项目严格遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/) 规范与 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
+
+---
+
+## [1.6.0-rc.2] - 2026-09-19 (Round 9 Final Evidence, Metadata & Documentation Closure)
+
+### 修复与加固 (Fixed & Hardened)
+- **Tide Cache 规范结构与元数据闭环核验 (Cache Structure Validation Hardening)**：
+  - 加固 `validate_tide_cache_structure(cache_path)`：严格检查 5 大必需维度 (`time > 0`, `node > 0`, `cell > 0`, `bounds_dim == 4`, `corners_dim == 4`) 与 15 大必需节点/单元/时序变量；
+  - 强制核验 `cell_node_indices` 为整数类型且索引严格在 `[0, n_node - 1]` 有界范围内；
+  - 强制核验 `tide_msl_terminal_m` 必须严格为一维 `(n_node,)`，与 `HAS_TERMINAL_TIDE` 布尔属性 100% 互锁；
+  - 严格比对 `TIME_SAMPLES` 与时间轴维度长度，验证时间轴严格单调递增性与采样步长偏差 (`<= 1ms`)；
+  - 严格校验 `TIME_START_UTC_EPOCH` 与 `TIME_END_UTC_EPOCH` 在半开区间 `[start, end)` 下与时间轴端点的对齐度 (`<= 1ms`)，保持对 Schema 1.1 历史缓存的兼容容忍；
+  - 严格比对 `TIME_INTERVAL_SEMANTICS` 与 `TIME_INCLUSIVE` 的语义自洽性。
+- **时间区间闭合语义权威映射器 (Interval Semantics Mapper)**：
+  - 规范并导出 `inclusive_to_interval_semantics(inclusive: str) -> str`，将 `left`, `right`, `both`, `neither` 映射为权威数学区间表示，非支持参数抛出 `ValueError`；
+  - `write_tide_cache` 动态写入匹配的 `TIME_INTERVAL_SEMANTICS` 属性。
+- **终端潮位一维防御性归一化 (1D Defensive Normalization)**：
+  - 在 `read_tide_cache`、`read_tide_cache_structure` 与 `exposure_engine.py` 入口统一执行 `.reshape(-1)` 防御性归一化，杜绝多维广播潜在异常。
+- **外部科学数据物理规格实测与术语核准 (GeoTIFF Metadata Verification)**：
+  - 实测 `data/geoid/us_nga_egm08_25.tif` 物理属性 (EPSG:4979, 80,591,169 字节, 8640×4321, float32, NoData=None)，记录于 `data/geoid/README_GEOID.md`；
+  - 严格校正大地测量学概念为“相对 EGM2008 大地水准面的海拔正高近似 (EGM2008-referenced geoid height / orthometric-height approximation)”。
+- **双语文档与图形界面手册事实级中性化 (Documentation De-sensationalization)**：
+  - 全面剔除 README、README_EN、manual_dialog 中的未经测算绝对化修辞；
+  - 严格依据官方技术手册 (FES2022 Product Handbook, AVISO/CNES, 2024) 修正 FES2022b 原生有限元多尺度分辨率定义（深海 30km、陆架 10km、陆坡 6km、沿岸 4km、复杂海峡局部 2km 至 500m）；
+  - 更新数据依赖表，标明 MDT 单分块约 99.6 MB，全球完整包约 700 MB，明确 Stage 2 基于已有缓存时完全零 FES 与零 MDT 调用；
+  - 澄清 `ERROR_IF_EXISTS` 在新建任务与基于缓存反演任务中的边界。
+- **Round 9 专属闭环测试套件与全量回归 (Final Closure Test Suite & Full Regression)**：
+  - 新增 `tests/test_v16_round9_final_closure.py` (20 项测试)，全面覆盖夏令时跳变 (America/New_York DST 23h & 25h)、15 变量缺失遍历、维度形状容错、NoData 空间索引等价与文档 Linting；
+  - 本地全系统 219 项自动化测试 100% 通过 (0 失败，0 错误，0 跳过)。
+
+---
+
+## [1.6.0-rc.1] - 2026-09-19 (Round 8 Release Candidate / Merge-Gate Hardening)
+
+### 修复与加固 (Fixed & Hardened)
+- **非 UTC 时间溯源元数据统一 (Non-UTC Provenance Unification)**：
+  - 彻底对齐 Inundation 与 Exposure 引擎生成的 GeoTIFF 标签时间溯源字段：显式写入 `REQUESTED_TIME_START`、`REQUESTED_TIME_END`、`TIME_START`、`TIME_END`、`TIMEZONE`、`TIME_START_UTC`、`TIME_END_UTC`、`TIME_START_UTC_EPOCH`、`TIME_END_UTC_EPOCH` 与 `TIME_INTERVAL_SEMANTICS = '[start, end)'`，杜绝非 UTC 本地时间与标准 UTC 时间戳语义模糊。
+- **Tide Cache 轻量只读结构完整性深度校验 (Lightweight Cache Structure Validation)**：
+  - 实现 `validate_tide_cache_structure(cache_path)`，在不将庞大的 `tide_msl_m` 完整数据读入内存的前提下，安全校验 NetCDF 根维度 (`time`, `node`, `cell`)、必需变量 (`time_epoch`, `cell_node_indices`, `tide_msl_m`, `node_coords`)、节点切片形状 `(n_node, n_time)`、终端采样形状 `(n_node,)`、时间轴严格单调递增性与采样步长一致性，以及控制单元节点索引有界性 `[0, n_node - 1]`。
+  - 在 `inspect_tide_cache_metadata` 中集成结构校验与 `CACHE_SIGNATURE` 篡改检测。
+- **Schema 1.1 兼容性边界严密化 (Schema 1.1 Strict Compatibility)**：
+  - 严密界定 Schema 1.1 缓存处理边界：若缓存时间区间策略非 `left`（如旧版闭区间 `both`），严格抛出 `TideCacheCompatibilityError`，拒绝非确定性时序反演；
+  - 对 `inclusive == 'left'` 但缺失 `tide_msl_terminal_m` 的 Schema 1.1 缓存，安全剔除末段不完整区间，精确扣减 `valid_time_fraction`，并置位 `QC_EXP_TERMINAL_UNAVAILABLE` (bit 3)。
+- **生产栅格级空间索引数值等价回归 (Spatial Index Production Equivalence)**：
+  - 在实际端到端真实栅格输出层面（Inundation 2 大产物、Exposure 7 大产物），自动化验证 `LeafCellSpatialIndex` 空间加速检索结果与全局暴力候选扫描器 (Brute-Force Selector) 的全像元浮点级严格等价性 (`np.array_equal` 与 `np.testing.assert_allclose`)。
+- **文档与历史报告事实级一致性整肃 (Factual Documentation Cleanup)**：
+  - 修正 `README.md` 与 `README_EN.md`：澄清 FES2022b 非结构网格在深海大洋 (~1/16°) 至大陆架近岸 (~1/60°, ~1.5-2km) 的等效分辨率与 CoastTideX 四叉树在 10m/30m DEM 上的 500m 细分尺度；去除无条件厘米级精度表述，明确精度依赖水深与水动力环境；注明 v1.5 验证报告为特定受控区域样本比测。
+  - 修正 `data/geoid/README_GEOID.md` 纠正 MSL 笔误；修正 `docs/V1_5_BETA_REAL_FES_VALIDATION.md` 第 63 行关于 `mask_fes2022B.nc` 为 1/30° 掩膜及准确分类的描述；
+  - 完善 `gui/manual_dialog.py` 补充淹没诊断协变量说明、明确 `event_count` 整数性质与冲突拦截策略；
+  - 在 Round 6 与 Round 7 历史审计报告顶部添加 `SUPERSEDED` 声明横幅，锚定 Round 8 为最新合并门禁基线。
+
+---
+
+## [1.6.0] - 2026-09-16 (Feature / Beta Release)
+
+### 新增 (Added)
+- **潮滩/沙滩潜在天文潮露出时间域分析引擎 (`core/exposure_engine.py`)**：
+  - 提供单点高精度基准算法 `compute_1d_continuous_exposure`，支持时间跨界线性插值与连续事件统计。
+  - 提供二维分块流式累加调度器 `stream_exposure_metrics_interpolation`，空间按 512x512 窗口分块、时间按 1000 步流式分块累加，彻底解耦空间像元与时间采样点，严禁在内存中创建 pixel x time 全时空 3D 矩阵。
+  - 输出 7 大独立 GeoTIFF 空间栅格科学产物：
+    1. `*_exposure_fraction.tif` (Float32, %): 累计有效潜在露出时间比例；
+    2. `*_exposure_duration_h.tif` (Float32, hours): 累计潜在露出时长；
+    3. `*_exposure_max_continuous_h.tif` (Float32, hours): 最长单次连续潜在露出时长；
+    4. `*_exposure_mean_event_h.tif` (Float32, hours): 平均单次连续潜在露出事件时长；
+    5. `*_exposure_event_count.tif` (UInt32, count): 请求时间窗口内识别到的连续潜在露出事件段数量；
+    6. `*_exposure_valid_time_fraction.tif` (Float32, %): 有效时间数据覆盖比例；
+    7. `*_exposure_qc.tif` (UInt16, bitmask): 露出分析专用质量控制位掩膜。
+- **时间域跨界线性插值 (Linear Crossing Interpolation)**：
+  - 在相邻时间步间检测水面高程跨越地形高程时刻，精确线性求解交点时刻 t*，避免整采样步长离散截断量化误差。
+- **严格边界判定准则**：
+  - 严格定义 $H(t) \le z$ 为露出 (Exposed)，$H(t) > z$ 为淹没 (Inundated)；$H(t) == z$ 严格归属于露出状态。
+- **Tide Cache Schema 1.2 升级**：
+  - 引入终端时刻潮位采样变量 `tide_msl_terminal_m(node)`，闭合时序末端半开区间跨界线性插值。
+  - 保持完全向后兼容读取 Schema 1.1 缓存。
+  - 新增 `calculate_exposure_from_tide_cache` 实现基于缓存的零 FES 重复调用露出反演。
+- **批处理引擎扩展 (`core/batch_raster_engine.py`)**：
+  - 支持全部 6 大任务运行模式：`JOB_MODE_TIDE_ONLY` (`tide`), `JOB_MODE_TIDE_AND_INUNDATION` (`tide-inundation`), `JOB_MODE_INUNDATION_FROM_CACHE` (`inundation-from-cache`), `JOB_MODE_TIDE_AND_EXPOSURE` (`tide-exposure`), `JOB_MODE_EXPOSURE_FROM_CACHE` (`exposure-from-cache`), `JOB_MODE_ALL` (`all`)。
+  - `BatchManifest` 增加 `elapsed_exposure_seconds`、`exposure_output_dir` 与 `exposure_products_complete` 及 7 大产品路径映射，具备向前向后字段兼容性。
+- **命令行 CLI 与图形界面 GUI 全面支持露出分析**：
+  - CLI 新增 `python cli.py raster exposure` 子命令，并在 `raster batch` 中全面支持 6 种模式。
+  - GUI Tab 3 空间任务类型支持“潜在天文潮露出时间域分析”，动态提议产品文件夹并弹窗展示 7 大产品摘要；Tab 4 增加对应 6 种批处理流程与 9 列状态表格。
+- **单元测试套件 (`tests/test_exposure_v16.py`)**：
+  - 包含常时淹没、常时露出、等高严格边界、线性交点解析解、对称三角波事件统计以及端到端合成 DEM 零 FES 缓存反演验证。
+
+### 修复与加固 (Fixed & Hardened in v1.6 Beta)
+- **GUI 与文档最终一致性对齐收尾 (GUI & Documentation Final Alignment)**：
+  - **Tab 3 露出工作流交互全链路贯通**：`RasterTideWorker` 支持 `mode == 'exposure'`，输出控件自适应切换为产品文件夹选择器，隐藏单独 QC 编辑框，执行完毕弹出专属 7 大产品路径及耗时摘要卡片。
+  - **设置面板 NetCDF 坐标多形态容错**：`_deep_validate_file` 支持 `latitude`/`lat` 与 `longitude`/`lon` 灵活匹配，严格限制掩膜类别为 0..3 并保持只读。
+  - **批量调度 6 模式与 ERROR_IF_EXISTS 统一预检**：基于 `need_tide`、`need_freq`、`need_exp` 早期判定，若当前策略为 `error_if_exists`，对全部 7 个露出产物进行完备冲突检测。
+  - **BatchManifest 完整性与向后兼容性**：清单规范扩充露出目录、产物映射与完成度标记，向后兼容读取旧清单。
+  - **用户操作手册重写**：重构 `gui/manual_dialog.py` 为 15 章节高保真规范文档，详细说明科学定义、边界条件、7 大产品、6 大模式与基准体系。
+  - **消除 Affine 乘法弃用警告**：将 `rasterio` 的 `*` 替换为 `@` 矩阵乘法运算符。
+  - **文风整肃与徽章对齐**：移除静态测试数量徽章，统一以 GitHub Actions 动态 CI 状态为准；清退非学术夸大修辞。
+- **彻底去除 2D 像元级 Python 循环与 3D 像元-时序立方体内存开销 (P0-1)**：
+  - 采用二维 NumPy 数组就地维护流式状态转移，单步重构水面切片，经多组独立时序对比测试与 1D 参考算法保持解析一致。
+- **拓扑屏障连通防护深度集成 (P0-2)**：
+  - 露出分析全面集成 Target-Mask-Derived Topology Guard，像元仅能在同连通域内选用有效控制节点，跨越陆地阻隔自动回退并标记 `QC_EXP_DEGRADED_CELL`。
+- **消除终端水面解算警告 (P0-3)**：
+  - 各类预测器统一实现 `predict_points_at_time`，彻底消除 `validate_time_params` 的起止时间警告。
+- **控制角点权重重归一化 (P0-4)**：
+  - 动态重归一化 1、2、3 个可用节点的权重，绝不以 0m 稀释水面高程。
+- **Tide Cache Schema 1.1 与 1.2 兼容性 (P1-1)**：
+  - 签名验证自适应识别 schema version，向下无损兼容读取 Schema 1.1 缓存。
+- **原子 GeoTIFF 写入安全防护 (P1-2)**：
+  - 实现 `_AtomicExposureWriter`，7 大产物基于 `*.tmp.tif` 写入并原子替换，异常或取消时零临时文件残留。
+- **NoData 与 QC Sentinel 规范 (P1-3, P1-4)**：
+  - `event_count` NoData 规范设为 `4294967295`，与全淹没区域合法的 0 次事件严格解耦。
+- **批处理引擎深层产物校验与别名归一 (P1-5, P1-6, P1-7)**：
+  - 升级 `_verify_exposure_artifacts` 深度校验全部 7 大产物及其规范签名；清理 `discover_rasters` 重复 `stat()` 调用。
+- **FES 掩膜元数据权威审计 (Docs)**：
+  - 查证 `fes2022b/mask_fes2022B.nc` 物理尺寸严格为 1,027,081 字节 (0.98 MB)，澄清历史文档中 55.6 MB 与 700 MB 的误植，并产出 `docs/FES_MASK_METADATA_AUDIT.md`。
+- **第四轮最终 Hardening 闭环修复 (Round 4 Final Pre-Merge Hardening)**：
+  - **P0-1 非 UTC 时区 Stage 1 -> Tide Cache 时间轴对齐**：在 Tide Cache NetCDF 全局属性中规范化写入标准 UTC 锚定字段 (`TIME_START_UTC`, `TIME_END_UTC`, `TIME_START_UTC_EPOCH`, `TIME_END_UTC_EPOCH`)，并在 `core/tide_cache.py` 中强化支持数字秒时间戳与本地时区安全解析，彻底消除非 UTC 时区时间轴平移风险。
+  - **P0-2 淹没与露出双引擎拓扑语义科学统一**：抽象共享核心函数 `compute_cell_membership` 与 `resolve_topology_compatible_corners`，严格隔离不同连通域水体，保守处理 component 0 (UNKNOWN) 节点，杜绝未知节点跨盆地渗透污染。
+  - **P1 内存预算模型修正**：修正 `RasterTideEngine` 导出 Tide Cache 时的内存预算估算 (`dtype_bytes = 8`，覆盖 raw MSL 与 sorted 数组)，防止内存溢出。
+  - **P1 叶单元半开区间单一片区归属**：空间插值叶单元统一执行内部 `[x_min, x_max)` / `[y_min, y_max)` 半开区间归属，仅外边界闭合，彻底消除内部边界像元多单元重复累加。
+  - **P1 终端时刻 QC 逐像元精细化**：终端时刻有效性判定由全局变量提升至像元级 `val_term_step`，精准标记局部终端失效像元的 `QC_EXP_TERMINAL_UNAVAILABLE` 并扣减对应 `valid_time_fraction`。
+  - **受控真实 FES2022b 经验 Oracle 评测**：基于真实 FES2022b 模型与长江口代表性潮间带地形完成 30 点位对照解算，输出规范误差指标 (Fraction MAE: 0.0395 pp, Duration MAE: 0.0190 h, Event Count error: 0)。
+  - **生产场景严密自动化测试套件**：完善单元测试套件并保证回归通过，覆盖端到端非 UTC 转换、混合拓扑隔离、半开边界唯一归属、逐像元终端 QC 与 1D Oracle 多波形等价性。
+- **第七轮最终合并门禁修复与空间索引加固 (Round 7 Merge-Gate Hardening & Index Repair)**：
+  - **LeafCellSpatialIndex 物理单位与坐标系退化修复**：移除硬编码 100.0 米桶间距，改为依赖坐标范围跨度的动态相对比例，全面兼容经纬度 (EPSG:4326)、投影坐标系、小范围区域与负坐标；增加网格桶索引边界钳位与超大单元 (Giant Cell) 分流处理；对候选单元实施确定性排序，消除集合哈希遍历顺序依赖。
+  - **Stage 2 缓存产物权威元数据回写补齐**：`calculate_inundation_from_tide_cache` 与 `calculate_exposure_from_tide_cache` 完整将 Tide Cache 中的权威时间区间、时区、步长、基准面、目标模式、拓扑参数及缓存签名写入输出 GeoTIFF 标签，杜绝被忽略的请求参数渗漏。
+  - **BatchManifest 字段集对齐与向前兼容**：清单新增 `timezone`、`dem_datum`、`target_mode` 与 `cache_signature` 字段，并在历史清单读取时执行向后兼容降级。
+  - **Tide Cache 元数据篡改自校验**：`inspect_tide_cache_metadata` 增加签名自重构与防篡改验证，发现属性篡改立即抛出 `TideCacheIntegrityError`。
+  - **GUI 与 CLI 交互透明度增强**：Tab 4 在 from-cache 模式下更新采样步数标签为显式提示“读取自已存在的 Tide Cache”；CLI 运行 from-cache 模式时打印 Stage 1 参数被忽略的透明提示信息。
+  - **学术文档与手册严谨化**：校准手册与文档中关于拓扑防护、硬件参考、QC 掩膜及原子写入的表述，移除不当夸大修辞。
+
+### 变更 (Changed)
+- **统一全系统采样时间语义为严格半开区间 `[start, end)`**：
+  - 全年连续与自定义时段默认统一采用 `inclusive="left"`，彻底杜绝端点重复计算与跨年重叠统计。
+- **规范术语界定**：
+  - 全面规范定义为“固定代表性地形条件下的潜在天文潮露出时长 (Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain)”，严禁混淆为“沙滩干燥时长 (Drying Time)”或“二维水动力退水滞后过程”。
+- **文档与数据依赖架构梳理**：
+  - 抽离历史版本日志至独立 `CHANGELOG.md`。
+  - 彻底澄清仓储自带 (Bundled)、外部必须 (External Mandatory)、外部可选 (External Optional) 与本地生成 (Preprocessed Reproduction) 科学数据依赖边界。
+
+---
+
+## [1.5.0-beta] - 2026-09-14 (Real-FES Validation Release)
+
+### 新增 (Added)
+- **真实 FES2022b 与真实沙滩/潮滩 DEM 科学验证套件 (`docs/V1_5_BETA_REAL_FES_VALIDATION.md`, `tests/test_v15_beta_real_fes.py`)**：
+  - 真实崇明东滩与长兴岛高精度 DEM 实战验证。
+  - 真实 FES2022b 原生非结构有限元网格驱动下的全尺度验证。
+
+---
+
+## [1.5.0-alpha] - 2026-09-13 (Batch & Cache Architecture Release)
+
+### 新增 (Added)
+- **批量潮间带栅格引擎 (`core/batch_raster_engine.py`)**：
+  - 支持文件夹级轻量扫描与顺序安全解算 (`max_parallel_tiles = 1`)。
+  - 二阶段架构：Stage 1 控制网格生成与 NetCDF Tide Cache 序列化；Stage 2 零 FES 快速淹没频率反演。
+  - 引入防篡改兼容性签名 (Compatibility Signature, SHA-256) 与断点恢复策略 (`ExistingOutputPolicy: RESUME / ERROR_IF_EXISTS / OVERWRITE`)。
+  - 任务清单管理 (`batch_manifest.json` 与 `batch_manifest.csv`)。
+
+---
+
+## [1.4.0] - 2026-09-08 (Spatial Raster Tide Engine Release)
+
+### 新增 (Added)
+- **空间栅格潮位解算引擎 (`core/raster_engine.py`)**：
+  - GeoTIFF 空间单时刻潮位与水面高程解算 (Snapshot Raster)。
+  - 自适应四叉树控制网格 (Adaptive Quadtree Control Grid) 与经验互补分布 (CCDF) 潜在天文潮淹没频率计算。
+  - 拓扑屏障保护 (Physical Scale Topology Guard)，基于粗粒度物理尺度掩膜与保守连通域分析阻止跨越陆地非法插值。
+
+---
+
+## [1.3.0] - 2026-08-25 (Datum Engine & Multi-Datum Release)
+
+### 新增 (Added)
+- **四大多元垂直基准严密转换系统 (`core/datum_engine.py`)**：
+  - 支持 MSL、MDT 参考面、EGM2008 正常高与 WGS84 几何椭球高。
+  - 引入 $\Delta N$ 全球大洋重力场水准面差值改正栅格 (`delta_n_goco06s_minus_egm2008.tif`) 与地中海/黑海 EIGEN-6C4 区域支持。

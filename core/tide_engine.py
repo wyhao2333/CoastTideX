@@ -1,5 +1,5 @@
 """
-CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.4)
+CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine)
 基于 CNES/AVISO 官方 pyfes 库，利用原生非结构有限元网格 (LGP2) 进行高保真海岸带潮位解算。
 
 特性:
@@ -13,7 +13,8 @@ CoastTideX FES2022b 潮汐解算与预测引擎 (FES Tide Engine v1.4)
 
 import os
 import warnings
-from typing import Optional, Tuple, List, Dict, Any, Callable, Union
+from contextlib import contextmanager
+from typing import Optional, Tuple, List, Dict, Any, Callable, Union, Sequence
 import numpy as np
 import pandas as pd
 
@@ -65,10 +66,27 @@ def validate_constituents(constituents: str | list | tuple | None) -> list[str]:
     raise ValueError(f"无效的分潮参数: {constituents}。允许选项: 'all', 'major8', 或分潮名称列表。")
 
 
+def bbox_contains(
+    parent: Tuple[float, float, float, float],
+    child: Tuple[float, float, float, float],
+    tol: float = 1e-5
+) -> bool:
+    """
+    判断标准四元组 (lon_min, lat_min, lon_max, lat_max) 下 parent 是否在空间上完全包含 child。
+    经度在 [0, 360) 体系下，纬度在 [-90, 90] 体系下。
+    """
+    p_x0, p_y0, p_x1, p_y1 = parent
+    c_x0, c_y0, c_x1, c_y1 = child
+    lat_ok = (c_y0 >= p_y0 - tol) and (c_y1 <= p_y1 + tol)
+    lon_ok = (c_x0 >= p_x0 - tol) and (c_x1 <= p_x1 + tol)
+    return bool(lat_ok and lon_ok)
+
+
 class FESTidePredictor:
     """
     FES2022b 潮位预测引擎。
-    采用自适应空间包围框与全球散点空间分块聚类技术，兼备极高精度与极致解算速度。
+    采用自适应空间包围框与全球散点空间分块聚类技术。
+    支持生产级 ParentBBox / 局部空间作用域模型复用 (spatial_model_scope)。
     """
 
     def __init__(self, ns_grid_path: str = None):
@@ -90,13 +108,90 @@ class FESTidePredictor:
         if not os.path.exists(self.ns_grid_path):
             raise FileNotFoundError(f"未找到 FES2022b 原生非结构网格文件: {self.ns_grid_path}")
 
+        # 现有单精确包围框缓存 (向后兼容通用单点与无作用域调用)
         self._cached_model = None
         self._cached_bbox = None
         self._cached_constituents = None
 
+        # 空间作用域模型复用状态 (ParentBBox Reuse Scope)
+        self._active_parent_bboxes: Optional[List[Tuple[float, float, float, float]]] = None
+        self._parent_model_cache: Dict[Tuple[str, Tuple[float, float, float, float]], Any] = {}
+        self._scope_stack: List[Tuple[Optional[List[Tuple[float, float, float, float]]], Dict[Any, Any]]] = []
+
+    def begin_spatial_model_scope(
+        self,
+        lons: Optional[Any] = None,
+        lats: Optional[Any] = None,
+        bboxes: Optional[Union[Tuple[float, float, float, float], Sequence[Tuple[float, float, float, float]]]] = None,
+        buffer_deg: float = 1.0
+    ):
+        """
+        开启局部空间生命周期的 FES 模型作用域复用 (ParentBBox Reuse Scope)。
+        在同一作用域内，优先使用已加载且在几何上完全包含请求包围框的父模型，杜绝离散节点批次
+        频繁触发 LGP 模型反序列化 I/O。
+        """
+        self._scope_stack.append((self._active_parent_bboxes, self._parent_model_cache))
+
+        new_bboxes: List[Tuple[float, float, float, float]] = []
+        if bboxes is not None:
+            if isinstance(bboxes, tuple) and len(bboxes) == 4 and all(isinstance(x, (int, float, np.floating)) for x in bboxes):
+                new_bboxes = [(float(bboxes[0]), max(-90.0, float(bboxes[1])), float(bboxes[2]), min(90.0, float(bboxes[3])))]
+            else:
+                new_bboxes = [
+                    (float(b[0]), max(-90.0, float(b[1])), float(b[2]), min(90.0, float(b[3])))
+                    for b in bboxes
+                ]
+        elif lons is not None and lats is not None:
+            lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+            lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+            valid_mask = np.isfinite(lons_arr) & np.isfinite(lats_arr)
+            if np.any(valid_mask):
+                v_lons = lons_arr[valid_mask]
+                v_lats = lats_arr[valid_mask]
+                lons_norm = np.array([normalize_longitude(x, to_360=True) for x in v_lons], dtype=float)
+                new_bboxes = build_circular_fes_bboxes(lons_norm, v_lats, buffer_deg=buffer_deg)
+
+        self._active_parent_bboxes = new_bboxes
+        self._parent_model_cache = {}
+
+    def end_spatial_model_scope(self):
+        """
+        结束当前局部空间生命周期的 FES 模型作用域复用并清理父模型缓存。
+        """
+        if hasattr(self, '_parent_model_cache') and self._parent_model_cache:
+            self._parent_model_cache.clear()
+
+        if hasattr(self, '_scope_stack') and self._scope_stack:
+            prev_parents, prev_cache = self._scope_stack.pop()
+            self._active_parent_bboxes = prev_parents
+            self._parent_model_cache = prev_cache
+        else:
+            self._active_parent_bboxes = None
+            self._parent_model_cache = {}
+
+    @contextmanager
+    def spatial_model_scope(
+        self,
+        lons: Optional[Any] = None,
+        lats: Optional[Any] = None,
+        bboxes: Optional[Union[Tuple[float, float, float, float], Sequence[Tuple[float, float, float, float]]]] = None,
+        buffer_deg: float = 1.0
+    ):
+        """
+        FES 模型局部空间复用上下文管理器。
+        离开上下文或发生异常时，自动清理父缓存并恢复调用前状态。
+        """
+        self.begin_spatial_model_scope(lons=lons, lats=lats, bboxes=bboxes, buffer_deg=buffer_deg)
+        try:
+            yield self
+        finally:
+            self.end_spatial_model_scope()
+
     def _get_model(self, bbox: tuple[float, float, float, float], constituents: list):
         """
         获取或复用符合空间包围框与分潮要求的 TidalModel 实例。
+        若处于 spatial_model_scope 激活状态且父包围框包含当前请求区域，则优先复用父模型；
+        否则使用精确包围框加载并维护单例缓存。
         """
         target_bbox = (
             float(bbox[0]),
@@ -104,8 +199,34 @@ class FESTidePredictor:
             float(bbox[2]),
             min(90.0, float(bbox[3]))
         )
+        const_key = ",".join(sorted(constituents))
 
-        # 检查是否可命中内存缓存（相同包围框与分潮列表）
+        # 1. 处于激活的 Parent 作用域时，检查是否存在包含 target_bbox 的父包围框
+        if getattr(self, '_active_parent_bboxes', None):
+            matching_parent = None
+            for pb in self._active_parent_bboxes:
+                if bbox_contains(pb, target_bbox):
+                    matching_parent = pb
+                    break
+
+            if matching_parent is not None:
+                parent_cache_key = (const_key, matching_parent)
+                if parent_cache_key in self._parent_model_cache:
+                    return self._parent_model_cache[parent_cache_key]
+
+                # 首次加载该父包围框模型
+                lgp_config = cfg.LGP(
+                    path=self.ns_grid_path,
+                    type='lgp2',
+                    codes='lgp2',
+                    constituents=constituents,
+                    bbox=matching_parent
+                )
+                model = lgp_config.load()
+                self._parent_model_cache[parent_cache_key] = model
+                return model
+
+        # 2. 未激活作用域，或请求包围框超出当前父包围框范围：安全回退到单精确缓存加载
         if (self._cached_model is not None and
             self._cached_bbox == target_bbox and
             self._cached_constituents == sorted(constituents)):
@@ -120,7 +241,7 @@ class FESTidePredictor:
         )
         model = lgp_config.load()
 
-        # 更新缓存
+        # 更新精确缓存
         self._cached_model = model
         self._cached_bbox = target_bbox
         self._cached_constituents = sorted(constituents)
@@ -202,7 +323,7 @@ class FESTidePredictor:
 
         if n_dates <= chunk_size:
             if progress_callback:
-                progress_callback(70, "执行高精度调和潮位解算...")
+                progress_callback(70, "执行空间调和常数潮位解算...")
             lons_np = np.full(n_dates, lon_norm)
             lats_np = np.full(n_dates, lat_norm)
             short_period, long_period, flags = pyfes.evaluate_tide(
@@ -596,7 +717,7 @@ class FESTidePredictor:
         buffer_deg: float = None
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        对指定单时刻在多个空间经纬度位置执行高精度瞬时潮位解算。
+        对指定单时刻在多个空间经纬度位置执行瞬时潮位解算。
 
         参数:
             lons: 经度数组 (长度 N)
@@ -651,17 +772,40 @@ class FESTidePredictor:
             flags = np.zeros(n_pts, dtype=np.int8)
             for cur_bbox in bboxes:
                 in_box = (lons_norm >= cur_bbox[0] - 1e-6) & (lons_norm <= cur_bbox[2] + 1e-6)
-                if np.any(in_box):
-                    cur_model = self._get_model(cur_bbox, const_list)
-                    s_sub, l_sub, f_sub = pyfes.evaluate_tide(
-                        cur_model, times_arr[in_box], lons_norm[in_box], lats_arr[in_box]
-                    )
-                    sp[in_box] = s_sub
-                    lp[in_box] = l_sub
-                    flags[in_box] = f_sub
+                if not np.any(in_box):
+                    continue
+                model = self._get_model(cur_bbox, const_list)
+                sub_sp, sub_lp, sub_flags = pyfes.evaluate_tide(
+                    model, times_arr[in_box], lons_norm[in_box], lats_arr[in_box]
+                )
+                sp[in_box] = sub_sp
+                lp[in_box] = sub_lp
+                flags[in_box] = sub_flags
 
-        tide_total_m = ((sp + lp) / 100.0).astype(np.float32)
-        return tide_total_m, flags
+        tot_m = (sp + lp) / 100.0
+        return tot_m.astype(np.float32), flags.astype(np.int8)
+
+    def predict_points_at_time(
+        self,
+        lons: float | np.ndarray | list,
+        lats: float | np.ndarray | list,
+        timestamp: str | pd.Timestamp,
+        constituents: str | list = None,
+        source_tz: str = 'UTC',
+        buffer_deg: float = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        单时刻多控制点潮位预测标准公共 API (用于终端时刻 H(t_end) 采样与空间单时刻反演)。
+        Single-timestamp multi-point tidal prediction public API.
+        """
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
 
 class SyntheticTidePredictor:
@@ -750,6 +894,24 @@ class SyntheticTidePredictor:
         tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
         flags = np.where(np.isfinite(tide_m), 1, 0).astype(np.int8)
         return tide_m, flags
+
+    def predict_points_at_time(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
     def predict_points_period(
         self,
@@ -925,5 +1087,41 @@ class TwoBasinSyntheticPredictor(SyntheticTidePredictor):
         flag_mat = np.where(np.isfinite(tide_mat), 1, 0).astype(np.int8)
         return tide_mat.astype(np.float32), utc_idx, flag_mat
 
+    def predict_spatial_snapshot(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        _, dates_np = convert_time_to_utc(timestamp, source_tz=source_tz)
+        t_sec = dates_np[0].astype('datetime64[s]').astype(float)
+        t_hours = t_sec / 3600.0
+        lons_arr = np.atleast_1d(np.asarray(lons, dtype=float))
+        lats_arr = np.atleast_1d(np.asarray(lats, dtype=float))
+        tide_m = self._eval_h(lons_arr, lats_arr, t_hours).astype(np.float32)
+        flags = np.where(np.isfinite(tide_m), 1, 0).astype(np.int8)
+        return tide_m, flags
+
+    def predict_points_at_time(
+        self,
+        lons,
+        lats,
+        timestamp,
+        constituents=None,
+        source_tz='UTC',
+        buffer_deg=None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        return self.predict_spatial_snapshot(
+            lons=lons,
+            lats=lats,
+            timestamp=timestamp,
+            constituents=constituents,
+            source_tz=source_tz,
+            buffer_deg=buffer_deg
+        )
 
 
+DisconnectedBarrierPredictor = TwoBasinSyntheticPredictor

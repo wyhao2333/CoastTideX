@@ -1,5 +1,5 @@
 """
-CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.5 Alpha Hardened)
+CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.6 Beta Hardened)
 支持文件夹级多 GeoTIFF 自动化发现、轻量级元数据检查、确定性排序、
 Tide Cache 序列化与二阶段淹没频率解算、统一 ExistingOutputPolicy 策略调度、
 全流程断点恢复 (Resume)、单文件失败隔离与任务清单 (Manifest) 管理。
@@ -33,6 +33,18 @@ from .tide_cache import (
 JOB_MODE_TIDE_ONLY = "tide"                                 # 仅解算控制节点潮位并生成 Tide Cache (*_tide.nc)
 JOB_MODE_TIDE_AND_INUNDATION = "tide-inundation"            # 先生成 Tide Cache，再解算淹没频率 (默认完整两阶段流程)
 JOB_MODE_INUNDATION_FROM_CACHE = "inundation-from-cache"    # 从已有 Tide Cache 直接解算淹没频率 (零 FES 调用)
+JOB_MODE_EXPOSURE_FROM_CACHE = "exposure-from-cache"        # 从已有 Tide Cache 直接解算潜在天文潮露出时间域产品 (零 FES 调用)
+JOB_MODE_TIDE_AND_EXPOSURE = "tide-exposure"                # 先生成 Tide Cache，再解算潜在天文潮露出时间域产品
+JOB_MODE_ALL = "all"                                        # 全要素产品包: Tide Cache + 淹没频率 + 潜在天文潮露出时间域产品
+
+VALID_JOB_MODES = {
+    JOB_MODE_TIDE_ONLY,
+    JOB_MODE_TIDE_AND_INUNDATION,
+    JOB_MODE_INUNDATION_FROM_CACHE,
+    JOB_MODE_TIDE_AND_EXPOSURE,
+    JOB_MODE_EXPOSURE_FROM_CACHE,
+    JOB_MODE_ALL
+}
 
 # 现有输出处理策略 (ExistingOutputPolicy)
 class ScanSnapshotStaleError(ValueError):
@@ -84,6 +96,7 @@ STATUS_VALIDATING = "VALIDATING"
 STATUS_TIDE_RUNNING = "TIDE_RUNNING"
 STATUS_TIDE_READY = "TIDE_READY"
 STATUS_FREQUENCY_RUNNING = "FREQUENCY_RUNNING"
+STATUS_EXPOSURE_RUNNING = "EXPOSURE_RUNNING"
 STATUS_DONE = "DONE"
 STATUS_FAILED = "FAILED"
 STATUS_CANCELLED = "CANCELLED"
@@ -102,12 +115,25 @@ class BatchManifest:
         "tide_cache_path",
         "frequency_path",
         "qc_path",
+        "exposure_output_dir",
+        "exposure_products_complete",
+        "exposure_fraction_path",
+        "exposure_duration_h_path",
+        "exposure_max_continuous_h_path",
+        "exposure_mean_event_h_path",
+        "exposure_event_count_path",
+        "exposure_valid_time_fraction_path",
+        "exposure_qc_path",
         "status",
         "run_action",
         "time_start",
         "time_end",
         "time_step",
+        "timezone",
         "time_samples",
+        "dem_datum",
+        "target_mode",
+        "cache_signature",
         "crs",
         "width",
         "height",
@@ -116,6 +142,7 @@ class BatchManifest:
         "control_node_count",
         "elapsed_tide_seconds",
         "elapsed_frequency_seconds",
+        "elapsed_exposure_seconds",
         "error_message"
     ]
 
@@ -126,12 +153,18 @@ class BatchManifest:
         self.records: Dict[str, Dict[str, Any]] = OrderedDict()
 
     def load(self) -> None:
-        """从已存在的 batch_manifest.json 加载既有记录"""
+        """从已存在的 batch_manifest.json 加载既有记录，具备向前向后字段兼容性"""
         if self.json_path.exists():
             try:
                 with open(self.json_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                self.records = OrderedDict((item["input_path"], item) for item in data)
+                self.records = OrderedDict()
+                for item in data:
+                    in_path = item.get("input_path", "")
+                    if in_path:
+                        rec = {k: "" for k in self.FIELDS}
+                        rec.update(item)
+                        self.records[in_path] = rec
             except Exception:
                 self.records = OrderedDict()
 
@@ -173,6 +206,52 @@ class BatchManifest:
                 row = {k: it.get(k, "") for k in self.FIELDS}
                 writer.writerow(row)
         os.replace(tmp_csv, self.csv_path)
+
+
+def _verify_exposure_artifacts(
+    dem_info,
+    exp_paths,
+    expected_cache_sig: Optional[str] = None
+) -> bool:
+    """验证已有潜在天文潮露出栅格全部 7 大产物的尺寸、坐标系、仿射变换、数据类型、NoData 与缓存签名一致性"""
+    product_specs = [
+        (exp_paths.exposure_fraction_path, 'float32', True, None),
+        (exp_paths.exposure_duration_h_path, 'float32', True, None),
+        (exp_paths.exposure_max_continuous_h_path, 'float32', True, None),
+        (exp_paths.exposure_mean_event_h_path, 'float32', True, None),
+        (exp_paths.exposure_event_count_path, 'uint32', False, 4294967295),
+        (exp_paths.exposure_valid_time_fraction_path, 'float32', True, None),
+        (exp_paths.exposure_qc_path, 'uint16', False, 65535)
+    ]
+    for p, expected_dtype, is_float, expected_nodata in product_specs:
+        if not os.path.exists(p):
+            return False
+        try:
+            with rasterio.open(p) as src:
+                if src.width != dem_info.width or src.height != dem_info.height:
+                    return False
+                if str(src.crs) != str(dem_info.crs):
+                    return False
+                if not np.allclose(src.transform, dem_info.transform, atol=1e-5):
+                    return False
+                if src.dtypes[0] != expected_dtype:
+                    return False
+                if is_float:
+                    if src.nodata is None:
+                        return False
+                    if not (np.isnan(src.nodata) or np.isclose(src.nodata, -9999.0, atol=1e-3)):
+                        return False
+                else:
+                    if src.nodata != expected_nodata:
+                        return False
+                if expected_cache_sig:
+                    tags = src.tags()
+                    sig = tags.get("CACHE_SIGNATURE", "")
+                    if not sig or sig != expected_cache_sig:
+                        return False
+        except Exception:
+            return False
+    return True
 
 
 def _verify_raster_artifacts(
@@ -265,6 +344,8 @@ class BatchRasterEngine:
                 name_lower.endswith("_inundation.tiff") or
                 name_lower.endswith("_inundation_qc.tif") or
                 name_lower.endswith("_inundation_qc.tiff") or
+                "_exposure_" in name_lower or
+                name_lower.endswith("_exposure.tif") or
                 name_lower.endswith("_qc.tif") or
                 name_lower.endswith("_qc.tiff") or
                 name_lower.endswith("_tide.nc") or
@@ -282,8 +363,6 @@ class BatchRasterEngine:
         results: List[Dict[str, Any]] = []
         for f in candidates:
             rel_path = str(f.relative_to(in_p))
-            size_mb = f.stat().st_size / (1024.0 * 1024.0)
-
             st = f.stat()
             size_bytes = st.st_size
             mtime_ns = st.st_mtime_ns
@@ -373,12 +452,32 @@ class BatchRasterEngine:
             6. 递归同名文件子路径镜像输出 (Subdirectory Path Mirroring)；
             7. 任务取消安全保护: 取消时仅清理当前瓦片的临时文件，已完成瓦片完好无损。
         """
-        # 归一化策略
+        # 归一化策略与任务模式
         policy = normalize_existing_output_policy(
             existing_policy=existing_policy,
             resume=resume,
             overwrite=overwrite
         )
+        orig_job_mode = str(job_mode).strip().lower()
+        if orig_job_mode in ("tide", "tide_only"):
+            job_mode = JOB_MODE_TIDE_ONLY
+        elif orig_job_mode in ("exposure", "tide_exposure", "tide-exposure"):
+            job_mode = JOB_MODE_TIDE_AND_EXPOSURE
+        elif orig_job_mode in ("exposure_duration", "exposure-from-cache", "exposure_from_cache"):
+            job_mode = JOB_MODE_EXPOSURE_FROM_CACHE
+        elif orig_job_mode in ("tide_inundation", "tide-inundation", "inundation"):
+            job_mode = JOB_MODE_TIDE_AND_INUNDATION
+        elif orig_job_mode in ("inundation_from_cache", "inundation-from-cache"):
+            job_mode = JOB_MODE_INUNDATION_FROM_CACHE
+        elif orig_job_mode in ("all", "full", "all_products"):
+            job_mode = JOB_MODE_ALL
+        else:
+            job_mode = orig_job_mode
+
+        if job_mode not in VALID_JOB_MODES:
+            raise ValueError(
+                f"未知的批量解算模式: '{orig_job_mode}'。合法模式包括: {sorted(list(VALID_JOB_MODES))}"
+            )
 
         in_p = Path(input_folder)
         if not in_p.exists():
@@ -451,9 +550,22 @@ class BatchRasterEngine:
             tile_out_dir.mkdir(parents=True, exist_ok=True)
             stem = rel_file_path.stem
 
+            from .exposure_engine import ExposureProductPaths
+            from .tide_cache import calculate_exposure_from_tide_cache
+
             tide_cache_path = str(tile_out_dir / f"{stem}_tide.nc")
             frequency_path = str(tile_out_dir / f"{stem}_inundation.tif")
             qc_path = str(tile_out_dir / f"{stem}_inundation_qc.tif")
+
+            exp_paths = ExposureProductPaths(
+                exposure_fraction_path=str(tile_out_dir / f"{stem}_exposure_fraction.tif"),
+                exposure_duration_h_path=str(tile_out_dir / f"{stem}_exposure_duration_h.tif"),
+                exposure_max_continuous_h_path=str(tile_out_dir / f"{stem}_exposure_max_continuous_h.tif"),
+                exposure_mean_event_h_path=str(tile_out_dir / f"{stem}_exposure_mean_event_h.tif"),
+                exposure_event_count_path=str(tile_out_dir / f"{stem}_exposure_event_count.tif"),
+                exposure_valid_time_fraction_path=str(tile_out_dir / f"{stem}_exposure_valid_time_fraction.tif"),
+                exposure_qc_path=str(tile_out_dir / f"{stem}_exposure_qc.tif")
+            )
 
             manifest.upsert(
                 input_path,
@@ -461,11 +573,23 @@ class BatchRasterEngine:
                 tide_cache_path=tide_cache_path,
                 frequency_path=frequency_path,
                 qc_path=qc_path,
+                exposure_output_dir=str(tile_out_dir),
+                exposure_products_complete=False,
+                exposure_fraction_path=exp_paths.exposure_fraction_path,
+                exposure_duration_h_path=exp_paths.exposure_duration_h_path,
+                exposure_max_continuous_h_path=exp_paths.exposure_max_continuous_h_path,
+                exposure_mean_event_h_path=exp_paths.exposure_mean_event_h_path,
+                exposure_event_count_path=exp_paths.exposure_event_count_path,
+                exposure_valid_time_fraction_path=exp_paths.exposure_valid_time_fraction_path,
+                exposure_qc_path=exp_paths.exposure_qc_path,
                 crs=item["crs"],
                 width=item["width"],
                 height=item["height"],
                 nodata=item["nodata"],
-                time_step=freq
+                time_step=freq,
+                timezone="UTC",
+                dem_datum=str(dem_datum).lower() if dem_datum is not None else "",
+                target_mode=str(target_mode).lower() if target_mode is not None else ""
             )
 
             # 检查文件基本有效性
@@ -482,57 +606,195 @@ class BatchRasterEngine:
 
             prev_status = manifest.get_status(input_path)
 
-            # 构建本任务对应的预期缓存规格 (Expected Spec)
+            # 确定本次任务各产物阶段需求
+            need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_ALL])
+            need_freq = (job_mode in [JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL])
+            need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL])
+            is_from_cache = (job_mode in (JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_EXPOSURE_FROM_CACHE))
+
             dem_info = self.raster_engine.inspect_raster(input_path, compute_valid_count=False)
-            st_val = start_time if start_time is not None else f"{year:04d}-01-01 00:00:00"
-            et_val = end_time if end_time is not None else f"{year+1:04d}-01-01 00:00:00"
+
+            # ---------------- FROM_CACHE 模式前置检查与权威缓存元数据提取 ----------------
+            cache_ok = False
+            actual_cache_sig = ""
 
             eff_init_sp = initial_control_spacing_m if initial_control_spacing_m is not None else getattr(self.raster_engine, 'initial_control_spacing_m', 4000.0)
             eff_min_sp = min_control_spacing_m if min_control_spacing_m is not None else getattr(self.raster_engine, 'min_control_spacing_m', 500.0)
             eff_tol = inundation_error_tolerance_pct if inundation_error_tolerance_pct is not None else getattr(self.raster_engine, 'inundation_error_tolerance_pct', 1.0)
+            eff_inclusive = inclusive if inclusive is not None else "left"
 
-            if inclusive is not None:
-                eff_inclusive = inclusive
-            elif start_time is None or end_time is None:
-                eff_inclusive = "left"
+            if is_from_cache:
+                # 1. 检查 Tide Cache 是否存在
+                if not os.path.exists(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 2. 检查 Tide Cache 完整性标记
+                if not is_cache_complete(tide_cache_path):
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 3. 检查元数据与节点/单元数
+                try:
+                    cache_meta_info = inspect_tide_cache_metadata(tide_cache_path)
+                except Exception as ex:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"读取 Tide Cache 元数据失败: {ex}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                if cache_meta_info.get("num_nodes", 0) <= 0 or cache_meta_info.get("num_cells", 0) <= 0:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"Tide Cache 节点或网格单元为空 (nodes={cache_meta_info.get('num_nodes')}, cells={cache_meta_info.get('num_cells')}): {tide_cache_path}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                # 4. 严格校验 DEM 几何/标识兼容性 (只校验 DEM 几何与文件身份，不比对 GUI/CLI 传入的潮位时空参数)
+                fsize = getattr(dem_info, "file_size_bytes", None)
+                mtime = getattr(dem_info, "mtime_ns", None)
+                if (fsize is None or mtime is None) and os.path.exists(input_path):
+                    try:
+                        st = os.stat(input_path)
+                        fsize = st.st_size
+                        mtime = st.st_mtime_ns
+                    except Exception:
+                        pass
+
+                dem_compat_spec = {
+                    "width": dem_info.width,
+                    "height": dem_info.height,
+                    "crs": dem_info.crs,
+                    "transform": dem_info.transform,
+                    "bounds": dem_info.bounds,
+                    "nodata": dem_info.nodata,
+                    "file_size_bytes": fsize,
+                    "mtime_ns": mtime,
+                }
+                c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, dem_compat_spec)
+                if not c_compat:
+                    manifest.upsert(
+                        input_path,
+                        status=STATUS_FAILED,
+                        run_action="FAILED",
+                        error_message=f"FROM_CACHE 模式 Tide Cache 与目标 DEM 几何/标识不兼容: {'; '.join(c_reasons)}"
+                    )
+                    manifest.save()
+                    summary_counts["failed"] += 1
+                    continue
+
+                actual_cache_sig = cache_meta_info.get("signature", "")
+                cache_ok = True
+
+                # 同步 Cache 中的权威时间与控制网格参数至 manifest
+                c_attrs = cache_meta_info.get("metadata", {})
+                manifest.upsert(
+                    input_path,
+                    time_start=str(c_attrs.get("TIME_START", "")),
+                    time_end=str(c_attrs.get("TIME_END", "")),
+                    time_step=str(c_attrs.get("TIME_STEP", freq)),
+                    timezone=str(c_attrs.get("TIMEZONE", "UTC")),
+                    time_samples=cache_meta_info.get("time_samples", 0),
+                    dem_datum=str(c_attrs.get("DEM_DATUM", dem_datum if dem_datum is not None else "")).lower(),
+                    target_mode=str(c_attrs.get("TARGET_MODE", target_mode if target_mode is not None else "")).lower(),
+                    cache_signature=actual_cache_sig,
+                    control_node_count=cache_meta_info.get("num_nodes", 0),
+                )
+
             else:
-                st_s = str(start_time)
-                et_s = str(end_time)
-                if st_s.endswith("-01-01 00:00:00") and et_s.endswith("-01-01 00:00:00") and int(et_s[:4]) > int(st_s[:4]):
-                    eff_inclusive = "left"
-                else:
-                    eff_inclusive = "both"
+                # ---------------- 非 FROM_CACHE 模式：按本任务配置构建 Expected Spec ----------------
+                st_val = start_time if start_time is not None else f"{year:04d}-01-01 00:00:00"
+                et_val = end_time if end_time is not None else f"{year+1:04d}-01-01 00:00:00"
 
-            expected_spec = build_expected_cache_spec(
-                info=dem_info,
-                start_time=st_val,
-                end_time=et_val,
-                freq=freq,
-                dem_datum=dem_datum,
-                constituents=constituents,
-                target_mode=target_mode,
-                initial_control_spacing_m=eff_init_sp,
-                min_control_spacing_m=eff_min_sp,
-                inundation_error_tolerance_pct=eff_tol,
-                topology_max_resolution_m=self.raster_engine.topology_max_resolution_m,
-                topology_valid_fraction_threshold=self.raster_engine.topology_valid_fraction_threshold,
-                fes_model="FES2022b",
-                fes_source_type="native_lgp2",
-                source_tz="UTC",
-                inclusive=eff_inclusive
-            )
+                expected_spec = build_expected_cache_spec(
+                    info=dem_info,
+                    start_time=st_val,
+                    end_time=et_val,
+                    freq=freq,
+                    dem_datum=dem_datum,
+                    constituents=constituents,
+                    target_mode=target_mode,
+                    initial_control_spacing_m=eff_init_sp,
+                    min_control_spacing_m=eff_min_sp,
+                    inundation_error_tolerance_pct=eff_tol,
+                    topology_max_resolution_m=self.raster_engine.topology_max_resolution_m,
+                    topology_valid_fraction_threshold=self.raster_engine.topology_valid_fraction_threshold,
+                    fes_model="FES2022b",
+                    fes_source_type="native_lgp2",
+                    source_tz="UTC",
+                    inclusive=eff_inclusive
+                )
+                actual_cache_sig = expected_spec["signature"]
+                manifest.upsert(
+                    input_path,
+                    time_start=st_val,
+                    time_end=et_val,
+                    time_step=freq,
+                    timezone="UTC",
+                    time_samples=expected_spec["time_samples"],
+                    dem_datum=str(dem_datum).lower(),
+                    target_mode=str(target_mode).lower(),
+                    cache_signature=actual_cache_sig,
+                )
+
+                if os.path.exists(tide_cache_path):
+                    if is_cache_complete(tide_cache_path):
+                        c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, expected_spec)
+                        if c_compat:
+                            cache_ok = True
+                        elif policy == ExistingOutputPolicy.RESUME:
+                            # 严谨科学防御: 缓存属于不同参数集时严禁错误复用或静默跳过！
+                            err_msg = f"Existing cache belongs to another parameter set: {'; '.join(c_reasons)}. Use OVERWRITE to rebuild."
+                            manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
+                            manifest.save()
+                            summary_counts["failed"] += 1
+                            continue
 
             # ---------------- ERROR_IF_EXISTS 策略防线 ----------------
             if policy == ExistingOutputPolicy.ERROR_IF_EXISTS:
                 conflict_files = []
-                if job_mode in (JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION):
-                    if os.path.exists(tide_cache_path):
-                        conflict_files.append(tide_cache_path)
-                if job_mode in (JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE):
+                if need_tide and os.path.exists(tide_cache_path):
+                    conflict_files.append(tide_cache_path)
+                if need_freq:
                     if os.path.exists(frequency_path):
                         conflict_files.append(frequency_path)
                     if os.path.exists(qc_path):
                         conflict_files.append(qc_path)
+                if need_exp:
+                    for ep in [
+                        exp_paths.exposure_fraction_path,
+                        exp_paths.exposure_duration_h_path,
+                        exp_paths.exposure_max_continuous_h_path,
+                        exp_paths.exposure_mean_event_h_path,
+                        exp_paths.exposure_event_count_path,
+                        exp_paths.exposure_valid_time_fraction_path,
+                        exp_paths.exposure_qc_path,
+                    ]:
+                        if os.path.exists(ep):
+                            conflict_files.append(ep)
 
                 if conflict_files:
                     err_msg = f"ExistingOutputError: 目标输出产物已存在且当前策略为 error_if_exists: {', '.join(conflict_files)}"
@@ -541,72 +803,58 @@ class BatchRasterEngine:
                     summary_counts["failed"] += 1
                     continue
 
-            # ---------------- RESUME 策略深层兼容性与断点跳过检查 ----------------
-            cache_ok = False
-            if os.path.exists(tide_cache_path):
-                if is_cache_complete(tide_cache_path):
-                    c_compat, c_reasons = validate_tide_cache_compatibility(tide_cache_path, expected_spec)
-                    if c_compat:
-                        cache_ok = True
-                    elif policy == ExistingOutputPolicy.RESUME:
-                        # 严谨科学防御: 缓存属于不同参数集时严禁错误复用或静默跳过！
-                        err_msg = f"Existing cache belongs to another parameter set: {'; '.join(c_reasons)}. Use OVERWRITE to rebuild."
-                        manifest.upsert(input_path, status=STATUS_FAILED, run_action="FAILED", error_message=err_msg)
-                        manifest.save()
-                        summary_counts["failed"] += 1
-                        continue
-
+            # ---------------- RESUME 策略深层兼容性与断点跳过检查 (权威 actual_cache_sig) ----------------
             if policy == ExistingOutputPolicy.RESUME:
                 if job_mode == JOB_MODE_TIDE_ONLY:
                     if cache_ok:
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_TIDE_AND_INUNDATION:
-                    if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                    if cache_ok and _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
                 elif job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
-                    if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=expected_spec["signature"]):
-                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING")
+                    if _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=False)
                         manifest.save()
                         summary_counts["skipped"] += 1
                         continue
 
-            # ---------------- JOB_MODE_INUNDATION_FROM_CACHE 前置检查 ----------------
-            if job_mode == JOB_MODE_INUNDATION_FROM_CACHE:
-                if not os.path.exists(tide_cache_path):
-                    manifest.upsert(
-                        input_path,
-                        status=STATUS_FAILED,
-                        run_action="FAILED",
-                        error_message=f"Mode 3 前置 Tide Cache 不存在: {tide_cache_path} (绝不回退至 FES 计算)"
-                    )
-                    manifest.save()
-                    summary_counts["failed"] += 1
-                    continue
-                if not is_cache_complete(tide_cache_path):
-                    manifest.upsert(
-                        input_path,
-                        status=STATUS_FAILED,
-                        run_action="FAILED",
-                        error_message=f"Mode 3 前置 Tide Cache 不完整 (未包含 CACHE_COMPLETE 标记): {tide_cache_path}"
-                    )
-                    manifest.save()
-                    summary_counts["failed"] += 1
-                    continue
+                elif job_mode == JOB_MODE_TIDE_AND_EXPOSURE:
+                    if cache_ok and _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
+
+                elif job_mode == JOB_MODE_EXPOSURE_FROM_CACHE:
+                    if _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
+
+                elif job_mode == JOB_MODE_ALL:
+                    if (cache_ok and
+                        _verify_raster_artifacts(dem_info, frequency_path, qc_path, expected_cache_sig=actual_cache_sig) and
+                        _verify_exposure_artifacts(dem_info, exp_paths, expected_cache_sig=actual_cache_sig)):
+                        manifest.upsert(input_path, status=STATUS_DONE, run_action="SKIPPED_EXISTING", exposure_products_complete=True)
+                        manifest.save()
+                        summary_counts["skipped"] += 1
+                        continue
 
             overall_pct = int(100 * idx / max(1, total_files))
 
             # 执行单文件处理 (带单瓦片失败隔离)
             try:
                 # ---------------- Stage 1: Tide Calculation & Tide Cache ----------------
-                need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION])
+                need_tide = (job_mode in [JOB_MODE_TIDE_ONLY, JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_ALL])
                 cache_already_ready = (
                     policy == ExistingOutputPolicy.RESUME and
                     cache_ok
@@ -667,37 +915,71 @@ class BatchRasterEngine:
                     summary_counts["completed"] += 1
                     continue
 
-                # ---------------- Stage 2: Inundation Frequency Calculation ----------------
-                # 注意: 在 JOB_MODE_INUNDATION_FROM_CACHE 下，tide_cache_path 严格为只读输入，绝不修改
-                manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
-                manifest.save()
-                if progress_callback:
-                    progress_callback(overall_pct, 60, str(rel_file_path), "Stage 2: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
-
-                t_freq_start = time.time()
-
-                def _freq_prog(pct_val, msg_val):
+                # ---------------- Stage 2a: Inundation Frequency Calculation ----------------
+                need_freq = (job_mode in [JOB_MODE_TIDE_AND_INUNDATION, JOB_MODE_INUNDATION_FROM_CACHE, JOB_MODE_ALL])
+                elapsed_freq = 0.0
+                valid_pixels_cnt = 0
+                if need_freq:
+                    manifest.upsert(input_path, status=STATUS_FREQUENCY_RUNNING, run_action="FREQUENCY_RUNNING")
+                    manifest.save()
                     if progress_callback:
-                        progress_callback(overall_pct, 50 + int(pct_val * 0.5), filename, f"Stage 2: {msg_val}", summary_counts)
+                        progress_callback(overall_pct, 55, str(rel_file_path), "Stage 2a: 基于 Tide Cache 解算潜在天文潮淹没频率...", summary_counts)
 
-                freq_summary = calculate_inundation_from_tide_cache(
-                    dem_path=input_path,
-                    cache_path=tide_cache_path,
-                    output_path=frequency_path,
-                    qc_output_path=qc_path,
-                    block_size=block_size,
-                    allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
-                    progress_callback=_freq_prog,
-                    cancel_event=cancel_event
-                )
+                    t_freq_start = time.time()
 
-                elapsed_freq = time.time() - t_freq_start
+                    def _freq_prog(pct_val, msg_val):
+                        if progress_callback:
+                            progress_callback(overall_pct, 50 + int(pct_val * 0.25), filename, f"Stage 2a: {msg_val}", summary_counts)
+
+                    freq_summary = calculate_inundation_from_tide_cache(
+                        dem_path=input_path,
+                        cache_path=tide_cache_path,
+                        output_path=frequency_path,
+                        qc_output_path=qc_path,
+                        block_size=block_size,
+                        allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
+                        progress_callback=_freq_prog,
+                        cancel_event=cancel_event
+                    )
+                    elapsed_freq = time.time() - t_freq_start
+                    valid_pixels_cnt = freq_summary.input_valid_pixels
+
+                # ---------------- Stage 2b: Exposure Duration Calculation ----------------
+                need_exp = (job_mode in [JOB_MODE_TIDE_AND_EXPOSURE, JOB_MODE_EXPOSURE_FROM_CACHE, JOB_MODE_ALL])
+                elapsed_exp = 0.0
+                if need_exp:
+                    manifest.upsert(input_path, status=STATUS_EXPOSURE_RUNNING, run_action="EXPOSURE_RUNNING")
+                    manifest.save()
+                    if progress_callback:
+                        progress_callback(overall_pct, 75, str(rel_file_path), "Stage 2b: 基于 Tide Cache 解算潜在天文潮露出时间域产品...", summary_counts)
+
+                    t_exp_start = time.time()
+
+                    def _exp_prog(pct_val, msg_val):
+                        if progress_callback:
+                            progress_callback(overall_pct, 75 + int(pct_val * 0.25), filename, f"Stage 2b: {msg_val}", summary_counts)
+
+                    exp_res = calculate_exposure_from_tide_cache(
+                        dem_path=input_path,
+                        cache_path=tide_cache_path,
+                        output_paths=exp_paths,
+                        block_size=block_size or 512,
+                        allow_overwrite=(policy in (ExistingOutputPolicy.OVERWRITE, ExistingOutputPolicy.RESUME)),
+                        progress_callback=_exp_prog,
+                        cancel_event=cancel_event
+                    )
+                    elapsed_exp = time.time() - t_exp_start
+                    if not need_freq and isinstance(exp_res, dict):
+                        valid_pixels_cnt = exp_res.get("input_valid_pixels", 0)
+
                 manifest.upsert(
                     input_path,
                     status=STATUS_DONE,
                     run_action="PROCESSED",
-                    valid_pixel_count=freq_summary.input_valid_pixels,
-                    elapsed_frequency_seconds=round(elapsed_freq, 2),
+                    valid_pixel_count=valid_pixels_cnt,
+                    elapsed_frequency_seconds=round(elapsed_freq, 2) if need_freq else None,
+                    elapsed_exposure_seconds=round(elapsed_exp, 2) if need_exp else None,
+                    exposure_products_complete=True if need_exp else False,
                     error_message=""
                 )
                 manifest.save()

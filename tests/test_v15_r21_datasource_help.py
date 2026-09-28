@@ -228,10 +228,9 @@ class TestV15Round21DataSourceHelp(unittest.TestCase):
             mock_about.assert_called_once()
             about_html = mock_about.call_args[0][2]
 
-            self.assertIn("CoastTideX v1.5 Alpha", about_html)
-            self.assertIn("作者 / 开发者：Wang Yuhao", about_html)
+            self.assertIn("CoastTideX", about_html)
+            self.assertIn("王宇浩", about_html)
             self.assertNotIn("王宇豪", about_html)
-            self.assertNotIn("王宇浩", about_html)
             self.assertNotIn("wyhao2333", about_html)
             self.assertNotIn("零误差", about_html)
             self.assertIn("可选配置 Hybrid MDT 来源分类栅格", about_html)

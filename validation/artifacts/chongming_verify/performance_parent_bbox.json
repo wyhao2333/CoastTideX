@@ -1,0 +1,39 @@
+{
+  "model_load_count": 2,
+  "model_load_seconds": 74.56487949991133,
+  "model_cache_hit_count": 0,
+  "model_cache_miss_count": 1,
+  "predict_points_period_calls": 0,
+  "predict_spatial_snapshot_calls": 1,
+  "logical_requested_node_time_pairs": 0,
+  "actual_pyfes_evaluate_calls": 14,
+  "actual_pyfes_evaluate_points": 0,
+  "actual_pyfes_evaluate_seconds": 0.0,
+  "unique_requested_bboxes": [
+    [
+      119.99992466740512,
+      29.999962139680566,
+      123.22205929192435,
+      33.00607065567053
+    ]
+  ],
+  "unique_loaded_bboxes": [
+    [
+      119.5,
+      29.5,
+      123.5,
+      33.5
+    ]
+  ],
+  "rss_before_load_bytes": 2138791936,
+  "rss_after_load_bytes": 4807049216,
+  "peak_rss_bytes": 4807049216,
+  "wall_time_seconds": 31.2,
+  "stage1_seconds": 31.2,
+  "stage2_seconds": 0.0,
+  "scientific_equivalence": {
+    "max_freq_diff": 0.0,
+    "qc_equal": true,
+    "nodata_equal": true
+  }
+}

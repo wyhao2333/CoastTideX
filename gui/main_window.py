@@ -5,6 +5,7 @@ CoastTideX 桌面主窗口 (Main Window)
 
 import os
 import re
+from typing import Optional, Any, Dict, List
 import numpy as np
 import pandas as pd
 import dateutil.tz
@@ -19,21 +20,29 @@ try:
 except ImportError:
     pass
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDateTime, QUrl
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QGroupBox, QLabel, QLineEdit, QComboBox,
     QDateTimeEdit, QPushButton, QProgressBar, QTableWidget,
     QTableWidgetItem, QHeaderView, QFileDialog, QMessageBox,
     QSplitter, QStatusBar, QScrollArea, QFrame, QSpinBox,
-    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication
+    QCheckBox, QDoubleSpinBox, QInputDialog, QApplication, QRadioButton,
+    QSizePolicy
 )
-from PyQt6.QtGui import QIcon, QFont, QAction, QColor
+from PyQt6.QtGui import QIcon, QFont, QAction, QColor, QDesktopServices
 import threading
 
 from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
 from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary, RasterCalculationCancelled
+from core.dem_datum_converter import (
+    DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
+    MAX_MDT_EXTRAPOLATION_DISTANCE_KM
+)
+from core.batch_datum_converter import (
+    BatchDEMDatumConverter, scan_dem_directory, BatchConversionSummary
+)
 from core.utils import COASTAL_PRESETS, export_dataframe, load_app_config, extract_scalar_metadata
 from .chart_widget import TideChartWidget
 from .settings_dialog import SettingsDialog
@@ -231,16 +240,17 @@ class BatchTideWorker(QThread):
 
 
 class RasterTideWorker(QThread):
-    """空间栅格解算后台工作线程 (Snapshot / Inundation)"""
+    """空间栅格解算后台工作线程 (Snapshot / Inundation / Exposure)"""
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(object)  # RasterResultSummary
+    finished = pyqtSignal(object)  # RasterResultSummary or dict
     error = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, mode: str, params: dict):
+    def __init__(self, mode: str, params: dict, engine: Optional[Any] = None):
         super().__init__()
         self.mode = mode
         self.params = params
+        self.engine = engine
         self.cancel_event = threading.Event()
         self._is_cancelled = False
 
@@ -250,7 +260,7 @@ class RasterTideWorker(QThread):
 
     def run(self):
         try:
-            engine = RasterTideEngine()
+            engine = self.engine or RasterTideEngine()
 
             def p_cb(percent, msg):
                 if not self._is_cancelled:
@@ -281,6 +291,7 @@ class RasterTideWorker(QThread):
                     dem_datum=self.params.get('dem_datum', 'egm2008'),
                     constituents=self.params.get('constituents', 'all'),
                     source_tz=self.params.get('source_tz', 'UTC'),
+                    target_mode=self.params.get('target_mode', 'intertidal'),
                     initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
                     min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
                     inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
@@ -288,6 +299,29 @@ class RasterTideWorker(QThread):
                     strict=self.params.get('strict', True),
                     progress_callback=p_cb,
                     cancel_event=self.cancel_event
+                )
+            elif self.mode == 'exposure':
+                summary = engine.calculate_exposure_raster(
+                    dem_path=self.params['input_path'],
+                    output_dir=self.params.get('output_dir'),
+                    output_paths=self.params.get('output_paths'),
+                    year=self.params.get('year', 2024),
+                    start_time=self.params.get('start_time'),
+                    end_time=self.params.get('end_time'),
+                    freq=self.params.get('freq', '30min'),
+                    dem_datum=self.params.get('dem_datum', 'egm2008'),
+                    constituents=self.params.get('constituents', 'all'),
+                    source_tz=self.params.get('source_tz', 'UTC'),
+                    target_mode=self.params.get('target_mode', 'intertidal'),
+                    initial_control_spacing_m=self.params.get('initial_control_spacing_m', 4000.0),
+                    min_control_spacing_m=self.params.get('min_control_spacing_m', 500.0),
+                    inundation_error_tolerance_pct=self.params.get('inundation_error_tolerance_pct', 1.0),
+                    block_size=self.params.get('block_size', 512),
+                    strict=self.params.get('strict', True),
+                    allow_overwrite=self.params.get('allow_overwrite', True),
+                    progress_callback=p_cb,
+                    cancel_event=self.cancel_event,
+                    export_tide_cache_path=self.params.get('export_tide_cache_path')
                 )
             else:
                 raise ValueError(f"未知栅格模式: {self.mode}")
@@ -391,12 +425,115 @@ class BatchRasterWorker(QThread):
         except Exception as e:
             self.error.emit(f"批量任务发生异常: {str(e)}")
 
+
+class DEMDatumConversionWorker(QThread):
+    """后台 DEM 垂直基准转换工作线程 (EGM2008 -> MSL, v1.7)"""
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(object)  # DEMConversionSummary
+    error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            from core.dem_datum_converter import convert_dem_to_msl
+
+            def p_cb(percent, msg):
+                if not self._is_cancelled:
+                    self.progress.emit(percent, msg)
+
+            save_qc = self.params.get('save_qc', False)
+            summary = convert_dem_to_msl(
+                input_dem_path=self.params['input_path'],
+                output_msl_path=self.params.get('output_path'),
+                output_qc_path=self.params.get('qc_output_path'),
+                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                block_size=self.params.get('block_size', 512),
+                allow_overwrite=self.params.get('allow_overwrite', True),
+                write_qc=save_qc,
+                progress_callback=p_cb,
+                cancel_event=self.cancel_event
+            )
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(summary)
+        except Exception as e:
+            if self._is_cancelled or "用户主动取消" in str(e):
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+
+
+class BatchDEMDatumConversionWorker(QThread):
+    """后台批量 DEM 垂直基准转换工作线程 (EGM2008 -> MSL, v1.7.1)"""
+    progress = pyqtSignal(int, int, str, str, dict)  # (current_idx, total_count, cur_file, msg, stats)
+    finished = pyqtSignal(object)  # BatchConversionSummary
+    error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, params: dict):
+        super().__init__()
+        self.params = params
+        self.cancel_event = threading.Event()
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+        self.cancel_event.set()
+
+    def run(self):
+        try:
+            from core.batch_datum_converter import BatchDEMDatumConverter
+
+            def p_cb(idx, total, cur_file, msg, stats):
+                if not self._is_cancelled:
+                    self.progress.emit(idx, total, cur_file, msg, stats)
+
+            converter = BatchDEMDatumConverter(
+                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                block_size=self.params.get('block_size', 512)
+            )
+
+            summary = converter.run_batch(
+                input_dir=self.params['input_dir'],
+                output_dir=self.params['output_dir'],
+                max_dist_km=self.params.get('max_dist_km', 100.0),
+                resume=self.params.get('resume', True),
+                overwrite=self.params.get('overwrite', False),
+                workers=self.params.get('workers', 1),
+                write_qc=self.params.get('write_qc', False),
+                progress_callback=p_cb,
+                cancel_event=self.cancel_event
+            )
+
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(summary)
+        except Exception as e:
+            if self._is_cancelled or "取消" in str(e):
+                self.cancelled.emit()
+            else:
+                self.error.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     """CoastTideX 桌面客户端主窗口"""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CoastTideX v1.5 Alpha - 全球海岸带潮位模拟与高程基准转换系统")
+        self.setWindowTitle("CoastTideX v1.7.1 - 全球海岸带潮位模拟与高程基准转换系统")
         self.resize(1280, 800)
         self.setMinimumSize(960, 500)
         self.setStyleSheet(DARK_THEME_QSS)
@@ -407,10 +544,29 @@ class MainWindow(QMainWindow):
         self._user_selected_freq = "30min"
         self.raster_worker = None
         self.current_raster_info = None
+        self.dem_worker = None
+        self.current_dem_summary = None
+        self.batch_dem_worker = None
+        self.current_batch_dem_summary = None
 
         self._init_menu()
         self._init_ui()
         self._set_default_values()
+
+    def _make_combo_responsive(self, combo: QComboBox, min_chars: int = 8) -> None:
+        """配置下拉框具备响应式压缩能力，避免长文本项撑破父面板宽度。"""
+        combo.setMinimumWidth(0)
+        combo.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed
+        )
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(min_chars)
+        if combo.currentText():
+            combo.setToolTip(combo.currentText())
+        combo.currentTextChanged.connect(lambda t: combo.setToolTip(t))
 
     def _init_menu(self):
         menubar = self.menuBar()
@@ -445,16 +601,19 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tab_single = QWidget()
         self.tab_batch = QWidget()
+        self.tab_dem_convert = QWidget()
         self.tab_raster = QWidget()
         self.tab_batch_raster = QWidget()
 
         self.tabs.addTab(self.tab_single, " 🌊 单点/时段潮位序列 ")
         self.tabs.addTab(self.tab_batch, " 📊 批量站点多时刻解算 ")
+        self.tabs.addTab(self.tab_dem_convert, " 📐 DEM 基准转换 (EGM2008→MSL) ")
         self.tabs.addTab(self.tab_raster, " 🗺️ 单影像栅格解算 / 验证 ")
         self.tabs.addTab(self.tab_batch_raster, " 🗂️ 批量潮间带栅格解算 ")
 
         self._setup_single_tab()
         self._setup_batch_tab()
+        self._setup_dem_convert_tab()
         self._setup_raster_tab()
         self._setup_batch_raster_tab()
 
@@ -463,7 +622,7 @@ class MainWindow(QMainWindow):
         # 底部状态栏
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.4")
+        self.status_bar.showMessage("就绪 - 欢迎使用 CoastTideX v1.7.1 (MSL 统一基准架构)")
 
     def _setup_single_tab(self):
         layout = QHBoxLayout(self.tab_single)
@@ -473,10 +632,13 @@ class MainWindow(QMainWindow):
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
         scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_left.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_left.setFixedWidth(390)
+        scroll_left.setMinimumWidth(370)
 
         left_panel = QWidget()
+        left_panel.setMinimumWidth(0)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout_left = QVBoxLayout(left_panel)
         layout_left.setContentsMargins(2, 2, 8, 2)
         layout_left.setSpacing(12)
@@ -492,6 +654,7 @@ class MainWindow(QMainWindow):
         for name in COASTAL_PRESETS.keys():
             self.combo_presets.addItem(name)
         self.combo_presets.currentIndexChanged.connect(self._on_preset_changed)
+        self._make_combo_responsive(self.combo_presets)
         layout_sp.addWidget(self.combo_presets, 0, 1)
 
         layout_sp.addWidget(QLabel("目标经度 (°):"), 1, 0)
@@ -514,6 +677,7 @@ class MainWindow(QMainWindow):
         self.combo_time_mode.addItem("自定义时段 (Custom Period)", "period")
         self.combo_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
         self.combo_time_mode.currentIndexChanged.connect(self._on_time_mode_changed)
+        self._make_combo_responsive(self.combo_time_mode)
         layout_time.addWidget(self.combo_time_mode, 0, 1)
 
         self.lbl_start = QLabel("起始时间:")
@@ -552,6 +716,7 @@ class MainWindow(QMainWindow):
         self.combo_freq.setCurrentIndex(4)  # 默认 30min
         self.combo_freq.currentIndexChanged.connect(self._update_sample_estimate)
         self.combo_freq.activated.connect(self._on_freq_user_changed)
+        self._make_combo_responsive(self.combo_freq)
         layout_time.addWidget(self.combo_freq, 4, 1)
 
         layout_time.addWidget(QLabel("输入时区:"), 5, 0)
@@ -559,6 +724,7 @@ class MainWindow(QMainWindow):
         self.combo_tz.addItem("UTC (世界标准时)", "UTC")
         self.combo_tz.addItem("本地时间 (Local Time)", "local")
         self.combo_tz.currentIndexChanged.connect(self._on_timezone_changed)
+        self._make_combo_responsive(self.combo_tz)
         layout_time.addWidget(self.combo_tz, 5, 1)
 
         layout_time.addWidget(QLabel("预期样本:"), 6, 0)
@@ -577,6 +743,7 @@ class MainWindow(QMainWindow):
         self.combo_const = QComboBox()
         self.combo_const.addItem("全部 34 个主分潮 (全精度)", "all")
         self.combo_const.addItem("8 个核心主分潮 (快速预览)", "major8")
+        self._make_combo_responsive(self.combo_const)
         layout_model.addWidget(self.combo_const, 0, 1)
 
         layout_model.addWidget(QLabel("计算基准面:"), 1, 0)
@@ -586,6 +753,7 @@ class MainWindow(QMainWindow):
         self.combo_compute_datum.addItem("仅 EGM2008 (大地水准面正高)", "egm2008")
         self.combo_compute_datum.addItem("仅 MSL (相对平均海平面)", "msl")
         self.combo_compute_datum.currentIndexChanged.connect(self._on_compute_datum_changed)
+        self._make_combo_responsive(self.combo_compute_datum)
         layout_model.addWidget(self.combo_compute_datum, 1, 1)
 
         layout_model.addWidget(QLabel("显示/统计基准:"), 2, 0)
@@ -595,6 +763,7 @@ class MainWindow(QMainWindow):
         self.combo_display_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco")
         self.combo_display_datum.addItem("WGS84 (空间几何椭球高)", "wgs")
         self.combo_display_datum.currentIndexChanged.connect(self._on_datum_display_changed)
+        self._make_combo_responsive(self.combo_display_datum)
         layout_model.addWidget(self.combo_display_datum, 2, 1)
 
         layout_left.addWidget(grp_model)
@@ -611,7 +780,7 @@ class MainWindow(QMainWindow):
         layout_left.addWidget(self.prog_single)
 
         # 统计卡片面板
-        grp_stat = QGroupBox("4. 统计极值指标 (当前选定基准)")
+        grp_stat = QGroupBox("4. 统计极值指标 (选定基准)")
         layout_stat = QGridLayout(grp_stat)
         self.lbl_stat_target = QLabel("EGM2008 基准")
         self.lbl_max = QLabel("-")
@@ -642,7 +811,7 @@ class MainWindow(QMainWindow):
 
         layout_left.addStretch()
         scroll_left.setWidget(left_panel)
-        layout.addWidget(scroll_left)
+        layout.addWidget(scroll_left, stretch=1)
 
         # 右侧图表与表格展示 (分割器)
         splitter_right = QSplitter(Qt.Orientation.Vertical)
@@ -686,7 +855,7 @@ class MainWindow(QMainWindow):
         splitter_right.addWidget(table_container)
         splitter_right.setSizes([450, 250])
 
-        layout.addWidget(splitter_right, stretch=1)
+        layout.addWidget(splitter_right, stretch=2)
 
     def _setup_batch_tab(self):
         layout = QVBoxLayout(self.tab_batch)
@@ -762,12 +931,933 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(layout_batch_table)
 
-    def _setup_raster_tab(self):
-        scroll = QScrollArea(self.tab_raster)
+    def _setup_dem_convert_tab(self):
+        """配置 DEM 基准转换 (EGM2008 -> MSL) 选项卡 (v1.7 / v1.7.1 批量增强)"""
+        scroll = QScrollArea(self.tab_dem_convert)
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout_main = QVBoxLayout(panel)
+        layout_main.setContentsMargins(10, 10, 10, 10)
+        layout_main.setSpacing(12)
+
+        # 0. 模式选择器 (单影像 vs 批量目录)
+        grp_mode = QGroupBox("模式选择 / Operation Mode")
+        layout_mode = QHBoxLayout(grp_mode)
+        self.radio_dem_mode_single = QRadioButton("📄 单幅 DEM 转换 (Single DEM)")
+        self.radio_dem_mode_single.setToolTip("单幅 DEM 影像垂直基准转换 (EGM2008 -> MSL)")
+        self.radio_dem_mode_batch = QRadioButton("📁 批量 DEM 转换 (Batch Directory)")
+        self.radio_dem_mode_batch.setToolTip("批量 DEM 目录扫描与队列转换 (EGM2008 -> MSL)")
+        self.radio_dem_mode_single.setChecked(True)
+        self.radio_dem_mode_single.toggled.connect(self._on_dem_mode_toggled)
+        layout_mode.addWidget(self.radio_dem_mode_single)
+        layout_mode.addWidget(self.radio_dem_mode_batch)
+        layout_mode.addStretch()
+        layout_main.addWidget(grp_mode)
+
+        # ==================== 1. 单幅 DEM 影像转换面板 ====================
+        self.widget_dem_single = QWidget()
+        layout_single = QVBoxLayout(self.widget_dem_single)
+        layout_single.setContentsMargins(0, 0, 0, 0)
+        layout_single.setSpacing(12)
+
+        # 1.1 输入 DEM 栅格与元数据检查卡片
+        grp_in = QGroupBox("1. 输入 DEM 栅格 (EGM2008 基准)")
+        layout_in = QGridLayout(grp_in)
+        layout_in.setSpacing(8)
+
+        layout_in.addWidget(QLabel("输入 DEM GeoTIFF:"), 0, 0)
+        self.edit_dem_input = QLineEdit()
+        self.edit_dem_input.setPlaceholderText("请选择基于 EGM2008 大地水准面正高的高程栅格 (GeoTIFF)...")
+        self.edit_dem_input.setMinimumWidth(0)
+        self.edit_dem_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_input.textChanged.connect(lambda t: self.edit_dem_input.setToolTip(t))
+        self.edit_dem_input.textChanged.connect(self._on_dem_input_changed)
+        layout_in.addWidget(self.edit_dem_input, 0, 1)
+
+        btn_browse_in = QPushButton("浏览 DEM 文件...")
+        btn_browse_in.setObjectName("btn_secondary")
+        btn_browse_in.clicked.connect(self._browse_dem_input)
+        layout_in.addWidget(btn_browse_in, 0, 2)
+
+        btn_inspect = QPushButton("🔍 检查 DEM 元数据")
+        btn_inspect.setObjectName("btn_secondary")
+        btn_inspect.clicked.connect(self._inspect_dem_input_ui)
+        layout_in.addWidget(btn_inspect, 0, 3)
+
+        # 元数据展示卡片
+        frame_meta = QFrame()
+        frame_meta.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 6px;")
+        layout_meta = QGridLayout(frame_meta)
+        layout_meta.setSpacing(6)
+
+        layout_meta.addWidget(QLabel("栅格规格:"), 0, 0)
+        self.lbl_dem_dims = QLabel("-")
+        self.lbl_dem_dims.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_meta.addWidget(self.lbl_dem_dims, 0, 1)
+
+        layout_meta.addWidget(QLabel("波段数量:"), 0, 2)
+        self.lbl_dem_bands = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_bands, 0, 3)
+
+        layout_meta.addWidget(QLabel("坐标系统 (CRS):"), 1, 0)
+        self.lbl_dem_crs = QLabel("-")
+        self.lbl_dem_crs.setStyleSheet("font-weight: bold; color: #a78bfa;")
+        layout_meta.addWidget(self.lbl_dem_crs, 1, 1)
+
+        layout_meta.addWidget(QLabel("空间分辨率:"), 1, 2)
+        self.lbl_dem_res = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_res, 1, 3)
+
+        layout_meta.addWidget(QLabel("NoData 值:"), 2, 0)
+        self.lbl_dem_nodata = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_nodata, 2, 1)
+
+        layout_meta.addWidget(QLabel("识别基准面:"), 2, 2)
+        self.lbl_dem_detected_datum = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_detected_datum, 2, 3)
+
+        layout_meta.addWidget(QLabel("空间范围 (Bounds):"), 3, 0)
+        self.lbl_dem_bounds = QLabel("-")
+        layout_meta.addWidget(self.lbl_dem_bounds, 3, 1, 1, 3)
+
+        layout_in.addWidget(frame_meta, 1, 0, 1, 4)
+
+        # 双重转换告警提示卡片 (Double-Conversion Guard)
+        self.frame_dem_warning = QFrame()
+        self.frame_dem_warning.setStyleSheet("background-color: #451a03; border: 1px solid #f59e0b; border-radius: 6px; padding: 8px;")
+        layout_warn = QHBoxLayout(self.frame_dem_warning)
+        layout_warn.setContentsMargins(8, 4, 8, 4)
+        self.lbl_dem_warning = QLabel()
+        self.lbl_dem_warning.setStyleSheet("color: #fef08a; font-size: 12px; line-height: 1.4;")
+        self.lbl_dem_warning.setWordWrap(True)
+        layout_warn.addWidget(self.lbl_dem_warning)
+        self.frame_dem_warning.setVisible(False)
+        layout_in.addWidget(self.frame_dem_warning, 2, 0, 1, 4)
+
+        layout_single.addWidget(grp_in)
+
+        # 1.2 转换科学范式与参数配置
+        grp_params = QGroupBox("2. 转换科学范式与参数配置 (Seeger & Minderhoud, Nature, 2026 理论范式改编)")
+        layout_params = QGridLayout(grp_params)
+        layout_params.setSpacing(8)
+
+        layout_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
+        combo_target_datum = QComboBox()
+        combo_target_datum.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
+        combo_target_datum.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        self._make_combo_responsive(combo_target_datum)
+        combo_target_datum.setEnabled(False)
+        layout_params.addWidget(combo_target_datum, 0, 1, 1, 3)
+
+        layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
+        combo_mdt_source = QComboBox()
+        combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT", "cnes_cls22")
+        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认 100 km, 可配置 0–500 km)")
+        self._make_combo_responsive(combo_mdt_source)
+        combo_mdt_source.setEnabled(False)
+        layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
+
+        layout_params.addWidget(QLabel("沿岸外推距离上限:"), 2, 0)
+        self.spin_dem_max_dist = QDoubleSpinBox()
+        self.spin_dem_max_dist.setRange(0.0, 500.0)
+        self.spin_dem_max_dist.setValue(100.0)
+        self.spin_dem_max_dist.setSingleStep(10.0)
+        self.spin_dem_max_dist.setSuffix(" km")
+        self.spin_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
+        layout_params.addWidget(self.spin_dem_max_dist, 2, 1)
+
+        layout_params.addWidget(QLabel("2D 分块流式大小:"), 2, 2)
+        self.spin_dem_block_size = QSpinBox()
+        self.spin_dem_block_size.setRange(64, 4096)
+        self.spin_dem_block_size.setValue(512)
+        self.spin_dem_block_size.setSingleStep(64)
+        self.spin_dem_block_size.setSuffix(" px")
+        layout_params.addWidget(self.spin_dem_block_size, 2, 3)
+
+        self.chk_dem_apply_deltan = QCheckBox("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 闭合改正)")
+        self.chk_dem_apply_deltan.setToolTip("包含高程异常差值改正 ΔN (GOCO06s/EIGEN-6C4 与 EGM2008 闭合改正)")
+        self.chk_dem_apply_deltan.setChecked(True)
+        self.chk_dem_apply_deltan.setEnabled(False)
+        layout_params.addWidget(self.chk_dem_apply_deltan, 3, 0, 1, 4)
+
+        self.chk_dem_save_qc = QCheckBox("保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask)")
+        self.chk_dem_save_qc.setChecked(False)
+        self.chk_dem_save_qc.stateChanged.connect(self._on_dem_save_qc_toggled)
+        layout_params.addWidget(self.chk_dem_save_qc, 4, 0, 1, 4)
+
+        layout_single.addWidget(grp_params)
+
+        # 1.3 输出路径配置与任务控制
+        grp_exec = QGroupBox("3. 输出路径配置与任务执行")
+        layout_exec = QGridLayout(grp_exec)
+        layout_exec.setSpacing(8)
+
+        layout_exec.addWidget(QLabel("输出 DEM_MSL 文件:"), 0, 0)
+        self.edit_dem_output = QLineEdit()
+        self.edit_dem_output.setPlaceholderText("输出 DEM_MSL GeoTIFF 路径 (默认: <输入路径>_MSL.tif)...")
+        self.edit_dem_output.setMinimumWidth(0)
+        self.edit_dem_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_output.textChanged.connect(lambda t: self.edit_dem_output.setToolTip(t))
+        layout_exec.addWidget(self.edit_dem_output, 0, 1)
+
+        btn_browse_out = QPushButton("浏览...")
+        btn_browse_out.setObjectName("btn_secondary")
+        btn_browse_out.clicked.connect(self._browse_dem_output)
+        layout_exec.addWidget(btn_browse_out, 0, 2)
+
+        self.lbl_dem_qc_output = QLabel("输出 QC 掩膜文件:")
+        layout_exec.addWidget(self.lbl_dem_qc_output, 1, 0)
+        self.edit_dem_qc_output = QLineEdit()
+        self.edit_dem_qc_output.setPlaceholderText("输出 QC 掩膜 GeoTIFF 路径...")
+        self.edit_dem_qc_output.setMinimumWidth(0)
+        self.edit_dem_qc_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_dem_qc_output.textChanged.connect(lambda t: self.edit_dem_qc_output.setToolTip(t))
+        layout_exec.addWidget(self.edit_dem_qc_output, 1, 1)
+
+        self.btn_browse_dem_qc = QPushButton("浏览...")
+        self.btn_browse_dem_qc.setObjectName("btn_secondary")
+        self.btn_browse_dem_qc.clicked.connect(self._browse_dem_qc_output)
+        layout_exec.addWidget(self.btn_browse_dem_qc, 1, 2)
+
+        self.lbl_dem_qc_output.setVisible(False)
+        self.edit_dem_qc_output.setVisible(False)
+        self.btn_browse_dem_qc.setVisible(False)
+
+        # 执行与取消按钮
+        btn_box = QHBoxLayout()
+        self.btn_run_dem_convert = QPushButton("🚀 开始 DEM 基准转换 (EGM2008 → MSL)")
+        self.btn_run_dem_convert.setFixedHeight(40)
+        self.btn_run_dem_convert.setStyleSheet("background-color: #059669; color: white; font-weight: bold; font-size: 13px;")
+        self.btn_run_dem_convert.clicked.connect(self._run_dem_conversion)
+
+        self.btn_cancel_dem_convert = QPushButton("🛑 取消任务")
+        self.btn_cancel_dem_convert.setFixedHeight(40)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.btn_cancel_dem_convert.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_cancel_dem_convert.clicked.connect(self._cancel_dem_conversion)
+
+        btn_box.addWidget(self.btn_run_dem_convert, stretch=3)
+        btn_box.addWidget(self.btn_cancel_dem_convert, stretch=1)
+        layout_exec.addLayout(btn_box, 2, 0, 1, 3)
+
+        self.prog_dem_convert = QProgressBar()
+        self.prog_dem_convert.setValue(0)
+        self.prog_dem_convert.setTextVisible(True)
+        layout_exec.addWidget(self.prog_dem_convert, 3, 0, 1, 3)
+
+        self.lbl_dem_status = QLabel("就绪 - 请选择输入 DEM (EGM2008) 影像并配置转换参数")
+        self.lbl_dem_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_exec.addWidget(self.lbl_dem_status, 4, 0, 1, 3)
+
+        layout_single.addWidget(grp_exec)
+
+        # 1.4 转换结果摘要与下游分析直通卡片
+        self.grp_dem_results = QGroupBox("4. 转换结果摘要与下游分析直通")
+        layout_res = QVBoxLayout(self.grp_dem_results)
+        layout_res.setSpacing(10)
+
+        frame_summary = QFrame()
+        frame_summary.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 8px;")
+        layout_sum = QGridLayout(frame_summary)
+        layout_sum.setSpacing(6)
+
+        layout_sum.addWidget(QLabel("产物文件路径:"), 0, 0)
+        self.lbl_res_dem_path = QLabel("-")
+        self.lbl_res_dem_path.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_sum.addWidget(self.lbl_res_dem_path, 0, 1, 1, 3)
+
+        layout_sum.addWidget(QLabel("栅格规格:"), 1, 0)
+        self.lbl_res_dem_dims = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_dims, 1, 1)
+
+        layout_sum.addWidget(QLabel("有效 DEM 像元:"), 1, 2)
+        self.lbl_res_dem_valid = QLabel("-")
+        self.lbl_res_dem_valid.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_sum.addWidget(self.lbl_res_dem_valid, 1, 3)
+
+        layout_sum.addWidget(QLabel("大洋双线性像元:"), 2, 0)
+        self.lbl_res_dem_native = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_native, 2, 1)
+
+        layout_sum.addWidget(QLabel("沿岸 3D-IDW 外推:"), 2, 2)
+        self.lbl_res_dem_extrap = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_extrap, 2, 3)
+
+        layout_sum.addWidget(QLabel("超出门禁 / NoData:"), 3, 0)
+        self.lbl_res_dem_nodata = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_nodata, 3, 1)
+
+        layout_sum.addWidget(QLabel("执行耗时:"), 3, 2)
+        self.lbl_res_dem_elapsed = QLabel("-")
+        layout_sum.addWidget(self.lbl_res_dem_elapsed, 3, 3)
+
+        layout_res.addWidget(frame_summary)
+
+        # 直通操作按钮
+        box_handoff = QHBoxLayout()
+        self.btn_handoff_inund = QPushButton("📊 将此 DEM_MSL 载入单影像淹没频率分析")
+        self.btn_handoff_inund.setFixedHeight(38)
+        self.btn_handoff_inund.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_handoff_inund.clicked.connect(self._handoff_to_inundation)
+
+        self.btn_handoff_exp = QPushButton("⏳ 将此 DEM_MSL 载入单影像露出时间分析")
+        self.btn_handoff_exp.setFixedHeight(38)
+        self.btn_handoff_exp.setStyleSheet("background-color: #0d9488; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_handoff_exp.clicked.connect(self._handoff_to_exposure)
+
+        self.btn_dem_open_folder = QPushButton("📂 打开所在文件夹")
+        self.btn_dem_open_folder.setFixedHeight(38)
+        self.btn_dem_open_folder.setObjectName("btn_secondary")
+        self.btn_dem_open_folder.clicked.connect(self._open_dem_output_folder)
+
+        box_handoff.addWidget(self.btn_handoff_inund, stretch=2)
+        box_handoff.addWidget(self.btn_handoff_exp, stretch=2)
+        box_handoff.addWidget(self.btn_dem_open_folder, stretch=1)
+        layout_res.addLayout(box_handoff)
+
+        layout_single.addWidget(self.grp_dem_results)
+        self.grp_dem_results.setVisible(False)
+
+        layout_main.addWidget(self.widget_dem_single)
+
+        # ==================== 2. 批量 DEM 目录转换面板 (v1.7.1 新增) ====================
+        self.widget_dem_batch = QWidget()
+        layout_batch = QVBoxLayout(self.widget_dem_batch)
+        layout_batch.setContentsMargins(0, 0, 0, 0)
+        layout_batch.setSpacing(12)
+
+        # 2.1 批量输入与输出目录
+        grp_batch_dirs = QGroupBox("1. 批量输入与输出目录 / Batch Directories")
+        layout_batch_dirs = QGridLayout(grp_batch_dirs)
+        layout_batch_dirs.setSpacing(8)
+
+        layout_batch_dirs.addWidget(QLabel("输入 DEM 文件夹:"), 0, 0)
+        self.edit_batch_dem_input = QLineEdit()
+        self.edit_batch_dem_input.setPlaceholderText("选择包含 EGM2008 DEM 瓦片的目录 (支持递归扫描子目录)...")
+        self.edit_batch_dem_input.setMinimumWidth(0)
+        self.edit_batch_dem_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_batch_dem_input.textChanged.connect(lambda t: self.edit_batch_dem_input.setToolTip(t))
+        layout_batch_dirs.addWidget(self.edit_batch_dem_input, 0, 1)
+
+        self.btn_browse_batch_dem_in = QPushButton("浏览目录...")
+        self.btn_browse_batch_dem_in.setObjectName("btn_secondary")
+        self.btn_browse_batch_dem_in.clicked.connect(self._browse_batch_dem_input)
+        layout_batch_dirs.addWidget(self.btn_browse_batch_dem_in, 0, 2)
+
+        self.btn_scan_batch_dem = QPushButton("🔍 扫描 DEM 目录")
+        self.btn_scan_batch_dem.setObjectName("btn_secondary")
+        self.btn_scan_batch_dem.clicked.connect(lambda: self._scan_batch_dem_folder())
+        layout_batch_dirs.addWidget(self.btn_scan_batch_dem, 0, 3)
+
+        self.lbl_batch_dem_scan_status = QLabel("尚未扫描目录。请选择输入文件夹并点击扫描。")
+        self.lbl_batch_dem_scan_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_batch_dirs.addWidget(self.lbl_batch_dem_scan_status, 1, 0, 1, 4)
+
+        layout_batch_dirs.addWidget(QLabel("输出 DEM_MSL 文件夹:"), 2, 0)
+        self.edit_batch_dem_output = QLineEdit()
+        self.edit_batch_dem_output.setPlaceholderText("输出文件夹路径 (默认: <输入目录>/DEM_MSL_output)...")
+        self.edit_batch_dem_output.setMinimumWidth(0)
+        self.edit_batch_dem_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_batch_dem_output.textChanged.connect(lambda t: self.edit_batch_dem_output.setToolTip(t))
+        layout_batch_dirs.addWidget(self.edit_batch_dem_output, 2, 1)
+
+        self.btn_browse_batch_dem_out = QPushButton("更改目录...")
+        self.btn_browse_batch_dem_out.setObjectName("btn_secondary")
+        self.btn_browse_batch_dem_out.clicked.connect(self._browse_batch_dem_output)
+        layout_batch_dirs.addWidget(self.btn_browse_batch_dem_out, 2, 2)
+
+        layout_batch.addWidget(grp_batch_dirs)
+
+        # 2.2 批量参数与运行策略
+        grp_batch_params = QGroupBox("2. 批量转换参数与策略 / Parameters & Policies")
+        layout_batch_params = QGridLayout(grp_batch_params)
+        layout_batch_params.setSpacing(8)
+
+        layout_batch_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
+        combo_batch_target = QComboBox()
+        combo_batch_target.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
+        combo_batch_target.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        self._make_combo_responsive(combo_batch_target)
+        combo_batch_target.setEnabled(False)
+        layout_batch_params.addWidget(combo_batch_target, 0, 1, 1, 3)
+
+        layout_batch_params.addWidget(QLabel("沿岸外推距离上限:"), 1, 0)
+        self.spin_batch_dem_max_dist = QDoubleSpinBox()
+        self.spin_batch_dem_max_dist.setRange(0.0, 500.0)
+        self.spin_batch_dem_max_dist.setValue(100.0)
+        self.spin_batch_dem_max_dist.setSingleStep(10.0)
+        self.spin_batch_dem_max_dist.setSuffix(" km")
+        self.spin_batch_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
+        layout_batch_params.addWidget(self.spin_batch_dem_max_dist, 1, 1)
+
+        layout_batch_params.addWidget(QLabel("2D 分块流式大小:"), 1, 2)
+        self.spin_batch_dem_block_size = QSpinBox()
+        self.spin_batch_dem_block_size.setRange(64, 4096)
+        self.spin_batch_dem_block_size.setValue(512)
+        self.spin_batch_dem_block_size.setSingleStep(64)
+        self.spin_batch_dem_block_size.setSuffix(" px")
+        layout_batch_params.addWidget(self.spin_batch_dem_block_size, 1, 3)
+
+        layout_batch_params.addWidget(QLabel("并行工作线程:"), 2, 0)
+        self.spin_batch_dem_workers = QSpinBox()
+        self.spin_batch_dem_workers.setRange(1, 16)
+        self.spin_batch_dem_workers.setValue(1)
+        self.spin_batch_dem_workers.setToolTip("推荐保持 1（单瓦片顺序流式），确保最低内存占用与高并发隔离。")
+        layout_batch_params.addWidget(self.spin_batch_dem_workers, 2, 1)
+
+        self.chk_batch_dem_resume = QCheckBox("断点恢复 (Resume, 自动跳过已有完整产物并保留清单)")
+        self.chk_batch_dem_resume.setChecked(True)
+        layout_batch_params.addWidget(self.chk_batch_dem_resume, 3, 0, 1, 4)
+
+        self.chk_batch_dem_overwrite = QCheckBox("强制覆盖 (Overwrite, 强制重新转换所有瓦片)")
+        self.chk_batch_dem_overwrite.setChecked(False)
+        layout_batch_params.addWidget(self.chk_batch_dem_overwrite, 4, 0, 1, 4)
+
+        self.chk_batch_dem_save_qc = QCheckBox("保存每幅瓦片的转换质量控制掩膜 GeoTIFF (Conversion QC Mask)")
+        self.chk_batch_dem_save_qc.setChecked(False)
+        layout_batch_params.addWidget(self.chk_batch_dem_save_qc, 5, 0, 1, 4)
+
+        layout_batch.addWidget(grp_batch_params)
+
+        # 2.3 批量执行与实时监控
+        grp_batch_exec = QGroupBox("3. 批量执行控制与进度 / Execution & Progress")
+        layout_batch_exec = QGridLayout(grp_batch_exec)
+        layout_batch_exec.setSpacing(8)
+
+        btn_batch_box = QHBoxLayout()
+        self.btn_run_batch_dem = QPushButton("🚀 开始批量 DEM 基准转换")
+        self.btn_run_batch_dem.setFixedHeight(40)
+        self.btn_run_batch_dem.setStyleSheet("background-color: #059669; color: white; font-weight: bold; font-size: 13px;")
+        self.btn_run_batch_dem.clicked.connect(self._run_batch_dem_conversion)
+
+        self.btn_cancel_batch_dem = QPushButton("🛑 取消任务")
+        self.btn_cancel_batch_dem.setFixedHeight(40)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.btn_cancel_batch_dem.setStyleSheet("background-color: #ef4444; color: white; font-weight: bold;")
+        self.btn_cancel_batch_dem.clicked.connect(self._cancel_batch_dem_conversion)
+
+        btn_batch_box.addWidget(self.btn_run_batch_dem, stretch=3)
+        btn_batch_box.addWidget(self.btn_cancel_batch_dem, stretch=1)
+        layout_batch_exec.addLayout(btn_batch_box, 0, 0, 1, 4)
+
+        self.prog_batch_dem_overall = QProgressBar()
+        self.prog_batch_dem_overall.setValue(0)
+        self.prog_batch_dem_overall.setTextVisible(True)
+        layout_batch_exec.addWidget(self.prog_batch_dem_overall, 1, 0, 1, 4)
+
+        self.lbl_batch_dem_status = QLabel("就绪 - 请选择输入文件夹并开始批量转换")
+        self.lbl_batch_dem_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout_batch_exec.addWidget(self.lbl_batch_dem_status, 2, 0, 1, 4)
+
+        # 统计指标卡片
+        frame_batch_stats = QFrame()
+        frame_batch_stats.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 6px;")
+        layout_bstats = QGridLayout(frame_batch_stats)
+        layout_bstats.setSpacing(6)
+
+        layout_bstats.addWidget(QLabel("总瓦片数:"), 0, 0)
+        self.lbl_batch_dem_stat_total = QLabel("0")
+        self.lbl_batch_dem_stat_total.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_total, 0, 1)
+
+        layout_bstats.addWidget(QLabel("当前处理:"), 0, 2)
+        self.lbl_batch_dem_stat_current = QLabel("-")
+        self.lbl_batch_dem_stat_current.setStyleSheet("font-weight: bold; color: #f1f5f9;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_current, 0, 3)
+
+        layout_bstats.addWidget(QLabel("转换成功:"), 1, 0)
+        self.lbl_batch_dem_stat_success = QLabel("0")
+        self.lbl_batch_dem_stat_success.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_success, 1, 1)
+
+        layout_bstats.addWidget(QLabel("转换失败:"), 1, 2)
+        self.lbl_batch_dem_stat_failed = QLabel("0")
+        self.lbl_batch_dem_stat_failed.setStyleSheet("font-weight: bold; color: #ef4444;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_failed, 1, 3)
+
+        layout_bstats.addWidget(QLabel("跳过 (已是MSL):"), 2, 0)
+        self.lbl_batch_dem_stat_skipped_msl = QLabel("0")
+        self.lbl_batch_dem_stat_skipped_msl.setStyleSheet("font-weight: bold; color: #facc15;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_skipped_msl, 2, 1)
+
+        layout_bstats.addWidget(QLabel("跳过 (断点恢复):"), 2, 2)
+        self.lbl_batch_dem_stat_skipped_resume = QLabel("0")
+        self.lbl_batch_dem_stat_skipped_resume.setStyleSheet("font-weight: bold; color: #a78bfa;")
+        layout_bstats.addWidget(self.lbl_batch_dem_stat_skipped_resume, 2, 3)
+
+        layout_batch_exec.addWidget(frame_batch_stats, 3, 0, 1, 4)
+
+        layout_batch.addWidget(grp_batch_exec)
+
+        # 2.4 批量结果与下游直通
+        self.grp_batch_dem_results = QGroupBox("4. 批量结果清单与下游分析直通")
+        layout_batch_res = QVBoxLayout(self.grp_batch_dem_results)
+        layout_batch_res.setSpacing(10)
+
+        frame_batch_summary = QFrame()
+        frame_batch_summary.setStyleSheet("background-color: #1a1d24; border: 1px solid #334155; border-radius: 6px; padding: 8px;")
+        layout_bsum = QGridLayout(frame_batch_summary)
+        layout_bsum.setSpacing(6)
+
+        layout_bsum.addWidget(QLabel("清单文件路径:"), 0, 0)
+        self.lbl_batch_dem_manifest_csv = QLabel("-")
+        self.lbl_batch_dem_manifest_csv.setStyleSheet("font-weight: bold; color: #38bdf8;")
+        layout_bsum.addWidget(self.lbl_batch_dem_manifest_csv, 0, 1, 1, 3)
+
+        layout_bsum.addWidget(QLabel("总执行耗时:"), 1, 0)
+        self.lbl_batch_dem_elapsed = QLabel("-")
+        self.lbl_batch_dem_elapsed.setStyleSheet("font-weight: bold; color: #4ade80;")
+        layout_bsum.addWidget(self.lbl_batch_dem_elapsed, 1, 1)
+
+        layout_batch_res.addWidget(frame_batch_summary)
+
+        box_batch_handoff = QHBoxLayout()
+        self.btn_batch_dem_open_out = QPushButton("📂 打开输出文件夹")
+        self.btn_batch_dem_open_out.setFixedHeight(38)
+        self.btn_batch_dem_open_out.setObjectName("btn_secondary")
+        self.btn_batch_dem_open_out.clicked.connect(self._open_batch_dem_output_folder)
+
+        self.btn_batch_dem_open_manifest = QPushButton("📄 查看清单 (Manifest CSV)")
+        self.btn_batch_dem_open_manifest.setFixedHeight(38)
+        self.btn_batch_dem_open_manifest.setObjectName("btn_secondary")
+        self.btn_batch_dem_open_manifest.clicked.connect(self._open_batch_dem_manifest)
+
+        self.btn_batch_dem_handoff_batch_raster = QPushButton("📊 将输出目录载入批量潮间带栅格解算")
+        self.btn_batch_dem_handoff_batch_raster.setFixedHeight(38)
+        self.btn_batch_dem_handoff_batch_raster.setStyleSheet("background-color: #2563eb; color: white; font-weight: bold; font-size: 12px; padding: 6px 12px;")
+        self.btn_batch_dem_handoff_batch_raster.clicked.connect(self._handoff_batch_dem_to_batch_raster)
+
+        box_batch_handoff.addWidget(self.btn_batch_dem_open_out, stretch=1)
+        box_batch_handoff.addWidget(self.btn_batch_dem_open_manifest, stretch=1)
+        box_batch_handoff.addWidget(self.btn_batch_dem_handoff_batch_raster, stretch=2)
+        layout_batch_res.addLayout(box_batch_handoff)
+
+        layout_batch.addWidget(self.grp_batch_dem_results)
+        self.grp_batch_dem_results.setVisible(False)
+
+        layout_main.addWidget(self.widget_dem_batch)
+        self.widget_dem_batch.setVisible(False)
+
+        layout_main.addStretch()
+
+        scroll.setWidget(panel)
+        tab_layout = QVBoxLayout(self.tab_dem_convert)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll)
+
+    def _browse_dem_input(self):
+        f, _ = QFileDialog.getOpenFileName(
+            self, "选择输入 DEM 影像 (EGM2008 基准)", "", "GeoTIFF (*.tif *.tiff *.geotiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_input.setText(f)
+
+    def _browse_dem_output(self):
+        cur = self.edit_dem_output.text().strip()
+        f, _ = QFileDialog.getSaveFileName(
+            self, "保存输出 DEM_MSL 影像", cur, "GeoTIFF (*.tif *.tiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_output.setText(f)
+
+    def _browse_dem_qc_output(self):
+        cur = self.edit_dem_qc_output.text().strip()
+        f, _ = QFileDialog.getSaveFileName(
+            self, "保存 QC 掩膜影像", cur, "GeoTIFF (*.tif *.tiff);;All Files (*.*)"
+        )
+        if f:
+            self.edit_dem_qc_output.setText(f)
+
+    def _on_dem_save_qc_toggled(self, state):
+        is_checked = (state == Qt.CheckState.Checked.value or state == True or state == 2)
+        self.lbl_dem_qc_output.setVisible(is_checked)
+        self.edit_dem_qc_output.setVisible(is_checked)
+        self.btn_browse_dem_qc.setVisible(is_checked)
+
+    def _on_dem_input_changed(self, text):
+        path = text.strip()
+        if os.path.exists(path) and os.path.isfile(path):
+            base, ext = os.path.splitext(path)
+            self.edit_dem_output.setText(f"{base}_MSL{ext}")
+            self.edit_dem_qc_output.setText(f"{base}_MSL_qc{ext}")
+            self._inspect_dem_input_ui(path)
+
+    def _inspect_dem_input_ui(self, target_path=None):
+        path = target_path if isinstance(target_path, str) else self.edit_dem_input.text().strip()
+        if not path or not os.path.exists(path):
+            QMessageBox.warning(self, "文件无效", "请选择有效的 DEM GeoTIFF 文件")
+            return
+        try:
+            import rasterio
+            with rasterio.open(path) as src:
+                w, h = src.width, src.height
+                bands = src.count
+                crs = src.crs
+                res = src.res
+                nodata = src.nodata
+                b = src.bounds
+                tags = src.tags()
+
+            self.lbl_dem_dims.setText(f"{w} × {h} (总计 {w*h:,} 像元)")
+            if bands == 1:
+                self.lbl_dem_bands.setText(f"1 波段 (单波段高程 DEM - 正常)")
+                self.lbl_dem_bands.setStyleSheet("font-weight: bold; color: #4ade80;")
+            else:
+                self.lbl_dem_bands.setText(f"⚠️ {bands} 波段 (DEM 通常必须为单波段)")
+                self.lbl_dem_bands.setStyleSheet("font-weight: bold; color: #f59e0b;")
+
+            crs_str = f"{crs.to_string()}" if crs else "未定义 (None)"
+            if crs and crs.is_projected:
+                self.lbl_dem_crs.setText(f"投影坐标系: {crs_str}")
+            elif crs:
+                self.lbl_dem_crs.setText(f"地理坐标系: {crs_str}")
+            else:
+                self.lbl_dem_crs.setText(f"⚠️ 坐标系未定义")
+            self.lbl_dem_crs.setStyleSheet("font-weight: bold; color: #a78bfa;")
+
+            is_proj = crs.is_projected if crs else False
+            unit = "米" if is_proj else "度"
+            self.lbl_dem_res.setText(f"({res[0]:.6g}, {res[1]:.6g}) [单位: {unit}]")
+            self.lbl_dem_nodata.setText(f"{nodata}" if nodata is not None else "未指定 (None)")
+            self.lbl_dem_bounds.setText(f"[{b.left:.4f}, {b.bottom:.4f}] -> [{b.right:.4f}, {b.top:.4f}]")
+
+            # 双重转换检测 (Double Conversion Guard)
+            datum_tag = str(tags.get('DATUM', '')).upper()
+            target_tag = str(tags.get('TARGET_VERTICAL_DATUM', '')).upper()
+            ref_tag = str(tags.get('ANALYSIS_REFERENCE', '')).upper()
+            fn_upper = os.path.basename(path).upper()
+            is_already_msl = (datum_tag == 'MSL' or target_tag == 'MSL' or ref_tag == 'MSL' or '_MSL' in fn_upper)
+
+            if is_already_msl:
+                self.frame_dem_warning.setVisible(True)
+                tag_info = f"DATUM={datum_tag}" if datum_tag else "文件名含 _MSL"
+                self.lbl_dem_warning.setText(
+                    f"⚠️ 提示: 输入 DEM 元数据或文件名显示其已处于 MSL 局部平均海平面基准 ({tag_info})。\n"
+                    f"无需重复执行基准转换！您可以直接点击下方直通按钮将该 DEM 载入淹没频率或露出时间分析，"
+                    f"亦可点击下方的强制重新转换按钮。"
+                )
+                self.lbl_dem_detected_datum.setText("MSL (局部平均海平面 - 已是MSL基准)")
+                self.lbl_dem_detected_datum.setStyleSheet("color: #4ade80; font-weight: bold;")
+                self.btn_run_dem_convert.setText("⚠️ 强制重新转换 DEM 基准 (Force Re-convert)")
+                # 展现直通卡片，方便用户直接使用当前 DEM
+                self.grp_dem_results.setVisible(True)
+                self.lbl_res_dem_path.setText(path)
+                self.lbl_res_dem_dims.setText(f"{w} × {h} ({w*h:,} 像元)")
+                self.lbl_res_dem_valid.setText("已就绪 (无需转换)")
+                self.lbl_res_dem_native.setText("-")
+                self.lbl_res_dem_extrap.setText("-")
+                self.lbl_res_dem_nodata.setText(f"{nodata}")
+                self.lbl_res_dem_elapsed.setText("0.00 s (已存在产物)")
+            else:
+                self.frame_dem_warning.setVisible(False)
+                self.lbl_dem_detected_datum.setText("EGM2008 (大地水准面正高 - 待转换)")
+                self.lbl_dem_detected_datum.setStyleSheet("color: #38bdf8; font-weight: bold;")
+                self.btn_run_dem_convert.setText("🚀 开始 DEM 基准转换 (EGM2008 → MSL)")
+                self.btn_run_dem_convert.setEnabled(True)
+
+            self.status_bar.showMessage(f"已就绪: 已检查输入 DEM 元数据 ({os.path.basename(path)})")
+        except Exception as e:
+            QMessageBox.critical(self, "检查失败", f"无法解析 DEM GeoTIFF 元数据:\n{e}")
+
+    def _run_dem_conversion(self):
+        in_path = self.edit_dem_input.text().strip()
+        out_path = self.edit_dem_output.text().strip()
+        if not in_path or not os.path.exists(in_path):
+            QMessageBox.warning(self, "输入无效", "请选择有效的输入 DEM GeoTIFF 文件。")
+            return
+        if not out_path:
+            QMessageBox.warning(self, "输出路径无效", "请指定输出 DEM_MSL GeoTIFF 路径。")
+            return
+
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            max_dist_km = validate_mdt_extrapolation_distance(float(self.spin_dem_max_dist.value()))
+        except ValueError as e:
+            QMessageBox.warning(self, "参数错误", str(e))
+            return
+
+        block_size = int(self.spin_dem_block_size.value())
+        save_qc = self.chk_dem_save_qc.isChecked()
+        qc_out = self.edit_dem_qc_output.text().strip() if save_qc else None
+
+        self.btn_run_dem_convert.setEnabled(False)
+        self.btn_cancel_dem_convert.setEnabled(True)
+        self.prog_dem_convert.setValue(0)
+        self.lbl_dem_status.setText("准备开始 DEM 垂直基准转换...")
+        self.status_bar.showMessage("DEM 垂直基准转换进行中...")
+
+        params = {
+            'input_path': in_path,
+            'output_path': out_path,
+            'qc_output_path': qc_out,
+            'max_dist_km': max_dist_km,
+            'block_size': block_size,
+            'allow_overwrite': True,
+            'save_qc': save_qc
+        }
+
+        self.dem_worker = DEMDatumConversionWorker(params)
+        self.dem_worker.progress.connect(self._on_dem_conversion_progress)
+        self.dem_worker.finished.connect(self._on_dem_conversion_finished)
+        self.dem_worker.error.connect(self._on_dem_conversion_error)
+        self.dem_worker.cancelled.connect(self._on_dem_conversion_cancelled)
+        self.dem_worker.start()
+
+    def _cancel_dem_conversion(self):
+        if self.dem_worker and self.dem_worker.isRunning():
+            self.lbl_dem_status.setText("正在取消 DEM 基准转换任务...")
+            self.btn_cancel_dem_convert.setEnabled(False)
+            self.dem_worker.cancel()
+
+    def _on_dem_conversion_progress(self, percent, msg):
+        self.prog_dem_convert.setValue(percent)
+        self.lbl_dem_status.setText(msg)
+
+    def _on_dem_conversion_finished(self, summary):
+        self.current_dem_summary = summary
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.prog_dem_convert.setValue(100)
+        self.lbl_dem_status.setText(f"基准转换成功完成！耗时: {summary.elapsed_seconds:.2f}s")
+        self.status_bar.showMessage(f"DEM 基准转换成功: {os.path.basename(summary.output_path)}")
+
+        # 展示结果卡片
+        self.grp_dem_results.setVisible(True)
+        self.lbl_res_dem_path.setText(summary.output_path)
+        self.lbl_res_dem_dims.setText(f"{summary.width} × {summary.height} ({summary.total_pixels:,} 像元)")
+        valid_pct = (summary.valid_dem_pixels / max(1, summary.total_pixels)) * 100.0
+        self.lbl_res_dem_valid.setText(f"{summary.valid_dem_pixels:,} ({valid_pct:.1f}%)")
+        native_pct = (summary.native_mdt_pixels / max(1, summary.valid_dem_pixels)) * 100.0
+        self.lbl_res_dem_native.setText(f"{summary.native_mdt_pixels:,} ({native_pct:.1f}%)")
+        extrap_pct = (summary.extrapolated_mdt_pixels / max(1, summary.valid_dem_pixels)) * 100.0
+        self.lbl_res_dem_extrap.setText(f"{summary.extrapolated_mdt_pixels:,} ({extrap_pct:.1f}%)")
+        self.lbl_res_dem_nodata.setText(f"{summary.nodata_pixels:,}")
+        self.lbl_res_dem_elapsed.setText(f"{summary.elapsed_seconds:.2f} s")
+
+    def _on_dem_conversion_error(self, err_msg):
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.lbl_dem_status.setText(f"转换失败: {err_msg}")
+        self.status_bar.showMessage("DEM 基准转换失败")
+        QMessageBox.critical(self, "转换失败", f"DEM 基准转换发生错误:\n{err_msg}")
+
+    def _on_dem_conversion_cancelled(self):
+        self.btn_run_dem_convert.setEnabled(True)
+        self.btn_cancel_dem_convert.setEnabled(False)
+        self.lbl_dem_status.setText("DEM 基准转换已被用户取消。")
+        self.status_bar.showMessage("DEM 基准转换已取消")
+
+    def _handoff_to_inundation(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            out_path = self.edit_dem_output.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            QMessageBox.warning(self, "文件未就绪", "转换后的 DEM_MSL 文件尚不存在，请先执行基准转换。")
+            return
+
+        self.tabs.setCurrentWidget(self.tab_raster)
+        self.edit_raster_input.setText(out_path)
+        idx_inund = self.combo_raster_mode.findData('inundation')
+        if idx_inund >= 0:
+            self.combo_raster_mode.setCurrentIndex(idx_inund)
+        idx_msl = self.combo_inund_datum.findData('msl')
+        if idx_msl >= 0:
+            self.combo_inund_datum.setCurrentIndex(idx_msl)
+        self._inspect_raster_ui(out_path)
+        self.status_bar.showMessage(f"已就绪: 已将转换后的 DEM_MSL 载入单影像淹没频率分析模式")
+
+    def _handoff_to_exposure(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            out_path = self.edit_dem_output.text().strip()
+        if not out_path or not os.path.exists(out_path):
+            QMessageBox.warning(self, "文件未就绪", "转换后的 DEM_MSL 文件尚不存在，请先执行基准转换。")
+            return
+
+        self.tabs.setCurrentWidget(self.tab_raster)
+        self.edit_raster_input.setText(out_path)
+        idx_exp = self.combo_raster_mode.findData('exposure')
+        if idx_exp >= 0:
+            self.combo_raster_mode.setCurrentIndex(idx_exp)
+        idx_msl = self.combo_inund_datum.findData('msl')
+        if idx_msl >= 0:
+            self.combo_inund_datum.setCurrentIndex(idx_msl)
+        self._inspect_raster_ui(out_path)
+        self.status_bar.showMessage(f"已就绪: 已将转换后的 DEM_MSL 载入单影像露出时间分析模式")
+
+    def _open_dem_output_folder(self):
+        out_path = self.lbl_res_dem_path.text().strip()
+        if not out_path:
+            out_path = self.edit_dem_output.text().strip()
+        folder = os.path.dirname(os.path.abspath(out_path)) if out_path else os.getcwd()
+        if os.path.exists(folder):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _on_dem_mode_toggled(self):
+        is_single = self.radio_dem_mode_single.isChecked()
+        self.widget_dem_single.setVisible(is_single)
+        self.widget_dem_batch.setVisible(not is_single)
+
+    def _browse_batch_dem_input(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输入 DEM 文件夹 (包含待转换的 EGM2008 DEM)")
+        if d:
+            self.edit_batch_dem_input.setText(d)
+            if not self.edit_batch_dem_output.text().strip():
+                self.edit_batch_dem_output.setText(os.path.join(d, "DEM_MSL_output"))
+            self._scan_batch_dem_folder(d)
+
+    def _browse_batch_dem_output(self):
+        d = QFileDialog.getExistingDirectory(self, "选择输出 DEM_MSL 保存文件夹")
+        if d:
+            self.edit_batch_dem_output.setText(d)
+
+    def _scan_batch_dem_folder(self, folder=None):
+        in_dir = folder or self.edit_batch_dem_input.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "目录无效", "请先选择有效的输入 DEM 文件夹。")
+            return
+        try:
+            from core.batch_datum_converter import scan_dem_directory
+            tiles = scan_dem_directory(in_dir, recursive=True)
+            count = len(tiles)
+            self.lbl_batch_dem_scan_status.setText(f"已发现 {count} 个待转换 DEM 影像瓦片 (*.tif)。")
+            self.lbl_batch_dem_scan_status.setStyleSheet("color: #4ade80; font-weight: bold;")
+            self.lbl_batch_dem_stat_total.setText(str(count))
+            self.lbl_batch_dem_status.setText(f"扫描完成: 发现 {count} 个 DEM 瓦片，就绪可转换。")
+            self.status_bar.showMessage(f"DEM 批量扫描完成: {count} 个待转换文件")
+        except Exception as e:
+            self.lbl_batch_dem_scan_status.setText(f"扫描异常: {e}")
+            self.lbl_batch_dem_scan_status.setStyleSheet("color: #ef4444;")
+            QMessageBox.critical(self, "扫描失败", f"扫描 DEM 文件夹失败:\n{e}")
+
+    def _run_batch_dem_conversion(self):
+        in_dir = self.edit_batch_dem_input.text().strip()
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if not in_dir or not os.path.exists(in_dir):
+            QMessageBox.warning(self, "输入目录无效", "请先选择有效的输入 DEM 文件夹。")
+            return
+        if not out_dir:
+            out_dir = os.path.join(in_dir, "DEM_MSL_output")
+            self.edit_batch_dem_output.setText(out_dir)
+
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            max_dist_km = validate_mdt_extrapolation_distance(float(self.spin_batch_dem_max_dist.value()))
+        except ValueError as e:
+            QMessageBox.warning(self, "参数错误", str(e))
+            return
+
+        block_size = int(self.spin_batch_dem_block_size.value())
+        workers = int(self.spin_batch_dem_workers.value())
+        resume = self.chk_batch_dem_resume.isChecked()
+        overwrite = self.chk_batch_dem_overwrite.isChecked()
+        write_qc = self.chk_batch_dem_save_qc.isChecked()
+
+        params = {
+            'input_dir': in_dir,
+            'output_dir': out_dir,
+            'max_dist_km': max_dist_km,
+            'block_size': block_size,
+            'workers': workers,
+            'resume': resume,
+            'overwrite': overwrite,
+            'write_qc': write_qc
+        }
+
+        self.btn_run_batch_dem.setEnabled(False)
+        self.btn_cancel_batch_dem.setEnabled(True)
+        self.prog_batch_dem_overall.setValue(0)
+        self.lbl_batch_dem_status.setText("准备开始批量 DEM 垂直基准转换...")
+        self.status_bar.showMessage("批量 DEM 垂直基准转换进行中...")
+
+        self.batch_dem_worker = BatchDEMDatumConversionWorker(params)
+        self.batch_dem_worker.progress.connect(self._on_batch_dem_progress)
+        self.batch_dem_worker.finished.connect(self._on_batch_dem_finished)
+        self.batch_dem_worker.error.connect(self._on_batch_dem_error)
+        self.batch_dem_worker.cancelled.connect(self._on_batch_dem_cancelled)
+        self.batch_dem_worker.start()
+
+    def _cancel_batch_dem_conversion(self):
+        if self.batch_dem_worker and self.batch_dem_worker.isRunning():
+            self.lbl_batch_dem_status.setText("正在取消批量 DEM 基准转换任务...")
+            self.btn_cancel_batch_dem.setEnabled(False)
+            self.batch_dem_worker.cancel()
+
+    def _on_batch_dem_progress(self, idx, total, cur_file, msg, stats):
+        pct = int((idx / max(1, total)) * 100) if total > 0 else 0
+        self.prog_batch_dem_overall.setValue(pct)
+        self.lbl_batch_dem_status.setText(msg)
+        self.lbl_batch_dem_stat_total.setText(str(stats.get("total", total)))
+        self.lbl_batch_dem_stat_current.setText(os.path.basename(cur_file))
+        self.lbl_batch_dem_stat_success.setText(str(stats.get("success", 0)))
+        self.lbl_batch_dem_stat_failed.setText(str(stats.get("failed", 0)))
+        self.lbl_batch_dem_stat_skipped_msl.setText(str(stats.get("skipped_msl", 0)))
+        self.lbl_batch_dem_stat_skipped_resume.setText(str(stats.get("skipped_resume", 0)))
+
+    def _on_batch_dem_finished(self, summary):
+        self.current_batch_dem_summary = summary
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.prog_batch_dem_overall.setValue(100)
+        self.lbl_batch_dem_status.setText(
+            f"批量转换完成！成功: {summary.success_count}, 失败: {summary.failed_count}, "
+            f"跳过(MSL): {summary.skipped_msl_count}, 跳过(Resume): {summary.skipped_resume_count}。"
+        )
+        self.status_bar.showMessage(f"批量 DEM 基准转换完成 (耗时: {summary.elapsed_seconds:.2f}s)")
+
+        self.grp_batch_dem_results.setVisible(True)
+        self.lbl_batch_dem_manifest_csv.setText(summary.manifest_csv)
+        self.lbl_batch_dem_elapsed.setText(f"{summary.elapsed_seconds:.2f} s")
+
+    def _on_batch_dem_error(self, err_msg):
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.lbl_batch_dem_status.setText(f"批量转换异常: {err_msg}")
+        self.status_bar.showMessage("批量 DEM 基准转换失败")
+        QMessageBox.critical(self, "批量转换失败", f"批量 DEM 转换发生异常:\n{err_msg}")
+
+    def _on_batch_dem_cancelled(self):
+        self.btn_run_batch_dem.setEnabled(True)
+        self.btn_cancel_batch_dem.setEnabled(False)
+        self.lbl_batch_dem_status.setText("批量 DEM 转换已被用户取消。")
+        self.status_bar.showMessage("批量 DEM 基准转换已取消")
+
+    def _open_batch_dem_output_folder(self):
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if out_dir and os.path.exists(out_dir):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(out_dir)))
+
+    def _open_batch_dem_manifest(self):
+        csv_p = self.lbl_batch_dem_manifest_csv.text().strip()
+        if csv_p and os.path.exists(csv_p):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(csv_p)))
+
+    def _handoff_batch_dem_to_batch_raster(self):
+        out_dir = self.edit_batch_dem_output.text().strip()
+        if not out_dir or not os.path.exists(out_dir):
+            QMessageBox.warning(self, "输出目录不存在", "批量转换输出目录尚不存在，请先执行转换。")
+            return
+        # 切换到第5个选项卡 (批量潮间带栅格解算)
+        self.tabs.setCurrentIndex(4)
+        self.txt_batch_in_dir.setText(out_dir)
+        self._on_scan_batch_rasters()
+
+    def _setup_raster_tab(self):
+        scroll = QScrollArea(self.tab_raster)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        panel = QWidget()
+        panel.setMinimumWidth(0)
+        panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         layout_main = QVBoxLayout(panel)
         layout_main.setContentsMargins(10, 10, 10, 10)
         layout_main.setSpacing(12)
@@ -780,6 +1870,9 @@ class MainWindow(QMainWindow):
         layout_in.addWidget(QLabel("输入 GeoTIFF 文件:"), 0, 0)
         self.edit_raster_input = QLineEdit()
         self.edit_raster_input.setPlaceholderText("请选择具备有效坐标参考系 (CRS) 的 GeoTIFF 影像或 DEM...")
+        self.edit_raster_input.setMinimumWidth(0)
+        self.edit_raster_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_raster_input.textChanged.connect(lambda t: self.edit_raster_input.setToolTip(t))
         self.edit_raster_input.textChanged.connect(self._on_raster_input_changed)
         layout_in.addWidget(self.edit_raster_input, 0, 1)
 
@@ -833,6 +1926,7 @@ class MainWindow(QMainWindow):
         self.combo_raster_mode = QComboBox()
         self.combo_raster_mode.addItem("🌊 单时刻空间潮位 / 水面高程 (Snapshot Raster Mode)", "snapshot")
         self.combo_raster_mode.addItem("📊 潜在天文潮淹没频率 (Annual / Period Inundation Frequency)", "inundation")
+        self.combo_raster_mode.addItem("⏳ 潜在天文潮露出时间域分析 (Exposure Duration & Events)", "exposure")
         self.combo_raster_mode.currentIndexChanged.connect(self._on_raster_mode_changed)
         layout_mode.addWidget(self.combo_raster_mode, 0, 1)
 
@@ -926,21 +2020,36 @@ class MainWindow(QMainWindow):
 
         layout_inund.addWidget(QLabel("DEM基准面:"), 2, 2)
         self.combo_inund_datum = QComboBox()
-        self.combo_inund_datum.addItem("EGM2008 (大地水准面绝对正高)", "egm2008")
-        self.combo_inund_datum.addItem("MSL (相对平均海平面)", "msl")
+        self.combo_inund_datum.addItem("MSL (相对平均海平面 - v1.7推荐)", "msl")
+        self.combo_inund_datum.addItem("EGM2008 (相对 EGM2008 参考面 - 兼容模式)", "egm2008")
         self.combo_inund_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        self.combo_inund_datum.currentIndexChanged.connect(self._on_inund_datum_changed)
         layout_inund.addWidget(self.combo_inund_datum, 2, 3)
 
-        layout_inund.addWidget(QLabel("QC掩膜输出:"), 3, 0)
+        layout_inund.addWidget(QLabel("目标区域:"), 3, 0)
+        self.combo_inund_target_mode = QComboBox()
+        self.combo_inund_target_mode.addItem("潮间带模式 (intertidal - 推荐)", "intertidal")
+        self.combo_inund_target_mode.addItem("全域网格模式 (standard)", "standard")
+        self.combo_inund_target_mode.setToolTip("长周期栅格产品目标区域解算模式 (支持潜在淹没频率与潜在露出时长)")
+        self.combo_raster_target_mode = self.combo_inund_target_mode
+        layout_inund.addWidget(self.combo_inund_target_mode, 3, 1, 1, 3)
+
+        self.lbl_inund_qc = QLabel("QC掩膜输出:")
+        layout_inund.addWidget(self.lbl_inund_qc, 4, 0)
         self.edit_inund_qc = QLineEdit()
         self.edit_inund_qc.setPlaceholderText("留空则自动保存为 <主输出>_qc.tif")
-        layout_inund.addWidget(self.edit_inund_qc, 3, 1, 1, 2)
+        layout_inund.addWidget(self.edit_inund_qc, 4, 1, 1, 2)
 
-        btn_browse_qc = QPushButton("浏览...")
-        btn_browse_qc.setObjectName("btn_secondary")
-        btn_browse_qc.clicked.connect(self._browse_inund_qc)
-        layout_inund.addWidget(btn_browse_qc, 3, 3)
+        self.btn_browse_qc = QPushButton("浏览...")
+        self.btn_browse_qc.setObjectName("btn_secondary")
+        self.btn_browse_qc.clicked.connect(self._browse_inund_qc)
+        layout_inund.addWidget(self.btn_browse_qc, 4, 3)
+
+        self.lbl_inund_datum_hint = QLabel("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+        self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
+        self.lbl_inund_datum_hint.setWordWrap(True)
+        layout_inund.addWidget(self.lbl_inund_datum_hint, 5, 0, 1, 4)
 
         layout_params.addWidget(self.container_inund)
         self.container_inund.setVisible(False)
@@ -1001,9 +2110,13 @@ class MainWindow(QMainWindow):
         layout_exec = QGridLayout(grp_exec)
         layout_exec.setSpacing(8)
 
-        layout_exec.addWidget(QLabel("输出 GeoTIFF 文件:"), 0, 0)
+        self.lbl_raster_output = QLabel("输出 GeoTIFF 文件:")
+        layout_exec.addWidget(self.lbl_raster_output, 0, 0)
         self.edit_raster_output = QLineEdit()
         self.edit_raster_output.setPlaceholderText("输出 GeoTIFF 路径...")
+        self.edit_raster_output.setMinimumWidth(0)
+        self.edit_raster_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.edit_raster_output.textChanged.connect(lambda t: self.edit_raster_output.setToolTip(t))
         layout_exec.addWidget(self.edit_raster_output, 0, 1)
 
         btn_browse_out = QPushButton("浏览...")
@@ -1571,7 +2684,7 @@ class MainWindow(QMainWindow):
             export_dataframe(self.batch_result_df, path)
             QMessageBox.information(self, "导出成功", f"批量结果已导出至:\n{path}")
 
-    # ================= 空间栅格解算逻辑 (Raster Engine v1.4) =================
+    # ================= 空间栅格解算逻辑 (Raster Engine) =================
     def _on_raster_input_changed(self, text):
         path = text.strip()
         if os.path.exists(path) and os.path.isfile(path):
@@ -1583,6 +2696,9 @@ class MainWindow(QMainWindow):
         mode = self.combo_raster_mode.currentData()
         if mode == 'snapshot':
             self.edit_raster_output.setText(f"{base}_tide_snapshot{ext}")
+        elif mode == 'exposure':
+            exp_dir = f"{base}_CoastTideX_exposure"
+            self.edit_raster_output.setText(exp_dir)
         else:
             year = self.spin_inund_year.value() if self.combo_inund_time_mode.currentData() == 'year' else 'period'
             self.edit_raster_output.setText(f"{base}_inundation_{year}{ext}")
@@ -1594,9 +2710,15 @@ class MainWindow(QMainWindow):
             self.edit_raster_input.setText(f)
 
     def _browse_raster_output(self):
-        f, _ = QFileDialog.getSaveFileName(self, "指定输出 GeoTIFF 路径", self.edit_raster_output.text().strip() or "output.tif", "GeoTIFF (*.tif *.tiff)")
-        if f:
-            self.edit_raster_output.setText(f)
+        mode = self.combo_raster_mode.currentData()
+        if mode == 'exposure':
+            d = QFileDialog.getExistingDirectory(self, "指定 Exposure 7 项产物输出目录", self.edit_raster_output.text().strip() or "")
+            if d:
+                self.edit_raster_output.setText(d)
+        else:
+            f, _ = QFileDialog.getSaveFileName(self, "指定输出 GeoTIFF 路径", self.edit_raster_output.text().strip() or "output.tif", "GeoTIFF (*.tif *.tiff)")
+            if f:
+                self.edit_raster_output.setText(f)
 
     def _browse_inund_qc(self):
         f, _ = QFileDialog.getSaveFileName(self, "指定 QC 质量掩膜路径", self.edit_inund_qc.text().strip() or "output_qc.tif", "GeoTIFF (*.tif *.tiff)")
@@ -1624,6 +2746,24 @@ class MainWindow(QMainWindow):
             self.lbl_raster_nodata.setText(nodata_str)
             b = info.bounds
             self.lbl_raster_bounds.setText(f"[{b[0]:.4f}, {b[1]:.4f}] -> [{b[2]:.4f}, {b[3]:.4f}]")
+
+            # 检测输入 DEM 是否具有 MSL 基准标签 (v1.7 智能联动)
+            try:
+                import rasterio
+                with rasterio.open(path) as src_tags:
+                    chk_tags = src_tags.tags()
+                    datum_tag = str(chk_tags.get('DATUM', '')).upper()
+                    target_tag = str(chk_tags.get('TARGET_VERTICAL_DATUM', '')).upper()
+                    ref_tag = str(chk_tags.get('ANALYSIS_REFERENCE', '')).upper()
+                    fn_upper = os.path.basename(path).upper()
+                    if datum_tag == 'MSL' or target_tag == 'MSL' or ref_tag == 'MSL' or '_MSL' in fn_upper:
+                        idx_msl = self.combo_inund_datum.findData('msl')
+                        if idx_msl >= 0 and self.combo_inund_datum.currentIndex() != idx_msl:
+                            self.combo_inund_datum.setCurrentIndex(idx_msl)
+                        self.status_bar.showMessage(f"已检测到 MSL 基准 DEM ({os.path.basename(path)})，已自动切换为 MSL 模式")
+            except Exception:
+                pass
+
             self.status_bar.showMessage(f"已加载栅格元数据: {os.path.basename(path)}")
         except Exception as e:
             QMessageBox.critical(self, "检查失败", f"无法解析 GeoTIFF 元数据:\n{e}")
@@ -1631,9 +2771,27 @@ class MainWindow(QMainWindow):
     def _on_raster_mode_changed(self):
         mode = self.combo_raster_mode.currentData()
         is_snap = (mode == 'snapshot')
+        is_exp = (mode == 'exposure')
         self.container_snapshot.setVisible(is_snap)
         self.container_inund.setVisible(not is_snap)
         self.grp_grid.setVisible(not is_snap)
+
+        # 隐藏/显示 Inundation 独有的 QC 独立文件框
+        self.lbl_inund_qc.setVisible(not is_snap and not is_exp)
+        self.edit_inund_qc.setVisible(not is_snap and not is_exp)
+        self.btn_browse_qc.setVisible(not is_snap and not is_exp)
+
+        # 动态更新输出目标标签与占位提示
+        if is_exp:
+            self.lbl_raster_output.setText("输出产品目录 (Output Directory):")
+            self.edit_raster_output.setPlaceholderText("指定 Exposure 7 项产物输出目录 (如 <DEM_DIR>/<DEM_STEM>_CoastTideX_exposure)...")
+        elif is_snap:
+            self.lbl_raster_output.setText("输出 GeoTIFF 文件:")
+            self.edit_raster_output.setPlaceholderText("输出单时刻潮位 GeoTIFF 路径...")
+        else:
+            self.lbl_raster_output.setText("输出淹没频率 GeoTIFF:")
+            self.edit_raster_output.setPlaceholderText("输出潜在天文潮淹没频率 GeoTIFF 路径 (*_inundation_2024.tif)...")
+
         inp = self.edit_raster_input.text().strip()
         if inp:
             self._propose_raster_output(inp)
@@ -1651,6 +2809,17 @@ class MainWindow(QMainWindow):
         if inp:
             self._propose_raster_output(inp)
 
+    def _on_inund_datum_changed(self):
+        val = self.combo_inund_datum.currentData()
+        if val == 'msl':
+            self.lbl_inund_datum_hint.setText("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+            self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
+        elif val == 'egm2008':
+            self.lbl_inund_datum_hint.setText("⚠️ EGM2008 为兼容模式。v1.7 推荐先使用 [DEM 基准转换] 标签页将 DEM 转换至 MSL 基准，以消除沿岸潮位-高程系统偏差。")
+            self.lbl_inund_datum_hint.setStyleSheet("color: #fbbf24; font-size: 11px;")
+        else:
+            self.lbl_inund_datum_hint.setText("")
+
     def _run_raster_simulation(self):
         inp_path = self.edit_raster_input.text().strip()
         out_path = self.edit_raster_output.text().strip()
@@ -1658,7 +2827,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "输入错误", "请输入并确认有效的 GeoTIFF 栅格路径！")
             return
         if not out_path:
-            QMessageBox.warning(self, "输入错误", "请指定输出 GeoTIFF 文件路径！")
+            QMessageBox.warning(self, "输入错误", "请指定输出 GeoTIFF 文件或产品目录路径！")
             return
 
         mode = self.combo_raster_mode.currentData()
@@ -1676,9 +2845,58 @@ class MainWindow(QMainWindow):
                 'block_size': self.spin_grid_block.value(),
                 'strict': strict
             }
+        elif mode == 'exposure':
+            # 检查输出目录下是否已存在 7 项 Exposure 产物，避免静默覆盖
+            from core.exposure_engine import ExposureProductPaths
+            stem = Path(inp_path).stem
+            exp_paths = ExposureProductPaths.from_directory(out_path, stem)
+            existing_conflicts = [p for p in exp_paths.all_paths if os.path.exists(p)]
+            if existing_conflicts:
+                res = QMessageBox.question(
+                    self,
+                    "产物已存在确认",
+                    f"检测到输出目录下已存在 {len(existing_conflicts)} 个露出分析产物：\n" +
+                    "\n".join([os.path.basename(p) for p in existing_conflicts[:5]]) +
+                    ("\n..." if len(existing_conflicts) > 5 else "") +
+                    "\n\n是否确认覆盖已有产物？若取消将中止本次解算。",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if res != QMessageBox.StandardButton.Yes:
+                    return
+
+            time_mode = self.combo_inund_time_mode.currentData()
+            target_mode = self.combo_inund_target_mode.currentData() if hasattr(self, 'combo_inund_target_mode') else 'intertidal'
+            params = {
+                'input_path': inp_path,
+                'output_dir': out_path,
+                'freq': self.combo_inund_freq.currentData(),
+                'dem_datum': self.combo_inund_datum.currentData(),
+                'constituents': 'all',
+                'source_tz': 'UTC',
+                'target_mode': target_mode,
+                'initial_control_spacing_m': self.spin_grid_init.value(),
+                'min_control_spacing_m': self.spin_grid_min.value(),
+                'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
+                'block_size': self.spin_grid_block.value(),
+                'strict': strict,
+                'allow_overwrite': True
+            }
+            if time_mode == 'year':
+                params['year'] = self.spin_inund_year.value()
+                params['start_time'] = None
+                params['end_time'] = None
+            else:
+                params['year'] = None
+                params['start_time'] = self.time_inund_start.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                params['end_time'] = self.time_inund_end.dateTime().toString("yyyy-MM-dd HH:mm:ss")
+                if self.time_inund_start.dateTime() >= self.time_inund_end.dateTime():
+                    QMessageBox.warning(self, "时间错误", "起始时间必须早于结束时间！")
+                    return
         else:
             time_mode = self.combo_inund_time_mode.currentData()
             qc_out = self.edit_inund_qc.text().strip() or None
+            target_mode = self.combo_inund_target_mode.currentData() if hasattr(self, 'combo_inund_target_mode') else 'intertidal'
             params = {
                 'input_path': inp_path,
                 'output_path': out_path,
@@ -1687,6 +2905,7 @@ class MainWindow(QMainWindow):
                 'dem_datum': self.combo_inund_datum.currentData(),
                 'constituents': 'all',
                 'source_tz': 'UTC',
+                'target_mode': target_mode,
                 'initial_control_spacing_m': self.spin_grid_init.value(),
                 'min_control_spacing_m': self.spin_grid_min.value(),
                 'inundation_error_tolerance_pct': self.spin_grid_tol.value(),
@@ -1741,45 +2960,90 @@ class MainWindow(QMainWindow):
             self.btn_run_raster.setEnabled(True)
             self.btn_cancel_raster.setEnabled(False)
             self.prog_raster.setValue(100)
-            self.lbl_raster_status.setText(f"解算圆满完成！耗时 {summary.elapsed_seconds:.2f} 秒。")
+
+            is_dict = isinstance(summary, dict)
+            mode = summary.get('mode', self.combo_raster_mode.currentData()) if is_dict else getattr(summary, 'mode', 'snapshot')
+            elapsed = summary.get('elapsed_seconds', 0.0) if is_dict else getattr(summary, 'elapsed_seconds', 0.0)
+            self.lbl_raster_status.setText(f"解算圆满完成！耗时 {elapsed:.2f} 秒。")
             self.status_bar.showMessage("空间栅格解算圆满完成！")
 
-            mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
-            qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
-            nodes_cnt = summary.control_nodes_count
-            if nodes_cnt is not None and nodes_cnt > 0:
-                nodes_line = f"<li><b>控制节点总数</b>: {nodes_cnt:,} 个</li>"
+            if mode == 'exposure':
+                prods = summary.get('products')
+                out_dir = summary.get('output_dir', '')
+                if not out_dir and prods:
+                    out_dir = os.path.dirname(os.path.abspath(prods.exposure_fraction_path))
+                cache_p = summary.get('export_tide_cache_path')
+                cache_line = f"<li><b>Tide Cache 缓存</b>: <code>{cache_p}</code></li>" if cache_p else ""
+
+                prod_items = ""
+                if prods:
+                    prod_items = (
+                        f"<li><b>暴露比例 (Fraction)</b>: <code>{os.path.basename(prods.exposure_fraction_path)}</code></li>"
+                        f"<li><b>累积时长 (Duration)</b>: <code>{os.path.basename(prods.exposure_duration_h_path)}</code></li>"
+                        f"<li><b>最大单次时长 (Max Cont)</b>: <code>{os.path.basename(prods.exposure_max_continuous_h_path)}</code></li>"
+                        f"<li><b>平均事件时长 (Mean Event)</b>: <code>{os.path.basename(prods.exposure_mean_event_h_path)}</code></li>"
+                        f"<li><b>事件发生次数 (Event Count)</b>: <code>{os.path.basename(prods.exposure_event_count_path)}</code></li>"
+                        f"<li><b>有效时间比例 (Valid Time Frac)</b>: <code>{os.path.basename(prods.exposure_valid_time_fraction_path)}</code></li>"
+                        f"<li><b>质量控制掩膜 (QC Mask)</b>: <code>{os.path.basename(prods.exposure_qc_path)}</code></li>"
+                    )
+
+                info_box = QMessageBox(self)
+                info_box.setWindowTitle("露出时间域解算完成")
+                info_box.setIcon(QMessageBox.Icon.Information)
+                info_box.setText("<h3>🎉 潜在天文潮露出时间域 7 项空间栅格解算成功！</h3>")
+                info_box.setInformativeText(
+                    f"<p><b>任务模式</b>: 潜在天文潮露出时间域分析 (7 项科学产物)</p>"
+                    f"<p><b>产物保存目录</b>: <code>{out_dir}</code></p>"
+                    f"<ul>"
+                    f"{prod_items}"
+                    f"{cache_line}"
+                    f"<li><b>解算总耗时</b>: {elapsed:.2f} 秒</li>"
+                    f"</ul>"
+                )
+                btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+                info_box.addButton(QMessageBox.StandardButton.Ok)
+                info_box.exec()
+                if info_box.clickedButton() == btn_open_dir:
+                    self._open_directory(out_dir)
             else:
-                nodes_line = ""
+                mode_name = "单时刻空间潮位" if summary.mode == 'snapshot' else "潜在天文潮淹没频率"
+                qc_line = f"<li><b>质量控制掩膜</b>: <code>{summary.qc_output_path}</code></li>" if summary.qc_output_path else ""
+                nodes_cnt = summary.control_nodes_count
+                if nodes_cnt is not None and nodes_cnt > 0:
+                    nodes_line = f"<li><b>控制节点总数</b>: {nodes_cnt:,} 个</li>"
+                else:
+                    nodes_line = ""
 
-            info_box = QMessageBox(self)
-            info_box.setWindowTitle("解算完成")
-            info_box.setIcon(QMessageBox.Icon.Information)
-            info_box.setText(f"<h3>🎉 空间栅格解算成功！</h3>")
-            info_box.setInformativeText(
-                f"<p><b>任务模式</b>: {mode_name}</p>"
-                f"<ul>"
-                f"<li><b>影像规格</b>: {summary.width} × {summary.height} ({summary.total_pixels:,} 像元)</li>"
-                f"<li><b>有效解算像元</b>: {summary.valid_pixels:,}</li>"
-                f"{nodes_line}"
-                f"<li><b>解算总耗时</b>: {summary.elapsed_seconds:.2f} 秒</li>"
-                f"<li><b>输出文件路径</b>: <code>{summary.output_path}</code></li>"
-                f"{qc_line}"
-                f"</ul>"
-            )
-            btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
-            info_box.addButton(QMessageBox.StandardButton.Ok)
-            info_box.exec()
+                info_box = QMessageBox(self)
+                info_box.setWindowTitle("解算完成")
+                info_box.setIcon(QMessageBox.Icon.Information)
+                info_box.setText(f"<h3>🎉 空间栅格解算成功！</h3>")
+                info_box.setInformativeText(
+                    f"<p><b>任务模式</b>: {mode_name}</p>"
+                    f"<ul>"
+                    f"<li><b>影像规格</b>: {summary.width} × {summary.height} ({summary.total_pixels:,} 像元)</li>"
+                    f"<li><b>有效解算像元</b>: {summary.valid_pixels:,}</li>"
+                    f"{nodes_line}"
+                    f"<li><b>解算总耗时</b>: {summary.elapsed_seconds:.2f} 秒</li>"
+                    f"<li><b>输出文件路径</b>: <code>{summary.output_path}</code></li>"
+                    f"{qc_line}"
+                    f"</ul>"
+                )
+                btn_open_dir = info_box.addButton("打开输出目录", QMessageBox.ButtonRole.ActionRole)
+                info_box.addButton(QMessageBox.StandardButton.Ok)
+                info_box.exec()
 
-            if info_box.clickedButton() == btn_open_dir:
-                out_dir = os.path.dirname(os.path.abspath(summary.output_path))
-                if os.path.exists(out_dir):
-                    import subprocess
-                    subprocess.Popen(f'explorer "{out_dir}"')
+                if info_box.clickedButton() == btn_open_dir:
+                    out_p = getattr(summary, 'output_path', '')
+                    self._open_directory(out_p)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{summary.output_path}\n\n但弹窗提示异常: {e}")
+            if isinstance(summary, dict):
+                out_p = summary.get('output_path') or summary.get('output_dir') or ''
+            else:
+                out_p = getattr(summary, 'output_path', getattr(summary, 'output_dir', ''))
+            QMessageBox.warning(self, "显示完成信息异常", f"解算已完成并保存至:\n{out_p}\n\n但弹窗提示异常: {e}")
 
     def _on_raster_error(self, err_msg):
         self.btn_run_raster.setEnabled(True)
@@ -1792,6 +3056,21 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage("栅格解算发生错误")
         QMessageBox.critical(self, "解算错误", f"空间栅格解算失败:\n{err_msg}")
 
+    def _open_directory(self, path: str):
+        """跨平台打开本地文件或目录（兼容 Windows、macOS 与 Linux）"""
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "提示", "指定的输出目录或文件尚未生成或不存在。")
+            return
+        abs_p = os.path.abspath(path)
+        if not os.path.isdir(abs_p):
+            abs_p = os.path.dirname(abs_p)
+        if not os.path.exists(abs_p):
+            QMessageBox.information(self, "提示", "指定的输出目录尚未生成或不存在。")
+            return
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(abs_p))
+
     def _open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
@@ -1802,10 +3081,17 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         about_text = (
-            "<h3>CoastTideX v1.5 Alpha</h3>"
-            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (Functional Prototype)</b></p>"
-            "<p>致力于为海洋工程、海岸带遥感、大地测量与水下水文建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
+            "<h3>CoastTideX v1.7.1</h3>"
+            "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (MSL Reference Workflow)</b></p>"
+            "<p>致力于为海洋工程、海岸带遥感、大地测量与潮滩生态演变建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
             "<ul>"
+            "<li><b>v1.7 MSL 统一基准架构</b>: "
+            "<ul>"
+            "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 理论范式，大洋区双线性插值，沿岸默认 100 km (可配置 0–500 km) 球面 3D-IDW 保守外推；</li>"
+            "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界严密一致；</li>"
+            "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
+            "</ul></li>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
             "<li><b>四大多元基准体系</b>: "
             "<ul>"
@@ -1816,72 +3102,91 @@ class MainWindow(QMainWindow):
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
             "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
-            "<li><b>v1.4 空间栅格解算引擎</b>: "
+            "<li><b>潜在天文潮露出时间域分析引擎</b>: "
             "<ul>"
-            "<li>支持 GeoTIFF 空间单时刻潮位计算与高分辨率 DEM 潜在天文潮淹没频率解算；</li>"
-            "<li>自适应潮位控制网格与经验互补分布 (CCDF)，流式分块 I/O 内存安全保护。</li>"
+            "<li>固定代表性地形条件下的潜在天文潮露出时长 (Exposure Duration)、最长连续露出、平均事件时长、发生频次与有效时间覆盖率等 7 大独立 GeoTIFF 空间栅格产物；</li>"
+            "<li>高精度时间跨界线性插值 (Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
+            "<li>全系统严格遵循半开区间 [start, end) 时间采样语义，彻底消除末端双重统计。</li>"
             "</ul></li>"
-            "<li><b>v1.5 Alpha 批量潮间带栅格引擎与 Tide Cache</b>: "
+            "<li><b>批量潮间带栅格引擎与 Tide Cache (Schema 1.2)</b>: "
             "<ul>"
             "<li>文件夹级自动化发现与轻量扫描，单瓦片顺序推进 (max_parallel_tiles = 1)；</li>"
-            "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率；</li>"
-            "<li>任务清单 (Manifest) 管理、单瓦片失败隔离与防篡改断点恢复。</li>"
+            "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率与潜在露出时长；</li>"
+            "<li>全要素规范兼容性签名 (SHA-256)、单瓦片失败隔离与防篡改断点恢复。</li>"
             "</ul></li>"
             "</ul>"
-            "<p>作者 / 开发者：Wang Yuhao | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
+            "<p>作者 / 开发者：<b>王宇浩</b> (Yuhao Wang) | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"
         )
         QMessageBox.about(self, "关于 CoastTideX", about_text)
 
 
     def _setup_batch_raster_tab(self):
-        """初始化 v1.5 批量潮间带栅格解算与 Tide Cache 选项卡"""
-        layout = QHBoxLayout(self.tab_batch_raster)
-        layout.setSpacing(10)
+        """初始化批量潮间带栅格解算与 Tide Cache 响应式界面。"""
+        layout = QVBoxLayout(self.tab_batch_raster)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
-        # 左侧控制面板 (包装在 QScrollArea 内)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+
+        # 左侧控制面板 (包装在 QScrollArea 内，支持自适应垂直滚动与宽度拉伸)
         scroll_left = QScrollArea()
         scroll_left.setWidgetResizable(True)
         scroll_left.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_left.setMinimumWidth(390)
-        scroll_left.setMaximumWidth(450)
+        scroll_left.setMinimumWidth(340)
+        scroll_left.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_left.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         panel_widget = QWidget()
+        panel_widget.setMinimumWidth(0)
+        panel_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         panel_layout = QVBoxLayout(panel_widget)
         panel_layout.setSpacing(10)
         panel_layout.setContentsMargins(5, 5, 5, 5)
 
         # 1. 文件夹输入
-        grp_input = QGroupBox("📂 批量输入与输出目录 / Directories")
+        grp_input = QGroupBox("📂 批量目录 / Directories")
         vbox_input = QVBoxLayout(grp_input)
         
-        vbox_input.addWidget(QLabel("输入 GeoTIFF 文件夹路径:"))
+        lbl_batch_in = QLabel("输入 GeoTIFF 文件夹路径:")
+        lbl_batch_in.setWordWrap(True)
+        vbox_input.addWidget(lbl_batch_in)
         h_in = QHBoxLayout()
         self.txt_batch_in_dir = QLineEdit()
         self.txt_batch_in_dir.setPlaceholderText("选择包含沙滩/潮滩 DEM 的文件夹...")
+        self.txt_batch_in_dir.setMinimumWidth(0)
+        self.txt_batch_in_dir.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.txt_batch_in_dir.textChanged.connect(lambda t: self.txt_batch_in_dir.setToolTip(t))
         self.btn_browse_batch_in = QPushButton("浏览...")
         self.btn_browse_batch_in.clicked.connect(self._on_browse_batch_input)
-        h_in.addWidget(self.txt_batch_in_dir)
-        h_in.addWidget(self.btn_browse_batch_in)
+        h_in.addWidget(self.txt_batch_in_dir, stretch=1)
+        h_in.addWidget(self.btn_browse_batch_in, stretch=0)
         vbox_input.addLayout(h_in)
 
         self.chk_batch_recursive = QCheckBox("递归扫描子目录 (Recursive)")
         vbox_input.addWidget(self.chk_batch_recursive)
 
-        self.btn_scan_batch = QPushButton("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch = QPushButton("🔍 扫描待解算影像 (Scan)")
         self.btn_scan_batch.setObjectName("btn_batch_scan")
         self.btn_scan_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_scan_batch.setMinimumWidth(0)
         self.btn_scan_batch.setToolTip("扫描并预览当前目录中将参与批量解算的 GeoTIFF；不会开始潮位计算，只读取文件路径与 GeoTIFF 头信息。")
         self.btn_scan_batch.clicked.connect(self._on_scan_batch_rasters)
         vbox_input.addWidget(self.btn_scan_batch)
 
-        vbox_input.addWidget(QLabel("输出文件夹路径 (默认: <input>/CoastTideX_output):"))
+        lbl_batch_out = QLabel("输出文件夹路径 (默认: <input>/CoastTideX_output):")
+        lbl_batch_out.setWordWrap(True)
+        vbox_input.addWidget(lbl_batch_out)
         h_out = QHBoxLayout()
         self.txt_batch_out_dir = QLineEdit()
         self.txt_batch_out_dir.setPlaceholderText("留空自动在输入目录下创建 CoastTideX_output...")
+        self.txt_batch_out_dir.setMinimumWidth(0)
+        self.txt_batch_out_dir.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.txt_batch_out_dir.textChanged.connect(lambda t: self.txt_batch_out_dir.setToolTip(t))
         self.btn_browse_batch_out = QPushButton("更改...")
         self.btn_browse_batch_out.clicked.connect(self._on_browse_batch_output)
-        h_out.addWidget(self.txt_batch_out_dir)
-        h_out.addWidget(self.btn_browse_batch_out)
+        h_out.addWidget(self.txt_batch_out_dir, stretch=1)
+        h_out.addWidget(self.btn_browse_batch_out, stretch=0)
         vbox_input.addLayout(h_out)
 
         self.txt_batch_in_dir.textChanged.connect(self._invalidate_batch_scan)
@@ -1891,7 +3196,7 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(grp_input)
 
         # 2. 预测时间与时间步长
-        self.grp_batch_time = QGroupBox("⏱️ 预测时段与时间步长 / Temporal Scope")
+        self.grp_batch_time = QGroupBox("⏱️ 预测时段 / Temporal")
         vbox_time = QVBoxLayout(self.grp_batch_time)
 
         h_tm = QHBoxLayout()
@@ -1900,6 +3205,7 @@ class MainWindow(QMainWindow):
         self.combo_batch_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
         self.combo_batch_time_mode.addItem("自定义时段 (Custom Period)", "period")
         self.combo_batch_time_mode.currentIndexChanged.connect(self._on_batch_time_mode_changed)
+        self._make_combo_responsive(self.combo_batch_time_mode)
         h_tm.addWidget(self.combo_batch_time_mode)
         vbox_time.addLayout(h_tm)
 
@@ -1917,23 +3223,24 @@ class MainWindow(QMainWindow):
         self.wgt_batch_period = QWidget()
         vbox_period = QVBoxLayout(self.wgt_batch_period)
         vbox_period.setContentsMargins(0, 0, 0, 0)
-        h_st = QHBoxLayout()
-        h_st.addWidget(QLabel("起始时间 (UTC):"))
+        vbox_period.setSpacing(4)
+        vbox_period.addWidget(QLabel("起始时间 (UTC):"))
         self.time_batch_start = QDateTimeEdit(QDateTime.currentDateTimeUtc())
         self.time_batch_start.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_batch_start.setCalendarPopup(True)
+        self.time_batch_start.setMinimumWidth(0)
+        self.time_batch_start.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.time_batch_start.dateTimeChanged.connect(self._update_batch_expected_samples)
-        h_st.addWidget(self.time_batch_start)
-        vbox_period.addLayout(h_st)
+        vbox_period.addWidget(self.time_batch_start)
 
-        h_et = QHBoxLayout()
-        h_et.addWidget(QLabel("结束时间 (UTC):"))
+        vbox_period.addWidget(QLabel("结束时间 (UTC):"))
         self.time_batch_end = QDateTimeEdit(QDateTime.currentDateTimeUtc().addDays(30))
         self.time_batch_end.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.time_batch_end.setCalendarPopup(True)
+        self.time_batch_end.setMinimumWidth(0)
+        self.time_batch_end.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.time_batch_end.dateTimeChanged.connect(self._update_batch_expected_samples)
-        h_et.addWidget(self.time_batch_end)
-        vbox_period.addLayout(h_et)
+        vbox_period.addWidget(self.time_batch_end)
 
         self.wgt_batch_period.setVisible(False)
         vbox_time.addWidget(self.wgt_batch_period)
@@ -1943,6 +3250,7 @@ class MainWindow(QMainWindow):
         self.cmb_batch_step = QComboBox()
         self.cmb_batch_step.addItems(["30min (推荐)", "1h", "15min", "10min", "2h", "Custom... (自定义)"])
         self.cmb_batch_step.currentIndexChanged.connect(self._on_batch_step_changed)
+        self._make_combo_responsive(self.cmb_batch_step)
         h_step.addWidget(self.cmb_batch_step)
         vbox_time.addLayout(h_step)
 
@@ -1954,32 +3262,40 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.grp_batch_time)
 
         # 3. 科学参数与目标感知
-        self.grp_batch_sci = QGroupBox("⚙️ 科学参数与目标模式 / Scientific Options")
+        self.grp_batch_sci = QGroupBox("⚙️ 科学参数 / Options")
         vbox_sci = QVBoxLayout(self.grp_batch_sci)
 
         h_datum = QHBoxLayout()
         h_datum.addWidget(QLabel("DEM 高程基准:"))
         self.cmb_batch_datum = QComboBox()
-        self.cmb_batch_datum.addItems(["EGM2008 (推荐全球)", "MSL (平均海平面)", "GOCO06s (全球大洋)", "WGS84 椭球高"])
+        self.cmb_batch_datum.addItem("MSL (推荐 - v1.7 统一基准)", "msl")
+        self.cmb_batch_datum.addItem("EGM2008 (兼容模式)", "egm2008")
+        self.cmb_batch_datum.addItem("GOCO06s (全球大洋)", "goco06s")
+        self.cmb_batch_datum.addItem("WGS84 椭球高", "wgs84")
+        self._make_combo_responsive(self.cmb_batch_datum)
         h_datum.addWidget(self.cmb_batch_datum)
         vbox_sci.addLayout(h_datum)
 
         h_const = QHBoxLayout()
         h_const.addWidget(QLabel("天文分潮集合:"))
         self.cmb_batch_const = QComboBox()
-        self.cmb_batch_const.addItems(["all (全套 34 分潮)", "major8 (8大主分潮)"])
+        self.cmb_batch_const.addItem("all (全套 34 分潮)", "all")
+        self.cmb_batch_const.addItem("major8 (8大主分潮)", "major8")
+        self._make_combo_responsive(self.cmb_batch_const)
         h_const.addWidget(self.cmb_batch_const)
         vbox_sci.addLayout(h_const)
 
         h_target = QHBoxLayout()
         h_target.addWidget(QLabel("目标区域模式:"))
         self.cmb_batch_target_mode = QComboBox()
-        self.cmb_batch_target_mode.addItems(["intertidal (沙滩/潮间带目标感知, 默认)", "standard (标准全网格自适应)"])
+        self.cmb_batch_target_mode.addItem("intertidal (潮间带感知, 默认)", "intertidal")
+        self.cmb_batch_target_mode.addItem("standard (标准全网格自适应)", "standard")
+        self._make_combo_responsive(self.cmb_batch_target_mode)
         h_target.addWidget(self.cmb_batch_target_mode)
         vbox_sci.addLayout(h_target)
 
         # 沿岸外推 Fallback (根据审查结果禁用)
-        self.chk_batch_fallback = QCheckBox("允许官方沿岸外推 FES 回退 (Coastal Fallback)")
+        self.chk_batch_fallback = QCheckBox("FES 沿岸回退 (当前禁用)")
         self.chk_batch_fallback.setChecked(False)
         self.chk_batch_fallback.setEnabled(False)
         self.chk_batch_fallback.setToolTip("【只读审查结论】本地 ocean_tide_extrapolated 均为 .nc.xz 压缩包且掩膜为规则网格，Phase 1 维持原生 LGP2 高阶非结构有限元网格，回退机制暂未激活。")
@@ -1988,16 +3304,20 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(self.grp_batch_sci)
 
         # 4. 任务模式与调度
-        grp_job = QGroupBox("📋 运行模式与输出策略 / Job Mode & Policy")
+        grp_job = QGroupBox("📋 运行策略 / Job Policy")
         vbox_job = QVBoxLayout(grp_job)
 
         h_jm = QHBoxLayout()
         h_jm.addWidget(QLabel("解算流程:"))
         self.cmb_batch_job_mode = QComboBox()
-        self.cmb_batch_job_mode.addItem("1. 完整流程: Tide Cache + 潜在淹没频率 (默认)", "tide-inundation")
-        self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (生成 *_tide.nc)", "tide")
-        self.cmb_batch_job_mode.addItem("3. 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)", "inundation-from-cache")
+        self.cmb_batch_job_mode.addItem("1. 完整流程: Cache + 潜在淹没 (默认)", "tide-inundation")
+        self.cmb_batch_job_mode.addItem("2. 仅解算控制节点潮位 (*_tide.nc)", "tide")
+        self.cmb_batch_job_mode.addItem("3. Cache → 淹没频率 (零 FES)", "inundation-from-cache")
+        self.cmb_batch_job_mode.addItem("4. 完整流程: Cache + 潜在露出分析", "tide-exposure")
+        self.cmb_batch_job_mode.addItem("5. Cache → 露出分析 (零 FES)", "exposure-from-cache")
+        self.cmb_batch_job_mode.addItem("6. 全要素产物包 (Cache+淹没+露出)", "all")
         self.cmb_batch_job_mode.currentIndexChanged.connect(self._on_batch_job_mode_changed)
+        self._make_combo_responsive(self.cmb_batch_job_mode)
         h_jm.addWidget(self.cmb_batch_job_mode)
         vbox_job.addLayout(h_jm)
 
@@ -2011,16 +3331,17 @@ class MainWindow(QMainWindow):
         h_policy = QHBoxLayout()
         h_policy.addWidget(QLabel("已有产物策略:"))
         self.cmb_batch_existing_policy = QComboBox()
-        self.cmb_batch_existing_policy.addItem("断点恢复 (Resume, 跳过已有完整产物) [默认]", "resume")
-        self.cmb_batch_existing_policy.addItem("冲突报错 (Error if exists, 拒绝覆写)", "error_if_exists")
-        self.cmb_batch_existing_policy.addItem("强制覆盖 (Overwrite, 重新计算并替换)", "overwrite")
+        self.cmb_batch_existing_policy.addItem("断点恢复 (Resume, 跳过已有) [默认]", "resume")
+        self.cmb_batch_existing_policy.addItem("冲突报错 (Error if exists)", "error_if_exists")
+        self.cmb_batch_existing_policy.addItem("强制覆盖 (Overwrite)", "overwrite")
+        self._make_combo_responsive(self.cmb_batch_existing_policy)
         h_policy.addWidget(self.cmb_batch_existing_policy)
         vbox_job.addLayout(h_policy)
 
         panel_layout.addWidget(grp_job)
 
         # 5. 执行控制与进度
-        grp_exec = QGroupBox("🚀 批处理调度控制 / Execution Control")
+        grp_exec = QGroupBox("🚀 调度控制 / Execution")
         vbox_exec = QVBoxLayout(grp_exec)
 
         h_btns = QHBoxLayout()
@@ -2040,12 +3361,12 @@ class MainWindow(QMainWindow):
         h_btns.addWidget(self.btn_cancel_batch)
         vbox_exec.addLayout(h_btns)
 
-        vbox_exec.addWidget(QLabel("总览进度 (Overall Progress):"))
+        vbox_exec.addWidget(QLabel("总览进度 (Overall):"))
         self.bar_batch_overall = QProgressBar()
         self.bar_batch_overall.setValue(0)
         vbox_exec.addWidget(self.bar_batch_overall)
 
-        vbox_exec.addWidget(QLabel("当前瓦片进度 (Current Tile):"))
+        vbox_exec.addWidget(QLabel("当前瓦片 (Current):"))
         self.bar_batch_tile = QProgressBar()
         self.bar_batch_tile.setValue(0)
         vbox_exec.addWidget(self.bar_batch_tile)
@@ -2056,22 +3377,23 @@ class MainWindow(QMainWindow):
 
         self.lbl_batch_counts = QLabel("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
         self.lbl_batch_counts.setStyleSheet("font-weight: bold;")
+        self.lbl_batch_counts.setWordWrap(True)
         vbox_exec.addWidget(self.lbl_batch_counts)
 
         panel_layout.addWidget(grp_exec)
         panel_layout.addStretch()
 
         scroll_left.setWidget(panel_widget)
-        layout.addWidget(scroll_left)
+        splitter.addWidget(scroll_left)
 
         # 右侧：影像文件表格视图
         grp_right = QGroupBox("📋 影像文件清单与实时解算状态 / Raster Tiles Queue")
         vbox_right = QVBoxLayout(grp_right)
 
         self.table_batch_rasters = QTableWidget()
-        self.table_batch_rasters.setColumnCount(8)
+        self.table_batch_rasters.setColumnCount(9)
         self.table_batch_rasters.setHorizontalHeaderLabels([
-            "相对路径 / Relative Path", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出"
+            "相对路径 / Relative Path", "大小", "栅格尺寸", "坐标系", "分辨率", "当前状态", "Tide Cache", "淹没频率输出", "潜在露出产物 / Exposure"
         ])
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table_batch_rasters.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
@@ -2085,7 +3407,12 @@ class MainWindow(QMainWindow):
         h_bot_right.addWidget(self.btn_open_batch_out)
         vbox_right.addLayout(h_bot_right)
 
-        layout.addWidget(grp_right, stretch=1)
+        splitter.addWidget(grp_right)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([450, 700])
+
+        layout.addWidget(splitter)
 
         self.batch_worker = None
         self.scan_worker = None
@@ -2101,38 +3428,81 @@ class MainWindow(QMainWindow):
         self.wgt_batch_period.setVisible(not is_year)
         self._update_batch_expected_samples()
 
+    def _apply_batch_mode_constraints(self, job_mode: Optional[str] = None):
+        """根据当前选择的批量模式动态约束参数控件启用状态"""
+        if job_mode is None:
+            job_mode = self.cmb_batch_job_mode.currentData() if hasattr(self, 'cmb_batch_job_mode') else None
+        is_from_cache = (job_mode in ("inundation-from-cache", "exposure-from-cache"))
+        self.grp_batch_time.setEnabled(not is_from_cache)
+        self.grp_batch_sci.setEnabled(not is_from_cache)
+        self._update_batch_expected_samples()
+
     def _on_batch_job_mode_changed(self):
         job_mode = self.cmb_batch_job_mode.currentData()
-        if job_mode == "inundation-from-cache":
-            # Mode 3: Tide Cache 是只读输入，禁用生成参数
-            self.grp_batch_time.setEnabled(False)
-            self.grp_batch_sci.setEnabled(False)
-            self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 3 从已有 Tide Cache 解算淹没频率：*_tide.nc 作为严格只读输入，不调用 FES 潮汐模型，绝不覆写或修改缓存！"
-            )
-            self.lbl_batch_job_mode_tip.setStyleSheet(
-                "color: #1565C0; font-weight: bold; background-color: #E3F2FD; padding: 6px; border-radius: 4px; border: 1px solid #90CAF9;"
-            )
-        elif job_mode == "tide":
-            # Mode 2: 仅生成 Cache
+        self._apply_batch_mode_constraints(job_mode)
+        if job_mode == "tide":
+            # 仅解算控制节点潮位 (生成 Cache)
             self.grp_batch_time.setEnabled(True)
             self.grp_batch_sci.setEnabled(True)
             self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 2 仅解算自适应控制网格潮位时序并导出 *_tide.nc，不生成 2D 像元淹没频率 GeoTIFF。"
+                "💡 仅解算控制网格潮位 (tide)：仅构建自适应控制网格与潮位时序并导出 *_tide.nc，不生成 Inundation 或 Exposure 空间栅格产品。"
             )
             self.lbl_batch_job_mode_tip.setStyleSheet(
                 "color: #2E7D32; font-weight: bold; background-color: #E8F5E9; padding: 6px; border-radius: 4px; border: 1px solid #A5D6A7;"
             )
-        else:
-            # Mode 1: 完整两阶段流程
+        elif job_mode == "tide-inundation":
+            # 完整两阶段淹没流程
             self.grp_batch_time.setEnabled(True)
             self.grp_batch_sci.setEnabled(True)
             self.lbl_batch_job_mode_tip.setText(
-                "💡 Mode 1 完整两阶段：先生成并保存 Tide Cache (*_tide.nc)，再基于缓存解算淹没频率 GeoTIFF。"
+                "💡 完整两阶段淹没流程 (tide-inundation)：Stage 1 解算并生成 Tide Cache (*_tide.nc)，Stage 2a 基于缓存解算潜在天文潮淹没频率与 QC GeoTIFF。"
             )
             self.lbl_batch_job_mode_tip.setStyleSheet(
                 "color: #00796B; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #80CBC4;"
             )
+        elif job_mode == "inundation-from-cache":
+            # 基于已有 Tide Cache 解算淹没频率 (零 FES 开销)
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 从已有 Tide Cache 解算淹没频率 (inundation-from-cache)：复用已存在的 *_tide.nc 科学配置与时间序列，Stage 2 零 FES 外部调用，不覆写潮位缓存。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #1565C0; font-weight: bold; background-color: #E3F2FD; padding: 6px; border-radius: 4px; border: 1px solid #90CAF9;"
+            )
+        elif job_mode == "tide-exposure":
+            # 完整两阶段露出流程
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 完整两阶段露出流程 (tide-exposure)：Stage 1 解算并生成 Tide Cache (*_tide.nc)，Stage 2b 基于缓存解算潜在天文潮露出时间域 7 项空间栅格产品。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #6A1B9A; font-weight: bold; background-color: #F3E5F5; padding: 6px; border-radius: 4px; border: 1px solid #CE93D8;"
+            )
+        elif job_mode == "exposure-from-cache":
+            # 基于已有 Tide Cache 解算潜在露出 (零 FES 开销)
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 从已有 Tide Cache 解算潜在露出 (exposure-from-cache)：复用已存在的 *_tide.nc 科学配置与时间序列，Stage 2 零 FES 外部调用，输出 7 项 Exposure GeoTIFF。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #E65100; font-weight: bold; background-color: #FFF3E0; padding: 6px; border-radius: 4px; border: 1px solid #FFCC80;"
+            )
+        elif job_mode == "all":
+            # 全要素产物包
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
+            self.lbl_batch_job_mode_tip.setText(
+                "💡 全要素产物包 (all)：Stage 1 解算并保存 Tide Cache (*_tide.nc)，随后 Stage 2a (淹没频率) 与 Stage 2b (露出时间域 7 项产品) 共同复用该缓存。"
+            )
+            self.lbl_batch_job_mode_tip.setStyleSheet(
+                "color: #00695C; font-weight: bold; background-color: #E0F2F1; padding: 6px; border-radius: 4px; border: 1px solid #4DB6AC;"
+            )
+        else:
+            self.grp_batch_time.setEnabled(True)
+            self.grp_batch_sci.setEnabled(True)
 
     def _get_effective_batch_output_dir(self) -> str:
         """获取当前有效的输出目录（用户指定优先，默认回退至 <input>/CoastTideX_output）"""
@@ -2185,6 +3555,11 @@ class MainWindow(QMainWindow):
         self._update_batch_expected_samples()
 
     def _update_batch_expected_samples(self):
+        job_mode = self.cmb_batch_job_mode.currentData() if hasattr(self, 'cmb_batch_job_mode') else None
+        if job_mode in ("inundation-from-cache", "exposure-from-cache"):
+            self.lbl_batch_samples.setText("时间采样与科学配置：读取自已存在的 Tide Cache")
+            return
+
         freq = self._get_batch_frequency()
         time_mode = self.combo_batch_time_mode.currentData() if hasattr(self, 'combo_batch_time_mode') else 'year'
 
@@ -2219,7 +3594,7 @@ class MainWindow(QMainWindow):
         self.btn_start_batch.setEnabled(False)
         self.lbl_batch_status.setText("⚠️ 目录或扫描配置已改变，请点击“扫描文件夹”构建/刷新任务队列。")
         self.lbl_batch_counts.setText("总文件: 0 | 完成: 0 | 失败: 0 | 跳过: 0")
-        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch.setText("🔍 扫描待解算影像 (Scan)")
 
     def _on_browse_batch_input(self):
         d = QFileDialog.getExistingDirectory(self, "选择输入 GeoTIFF 目录")
@@ -2254,7 +3629,7 @@ class MainWindow(QMainWindow):
     def _on_scan_finished(self, discovered_list, spec=None):
         QApplication.restoreOverrideCursor()
         self.btn_scan_batch.setEnabled(True)
-        self.btn_scan_batch.setText("🔄 重新扫描 / 刷新队列 (Refresh Queue)")
+        self.btn_scan_batch.setText("🔄 刷新任务队列 (Refresh)")
 
         cur_in = self.txt_batch_in_dir.text().strip()
         cur_out = self._get_effective_batch_output_dir()
@@ -2307,6 +3682,7 @@ class MainWindow(QMainWindow):
             self.table_batch_rasters.setItem(r_idx, 5, status_item)
             self.table_batch_rasters.setItem(r_idx, 6, QTableWidgetItem("-"))
             self.table_batch_rasters.setItem(r_idx, 7, QTableWidgetItem("-"))
+            self.table_batch_rasters.setItem(r_idx, 8, QTableWidgetItem("-"))
 
         self.lbl_batch_status.setText(f"扫描完成: 发现 {len(discovered_list)} 个 GeoTIFF (有效 {valid_count}, 无效 {invalid_count})。")
         self.lbl_batch_counts.setText(f"总文件: {len(discovered_list)} | 完成: 0 | 失败: 0 | 跳过: 0")
@@ -2315,7 +3691,7 @@ class MainWindow(QMainWindow):
     def _on_scan_error(self, err_msg):
         QApplication.restoreOverrideCursor()
         self.btn_scan_batch.setEnabled(True)
-        self.btn_scan_batch.setText("🔍 扫描文件夹 (Scan GeoTIFFs)")
+        self.btn_scan_batch.setText("🔍 扫描待解算影像 (Scan)")
         self._invalidate_batch_scan()
         QMessageBox.critical(self, "扫描错误", f"后台扫描目录失败: {err_msg}")
 
@@ -2327,13 +3703,18 @@ class MainWindow(QMainWindow):
         self.btn_browse_batch_out.setEnabled(not is_running)
         self.chk_batch_recursive.setEnabled(not is_running)
         self.btn_scan_batch.setEnabled(not is_running)
-        self.grp_batch_time.setEnabled(not is_running)
-        self.grp_batch_sci.setEnabled(not is_running)
         self.cmb_batch_job_mode.setEnabled(not is_running)
         self.cmb_batch_existing_policy.setEnabled(not is_running)
 
-        self.btn_start_batch.setEnabled(not is_running)
-        self.btn_cancel_batch.setEnabled(is_running)
+        if is_running:
+            self.grp_batch_time.setEnabled(False)
+            self.grp_batch_sci.setEnabled(False)
+            self.btn_start_batch.setEnabled(False)
+            self.btn_cancel_batch.setEnabled(True)
+        else:
+            self._apply_batch_mode_constraints()
+            self.btn_start_batch.setEnabled(True)
+            self.btn_cancel_batch.setEnabled(False)
 
     def _on_start_batch(self):
         in_dir = self.txt_batch_in_dir.text().strip()
@@ -2411,19 +3792,32 @@ class MainWindow(QMainWindow):
 
             cache_item = self.table_batch_rasters.item(r_idx, 6)
             inund_item = self.table_batch_rasters.item(r_idx, 7)
+            exp_item = self.table_batch_rasters.item(r_idx, 8)
             if "Stage 1" in msg or "Tide Cache" in msg:
                 if cache_item:
                     cache_item.setText("COMPUTING")
-            elif "Stage 2" in msg:
+            elif "Stage 2a" in msg:
                 if cache_item:
                     cache_item.setText("READY")
                 if inund_item:
                     inund_item.setText("COMPUTING")
-            elif "完成" in msg:
-                if cache_item and cache_item.text() == "-":
+            elif "Stage 2b" in msg or "露出" in msg or "Exposure" in msg:
+                if cache_item:
                     cache_item.setText("READY")
-                if inund_item:
+                if exp_item:
+                    exp_item.setText("COMPUTING")
+            elif "Stage 2" in msg:
+                if cache_item:
+                    cache_item.setText("READY")
+                if inund_item and inund_item.text() == "-":
+                    inund_item.setText("COMPUTING")
+            elif "完成" in msg or "PROCESSED" in msg:
+                if cache_item and cache_item.text() in ("-", "COMPUTING"):
+                    cache_item.setText("READY")
+                if inund_item and inund_item.text() == "COMPUTING":
                     inund_item.setText("DONE")
+                if exp_item and exp_item.text() == "COMPUTING":
+                    exp_item.setText("DONE (7 prod)")
 
     def _on_batch_finished(self, res):
         self._set_batch_controls_running(False)
@@ -2460,8 +3854,4 @@ class MainWindow(QMainWindow):
 
     def _on_open_batch_output_folder(self):
         out_dir = self._get_effective_batch_output_dir()
-        if out_dir and os.path.exists(out_dir):
-            import subprocess
-            subprocess.Popen(f'explorer "{os.path.abspath(out_dir)}"')
-        else:
-            QMessageBox.information(self, "提示", "输出目录尚未生成或不存在。")
+        self._open_directory(out_dir)

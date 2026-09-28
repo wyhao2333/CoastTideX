@@ -26,10 +26,20 @@ import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 
-# 确保项目根目录在 sys.path 中
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+# 动态定位项目根目录 (必须包含 core/ 与 config.yaml)
+def find_project_root(start_path: str = __file__) -> str:
+    cur = os.path.abspath(start_path)
+    while True:
+        parent = os.path.dirname(cur)
+        if os.path.isdir(os.path.join(cur, "core")) and os.path.isfile(os.path.join(cur, "config.yaml")):
+            return cur
+        if parent == cur:
+            raise RuntimeError("Could not find CoastTideX project root containing core/ and config.yaml")
+        cur = parent
+
+PROJECT_ROOT = find_project_root()
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from core.tide_engine import SyntheticTidePredictor, TwoBasinSyntheticPredictor
 from core.datum_engine import DatumTransformer

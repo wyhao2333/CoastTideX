@@ -1,6 +1,6 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface v1.4)
-用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算与淹没频率分析。
+CoastTideX 命令行工具 (CoastTideX Command-Line Interface v1.7.1)
+用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算、淹没频率与潜在露出时间域分析。
 
 使用示例:
     # 自定义时段单点预测
@@ -17,6 +17,12 @@ CoastTideX 命令行工具 (Command-Line Interface v1.4)
 
     # 潮滩 DEM 潜在天文潮淹没频率解算 (Annual Inundation Frequency)
     python cli.py raster inundation --dem coastal_dem.tif --output inundation_freq.tif --year 2024 --step 30min --dem-datum egm2008
+
+    # 潮滩 DEM 潜在天文潮露出时间域分析 (7 大产品生成)
+    python cli.py raster exposure --dem coastal_dem.tif --output-dir ./exposure_out/ --year 2024 --step 30min --dem-datum egm2008
+
+    # 文件夹级批量栅格解算 (全要素模式: Tide Cache + 淹没频率 + 潜在露出产品)
+    python cli.py raster batch --input-folder ./tifs/ --output-folder ./batch_out/ --mode all --year 2024 --existing-policy resume
 """
 
 import os
@@ -31,6 +37,11 @@ if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
         pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 # 将项目根目录加入模块检索路径
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -43,10 +54,10 @@ from core.raster_engine import RasterTideEngine
 from core.utils import export_dataframe
 
 
-def main(args_list: Optional[List[str]] = None):
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带高精度潮位预测与基准转换工具 v1.4")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.7.1")
 
-    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), 或 raster (空间栅格)")
+    subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), raster (空间栅格), 或 convert-dem (DEM 基准转换)")
 
     # 1. 单点模式参数
     p_single = subparsers.add_parser("single", help="单点时间序列预测 (支持自定义时段或整年模式)")
@@ -76,15 +87,15 @@ def main(args_list: Optional[List[str]] = None):
     p_batch.add_argument("--output", "-o", type=str, default="batch_output.csv", help="输出 CSV 路径")
 
     # 3. 空间栅格模式参数
-    p_raster = subparsers.add_parser("raster", help="空间栅格解算模式 (snapshot 单时刻空间潮位 / inundation 潜在淹没频率)")
-    raster_subparsers = p_raster.add_subparsers(dest="raster_submode", help="栅格子模式: snapshot 或 inundation")
+    p_raster = subparsers.add_parser("raster", help="空间栅格解算模式 (snapshot 单时刻空间潮位 / inundation 潜在淹没频率 / exposure 潜在露出分析)")
+    raster_subparsers = p_raster.add_subparsers(dest="raster_submode", help="栅格子模式: snapshot, inundation, exposure, 或 batch")
 
     # 3.1 栅格单时刻快照
     p_snap = raster_subparsers.add_parser("snapshot", help="单时刻空间潮位 / 水面高程 GeoTIFF 解算")
-    p_snap.add_argument("--input", "-i", type=str, required=True, help="输入 GeoTIFF 路径")
+    p_snap.add_argument("--input", "-i", "--dem", type=str, required=True, help="输入 GeoTIFF / DEM 路径")
     p_snap.add_argument("--output", "-o", type=str, required=True, help="输出 GeoTIFF 路径")
     p_snap.add_argument("--time", type=str, required=True, help="解算时刻 (如 '2024-06-15 12:00:00')")
-    p_snap.add_argument("--datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="目标垂直基准 (默认: egm2008)")
+    p_snap.add_argument("--datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="目标垂直基准 (默认: msl)")
     p_snap.add_argument("--constituents", type=str, default="all", help="分潮集合 (all 或 major8)")
     p_snap.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时刻时区 (默认: UTC)")
     p_snap.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
@@ -92,14 +103,15 @@ def main(args_list: Optional[List[str]] = None):
 
     # 3.2 栅格潜在淹没频率
     p_inund = raster_subparsers.add_parser("inundation", help="自适应控制网格潜在天文潮淹没频率 GeoTIFF 解算")
-    p_inund.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
+    p_inund.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (推荐输入已转换为 MSL 的 DEM)")
     p_inund.add_argument("--output", "-o", type=str, required=True, help="输出淹没频率 GeoTIFF 路径")
     p_inund.add_argument("--qc-output", type=str, default=None, help="输出质量掩膜 GeoTIFF 路径 (默认: <output>_qc.tif)")
     p_inund.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
     p_inund.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_inund.add_argument("--end", type=str, default=None, help="自定义结束时间")
     p_inund.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
-    p_inund.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_inund.add_argument("--dem-datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="DEM 高程基准 (默认: msl，支持旧版兼容 egm2008)")
+    p_inund.add_argument("--analysis-reference", type=str, default=None, help="分析基准参考系 (默认: msl)")
     p_inund.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
     p_inund.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时间时区 (默认: UTC)")
     p_inund.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
@@ -110,11 +122,31 @@ def main(args_list: Optional[List[str]] = None):
     p_inund.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标感知模式 (默认: intertidal)")
     p_inund.add_argument("--export-cache", type=str, default=None, help="可选导出 Tide Cache (*_tide.nc)")
 
-    # 3.3 批量潮间带栅格解算 (v1.5)
-    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.5)")
+    # 3.3 栅格潜在天文潮露出时间域分析 (v1.6 Beta)
+    p_exposure = raster_subparsers.add_parser("exposure", help="潜在天文潮露出时间域产品计算 (露出比例、累计时长与连续事件分析)")
+    p_exposure.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
+    p_exposure.add_argument("--output-dir", "-o", type=str, default=None, help="输出产品目录 (默认与 DEM 同级)")
+    p_exposure.add_argument("--cache", type=str, default=None, help="可选已有 Tide Cache (*_tide.nc)，若提供则零 FES 计算")
+    p_exposure.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
+    p_exposure.add_argument("--start", type=str, default=None, help="自定义起始时间")
+    p_exposure.add_argument("--end", type=str, default=None, help="自定义结束时间")
+    p_exposure.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
+    p_exposure.add_argument("--dem-datum", type=str, default="msl", choices=["msl", "egm2008", "goco06s", "wgs84"], help="DEM 高程基准 (默认: msl)")
+    p_exposure.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
+    p_exposure.add_argument("--tz", type=str, default="UTC", choices=["UTC", "local"], help="时间时区 (默认: UTC)")
+    p_exposure.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
+    p_exposure.add_argument("--min-spacing", type=float, default=500.0, help="最小控制网格间距 (米，默认: 500)")
+    p_exposure.add_argument("--tolerance", type=float, default=1.0, help="容错阈值 (%%，默认: 1.0)")
+    p_exposure.add_argument("--block-size", type=int, default=512, help="2D 分块大小 (默认: 512)")
+    p_exposure.add_argument("--time-chunk", type=int, default=1000, help="时间流式分块步数 (默认: 1000)")
+    p_exposure.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标区域模式 (默认: intertidal)")
+    p_exposure.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
+
+    # 3.4 批量潮间带栅格解算 (v1.6 Beta)
+    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.6 Beta)")
     p_batch_raster.add_argument("--input-folder", "-i", type=str, required=True, help="输入 GeoTIFF 文件夹路径")
     p_batch_raster.add_argument("--output-folder", "-o", type=str, default=None, help="输出文件夹路径 (默认: <input_folder>/CoastTideX_output)")
-    p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache"], help="解算模式 (默认: tide-inundation)")
+    p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache", "tide-exposure", "exposure-from-cache", "all"], help="解算模式 (默认: tide-inundation)")
     p_batch_raster.add_argument("--year", type=int, default=2024, help="预测年份 (默认: 2024)")
     p_batch_raster.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_batch_raster.add_argument("--end", type=str, default=None, help="自定义结束时间")
@@ -133,16 +165,40 @@ def main(args_list: Optional[List[str]] = None):
     p_batch_raster.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
     p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
+    # 4. DEM 垂直基准转换模式 (v1.7 MSL Reference Workflow)
+    p_convert = subparsers.add_parser("convert-dem", help="将陆地高程 DEM (EGM2008) 严密转换为局部平均海平面基准 (DEM_MSL)")
+    p_convert.add_argument("--input", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (EGM2008 基准)")
+    p_convert.add_argument("--output", "-o", type=str, default=None, help="输出 DEM_MSL GeoTIFF 路径 (默认: <input>_msl.tif)")
+    p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (仅在 --write-qc 时生效)")
+    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
+    p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
+    p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
+    p_convert.add_argument("--write-qc", action="store_true", default=False, help="保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
+
+    # 5. 批量 DEM 垂直基准转换模式 (v1.7.1)
+    p_batch_convert = subparsers.add_parser("convert-dem-batch", help="批量将 DEM 文件夹从 EGM2008 基准转换为局域 MSL 基准 (v1.7.1)")
+    p_batch_convert.add_argument("--input-dir", "-i", type=str, required=True, help="输入包含待转换 DEM (*.tif) 的文件夹路径")
+    p_batch_convert.add_argument("--output-dir", "-o", type=str, required=True, help="转换后 MSL DEM 输出目录")
+    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
+    p_batch_convert.add_argument("--workers", type=int, default=1, help="并发工作线程/任务数 (默认: 1, 逐瓦片顺序执行)")
+    p_batch_convert.add_argument("--resume", action="store_true", help="开启断点恢复模式 (跳过清单中已成功的瓦片)")
+    p_batch_convert.add_argument("--overwrite", action="store_true", help="允许覆盖既有输出文件")
+    p_batch_convert.add_argument("--write-qc", action="store_true", default=False, help="保存每幅瓦片的转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
+
+    return parser
+
+
+def main(args_list: Optional[List[str]] = None):
+    parser = build_parser()
     args = parser.parse_args(args_list)
 
     if not args.mode:
         parser.print_help()
         sys.exit(0)
 
-    predictor = FESTidePredictor()
-    transformer = DatumTransformer()
-
     if args.mode == "single":
+        predictor = FESTidePredictor()
+        transformer = DatumTransformer()
         print(f"[*] 启动单点潮位预测: ({args.lon}°, {args.lat}°)")
 
         if args.year is not None:
@@ -223,6 +279,8 @@ def main(args_list: Optional[List[str]] = None):
         print(f"[OK] 预测成功，共生成 {len(df):,} 行记录，结果已保存至: {args.output}")
 
     elif args.mode == "batch":
+        predictor = FESTidePredictor()
+        transformer = DatumTransformer()
         print(f"[*] 读取批量输入文件: {args.input}")
         df_records = pd.read_csv(args.input)
         print(f"[*] 总记录数: {len(df_records)}, 时区: {args.tz}")
@@ -290,7 +348,7 @@ def main(args_list: Optional[List[str]] = None):
         export_dataframe(df_out, args.output)
         print(f"[OK] 批量解算完成，共生成 {len(df_out):,} 行记录，已导出至: {args.output}")
 
-    elif args.mode == "raster":
+    elif args.mode == "raster" or getattr(args, 'raster_submode', None) is not None:
         if not getattr(args, 'raster_submode', None):
             p_raster.print_help()
             sys.exit(0)
@@ -350,7 +408,8 @@ def main(args_list: Optional[List[str]] = None):
                 strict=not args.non_strict,
                 progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}"),
                 target_mode=args.target_mode,
-                export_tide_cache_path=args.export_cache
+                export_tide_cache_path=args.export_cache,
+                analysis_reference=getattr(args, 'analysis_reference', None)
             )
             print(f"[OK] 潜在天文潮淹没频率解算成功！")
             print(f"     有效 DEM 像元数: {summary.valid_pixels:,} / {summary.total_pixels:,}")
@@ -358,6 +417,59 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     计算耗时: {summary.elapsed_seconds:.2f} 秒")
             print(f"     淹没频率栅格: {summary.output_path}")
             print(f"     质量控制掩膜: {summary.qc_output_path}")
+
+        elif args.raster_submode == "exposure":
+            print(f"[*] 启动潜在天文潮露出时间域栅格产品解算 (v1.6)...")
+            print(f"[*] 输入 DEM: {args.dem}")
+            info = raster_engine.inspect_raster(args.dem, compute_valid_count=False)
+            print(f"[*] DEM 规格: {info.width} × {info.height}, 坐标系: {info.crs}")
+            print(f"[*] 空间分辨率: {info.formatted_resolution}")
+            print(f"[*] 采样间隔: {args.step}, DEM基准: {args.dem_datum.upper()}")
+
+            if args.cache:
+                print(f"[*] 使用已有 Tide Cache (零 FES 重复调用): {args.cache}")
+                print("[!] 使用 Tide Cache 内嵌的科学参数与时间跨度；命令行中的 --step/--dem-datum/--year 参数将被自动忽略。")
+                from core.tide_cache import calculate_exposure_from_tide_cache
+                exp_res = calculate_exposure_from_tide_cache(
+                    dem_path=args.dem,
+                    cache_path=args.cache,
+                    output_dir=args.output_dir,
+                    block_size=args.block_size,
+                    time_chunk_size=args.time_chunk,
+                    allow_overwrite=args.overwrite,
+                    progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}")
+                )
+            else:
+                exp_res = raster_engine.calculate_exposure_raster(
+                    dem_path=args.dem,
+                    output_dir=args.output_dir,
+                    year=args.year,
+                    start_time=args.start,
+                    end_time=args.end,
+                    freq=args.step,
+                    dem_datum=args.dem_datum,
+                    constituents=args.constituents,
+                    source_tz=args.tz,
+                    initial_control_spacing_m=args.initial_spacing,
+                    min_control_spacing_m=args.min_spacing,
+                    inundation_error_tolerance_pct=args.tolerance,
+                    block_size=args.block_size,
+                    time_chunk_size=args.time_chunk,
+                    target_mode=args.target_mode,
+                    allow_overwrite=args.overwrite,
+                    progress_callback=lambda p, m: print(f"    -> [{p:3d}%] {m}")
+                )
+            print(f"[OK] 潜在天文潮露出时间域产物反演成功！")
+            print(f"     解算耗时: {exp_res.get('elapsed_seconds', 0.0)} 秒")
+            paths = exp_res.get('products')
+            if paths:
+                print(f"     露出比例 (%):        {paths.exposure_fraction_path}")
+                print(f"     累计露出时长 (h):     {paths.exposure_duration_h_path}")
+                print(f"     最长连续露出 (h):     {paths.exposure_max_continuous_h_path}")
+                print(f"     平均事件时长 (h):     {paths.exposure_mean_event_h_path}")
+                print(f"     事件发生次数:         {paths.exposure_event_count_path}")
+                print(f"     有效时间覆盖率 (%):   {paths.exposure_valid_time_fraction_path}")
+                print(f"     质量控制掩膜 (QC):    {paths.exposure_qc_path}")
 
         elif args.raster_submode in ["batch", "batch-intertidal"]:
             from core.batch_raster_engine import BatchRasterEngine, ExistingOutputPolicy, normalize_existing_output_policy
@@ -379,12 +491,13 @@ def main(args_list: Optional[List[str]] = None):
             batch_engine = BatchRasterEngine(raster_engine=raster_engine)
             print(f"[*] 启动批量潮间带栅格解算任务...")
             print(f"[*] 输入目录: {args.input_folder}")
-            if args.mode == "inundation-from-cache":
-                print(f"[*] 运行模式: inundation-from-cache (Tide Cache is read-only input)")
+            if args.mode in ["inundation-from-cache", "exposure-from-cache"]:
+                print(f"[*] 运行模式: {args.mode} (Tide Cache is read-only input)")
+                print(f"[INFO] From-cache mode: time/datum/constituent/target-grid settings are read from Tide Cache; Stage-1 request options are ignored.")
             else:
                 print(f"[*] 运行模式: {args.mode}")
+                print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
             print(f"[*] Existing output policy: {eff_policy.value}")
-            print(f"[*] 采样间隔: {args.step}, 目标模式: {args.target_mode}")
 
             def _cli_batch_prog(ov, ti, f, m, c):
                 if f:
@@ -417,6 +530,88 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     任务清单 (JSON): {res['manifest_json']}")
             print(f"     任务清单 (CSV):  {res['manifest_csv']}")
             print(f"     统计结果: 完成 {res['counts']['completed']}, 失败 {res['counts']['failed']}, 跳过 {res['counts']['skipped']}, 取消 {res['counts']['cancelled']}")
+
+    elif args.mode == "convert-dem":
+        from core.dem_datum_converter import convert_dem_to_msl, validate_mdt_extrapolation_distance
+        try:
+            eff_dist_km = validate_mdt_extrapolation_distance(args.max_dist_km)
+        except ValueError as e:
+            print(f"[ERROR] 命令行参数 --max-dist-km 非法: {e}", file=sys.stderr)
+            sys.exit(2)
+
+        print(f"[*] 启动 DEM 垂直基准转换: EGM2008 -> MSL (Adapted from Seeger & Minderhoud, Nature, 2026)...")
+        print(f"[*] 输入 DEM: {args.input}")
+        print(f"[*] 最大允许外推距离: {eff_dist_km:.1f} km, 空间分块大小: {args.block_size}, 输出 QC 掩膜: {args.write_qc}")
+
+        def _cli_convert_prog(p, m):
+            print(f"    -> [{p:3d}%] {m}")
+
+        summary = convert_dem_to_msl(
+            input_dem_path=args.input,
+            output_msl_path=args.output,
+            output_qc_path=args.qc_output,
+            max_extrapolation_distance_km=eff_dist_km,
+            block_size=args.block_size,
+            allow_overwrite=args.overwrite,
+            write_qc=args.write_qc or (args.qc_output is not None),
+            progress_callback=_cli_convert_prog
+        )
+        print(f"[OK] DEM 垂直基准转换成功！")
+        print(f"     输出 DEM_MSL: {summary.output_path}")
+        if summary.qc_output_path:
+            print(f"     输出 QC 掩膜: {summary.qc_output_path}")
+        print(f"     网格规格: {summary.width} × {summary.height} (总计 {summary.total_pixels:,} 像元)")
+        print(f"     有效 DEM 像元: {summary.valid_dem_pixels:,}")
+        print(f"     - 大洋原生插值: {summary.native_mdt_pixels:,}")
+        print(f"     - 近岸空间外推: {summary.extrapolated_mdt_pixels:,}")
+        print(f"     - 截断/NoData:   {summary.nodata_pixels:,}")
+        print(f"     总耗时: {summary.elapsed_seconds:.2f} 秒")
+
+    elif args.mode == "convert-dem-batch":
+        from core.batch_datum_converter import BatchDEMDatumConverter
+        from core.dem_datum_converter import validate_mdt_extrapolation_distance
+        try:
+            eff_dist_km = validate_mdt_extrapolation_distance(args.max_dist_km)
+        except ValueError as e:
+            print(f"[ERROR] 命令行参数 --max-dist-km 非法: {e}", file=sys.stderr)
+            sys.exit(2)
+
+        if args.workers < 1:
+            print(f"[ERROR] 命令行参数 --workers 必须 >= 1，收到: {args.workers}", file=sys.stderr)
+            sys.exit(2)
+
+        print(f"[*] 启动批量 DEM 垂直基准转换: EGM2008 -> MSL (v1.7.1)...")
+        print(f"[*] 输入目录: {args.input_dir}")
+        print(f"[*] 输出目录: {args.output_dir}")
+        print(f"[*] 最大外推距离门禁: {eff_dist_km:.1f} km, 并发 Workers: {args.workers}, 保存 QC: {args.write_qc}")
+        print(f"[*] 断点恢复 (--resume): {args.resume}, 允许覆盖 (--overwrite): {args.overwrite}")
+
+        def _cli_batch_convert_prog(idx, total, cur_file, msg, stats):
+            pct = int((idx / max(1, total)) * 100)
+            fname = os.path.basename(cur_file) if cur_file else ""
+            print(f"    [{pct:3d}%] ({idx}/{total}) {fname} -> {msg}")
+
+        batch_converter = BatchDEMDatumConverter(max_extrapolation_distance_km=eff_dist_km)
+        summary = batch_converter.run_batch(
+            input_dir=args.input_dir,
+            output_dir=args.output_dir,
+            max_dist_km=eff_dist_km,
+            workers=args.workers,
+            resume=args.resume,
+            overwrite=args.overwrite,
+            write_qc=args.write_qc,
+            progress_callback=_cli_batch_convert_prog
+        )
+
+        print(f"[OK] 批量 DEM 垂直基准转换完成！")
+        print(f"     总文件数: {summary.total_tiles}")
+        print(f"     成功转换: {summary.success_count}")
+        print(f"     转换失败: {summary.failed_count}")
+        print(f"     跳过 (已是 MSL): {summary.skipped_msl_count}")
+        print(f"     跳过 (断点恢复): {summary.skipped_resume_count}")
+        print(f"     任务清单 (CSV): {summary.manifest_csv}")
+        print(f"     任务清单 (JSON): {summary.manifest_json}")
+        print(f"     总耗时: {summary.elapsed_seconds:.2f} 秒")
 
 
 if __name__ == '__main__':
