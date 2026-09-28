@@ -2,9 +2,10 @@ name: CoastTideX CI
 
 on:
   push:
-    branches: [ "main", "fix/**", "feat/**", "feature/**", "test/**" ]
+    branches: [ "main", "fix/**", "feat/**", "feature/**", "test/**", "docs/**" ]
   pull_request:
     branches: [ "main" ]
+  workflow_dispatch:
 
 jobs:
   test:

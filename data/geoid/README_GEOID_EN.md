@@ -1,4 +1,4 @@
-# CoastTideX Geoid and Vertical Datum Documentation (v1.6 Beta)
+# CoastTideX Geoid and Vertical Datum Documentation (v1.7.1)
 
 This directory contains the essential spatial rasters and geodetic definitions used by CoastTideX for high-precision vertical datum transformations across coastal and marine domains.
 

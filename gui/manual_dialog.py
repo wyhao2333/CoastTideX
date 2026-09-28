@@ -39,19 +39,20 @@ MANUAL_HTML = """
 </head>
 <body>
 
-<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7.1)</h1> <!-- CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta) -->
+<h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7.1)</h1>
 
 <div class="callout-info">
-<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7.1)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的高精度桌面与命令行解算系统。
+<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7.1)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的桌面与命令行空间天文潮模拟与垂直基准转换系统。
 </div>
 
 <h2>一、 系统定位与科学用途 (System Overview & Scientific Scope)</h2>
-<p>CoastTideX v1.6 Beta 提供全链路、可追溯、高保真的潮汐动力学模拟与空间栅格产品反演能力，涵盖四大主要业务场景：</p>
+<p>CoastTideX v1.7.1 提供全链路、可追溯的潮汐动力学模拟与空间栅格产品反演能力，涵盖五大主要业务场景：</p>
 <ul>
-    <li><b>单点连续潮位模拟</b>：支持全球任意经纬度的自定义时段或整年连续模拟，精确至分/小时级步长，支持 34 个半日潮、日潮与长周期分潮。</li>
+    <li><b>单点连续潮位模拟</b>：支持全球任意经纬度的自定义时段或整年连续模拟，支持分钟级或小时级时间采样间隔，支持 34 个半日潮、日潮与长周期分潮。</li>
     <li><b>批量站点时序解算</b>：面向沿海勘测点、浮标、验潮站，支持导入包含经纬度与时间戳的 CSV 表格，批量进行多基准面矢量化解算。</li>
     <li><b>单景影像空间栅格解算</b>：针对带有标准地理参考 (CRS) 的 GeoTIFF 影像，计算指定时刻空间水面高程快照 (Snapshot)、整年/时段潜在天文潮淹没频率 (Inundation Frequency) 及潜在天文潮露出时间域产品 (Exposure Duration)。</li>
     <li><b>文件夹级批量潮间带栅格解算</b>：面向千万像元级沿海 10m/30m 高分辨率 DEM，通过自适应四叉树控制网格、持久化 NetCDF Tide Cache 架构、断点恢复与任务清单实现大规模无人值守作业。</li>
+    <li><b>DEM 垂直基准转换 (EGM2008 &rarr; MSL)</b>：将陆地 DEM 垂直基准前置转换为局部平均海平面基准，支持单瓦片流式解算与大规模文件夹级多线程安全批量转换。</li>
 </ul>
 
 <h2>二、 核心科学定义与边界不变量 (Scientific Definitions & Boundary Invariants)</h2>
@@ -80,7 +81,7 @@ MANUAL_HTML = """
 <p>Inundation 模块的标准输出为潜在天文潮淹没频率（Float32，单位 %）与质量控制掩膜（UInt16）。若科研或工程分析中将 QC 掩膜各状态位作为空间协变量使用，必须严格明确其属于<b>物理与数值诊断协变量</b>（例如最小间距达标、最大细分深度达标、FES 动力学有效性突变边界、垂直基准几何多边形近似等数值与几何条件），<b>严禁含混表述为“地形协变量”或“水动力过程协变量”</b>。</p>
 
 <h2>三、 潜在天文潮露出 7 大空间栅格产物体系 (Seven Exposure Raster Products)</h2>
-<p>在潜在天文潮露出时间域反演模式下，系统逐文件通过 <code>*.tmp.tif</code> 原子替换输出 7 大高保真空间栅格产品（注：属于单文件级安全原子替换，非跨 7 个文件的整体事务级回滚），完全继承输入 DEM 的坐标系、仿射变换、空间范围与分辨率：</p>
+<p>在潜在天文潮露出时间域反演模式下，系统逐文件通过 <code>*.tmp.tif</code> 原子替换输出 7 类 Exposure 空间栅格产品（注：属于单文件级安全原子替换，非跨 7 个文件的整体事务级回滚），完全继承输入 DEM 的坐标系、仿射变换、空间范围与分辨率：</p>
 
 <table>
     <tr><th>产品文件名后缀</th><th>数据类型</th><th>物理单位</th><th>NoData 值</th><th>科学定义与应用说明</th></tr>
@@ -152,11 +153,11 @@ MANUAL_HTML = """
 <h2>五、 时间采样语义与 Schema 1.2 终端采样 (Temporal Semantics & Schema 1.2)</h2>
 <ul>
     <li><b>统一半开区间规范 <code>[start, end)</code></b>：
-        CoastTideX 栅格与缓存流水线统一采用半开区间（<code>inclusive="left"</code>）生成等间隔时网。在整年模拟中，例如 <code>[2024-01-01 00:00:00, 2025-01-01 00:00:00)</code>，30min 步长精确生成 <b>17,568</b> 个等权重样本点（闰年 366 天），完全消除跨年点重复统计的偏倚。
+        CoastTideX 栅格与缓存流水线采用半开区间（<code>inclusive="left"</code>）生成等间隔时网（通用点位时间序列接口保留可配置 inclusivity）。在整年模拟中，例如 <code>[2024-01-01 00:00:00, 2025-01-01 00:00:00)</code>，30min 步长精确生成 <b>17,568</b> 个等权重样本点（闰年 366 天），完全消除跨年点重复统计的偏倚。
     </li>
-    <li><b>Schema 1.2 终端采样保真</b>：
+    <li><b>Schema 1.2 终端采样与跨界闭合</b>：
         为了在半开区间下正确解算最后一个时间区间 <code>[t_{N-1}, t_end)</code> 的连续跨界，Tide Cache 升级至 <b>Schema 1.2</b>，显式记录终端时刻 <code>t_end</code> 对应的控制节点潮位 <code>tide_msl_terminal_m</code>。
-        系统在回读缓存时利用终端采样实现无截断的高保真线性插值，杜绝最后一个时步被虚假丢弃。
+        系统在回读缓存时利用终端采样实现连续线性跨界积分。如果历史兼容缓存缺少 terminal endpoint，则最后一个不能闭合的区间不纳入 Exposure 有效积分，相应降低 <code>valid_time_fraction</code> 并置位 <code>QC_EXP_TERMINAL_UNAVAILABLE = 8</code>。
     </li>
 </ul>
 
@@ -166,7 +167,7 @@ MANUAL_HTML = """
     <tr><th>基准面名称</th><th>物理定义</th><th>换算关系式</th><th>说明</th></tr>
     <tr><td><b>Tide (MSL)</b></td><td>相对局部平均海平面的瞬时潮位起伏</td><td>由 FES2022b 调和分析直接得出 (m)</td><td>零依赖外部重力场文件</td></tr>
     <tr><td><b>H_MDT_REF</b></td><td>相对当地 MDT 原始参考水准面的瞬时海面高</td><td><code>H_MDT_REF = Tide_MSL + MDT</code></td><td>大洋基于 GOCO06s，地中海/黑海基于 EIGEN-6C4</td></tr>
-    <tr><td><b>H_EGM2008</b></td><td>相对 EGM2008 大地水准面的绝对海拔正高</td><td><code>H_EGM2008 = H_MDT_REF + ΔN</code></td><td><code>ΔN = N_ref - N_EGM2008</code> (范围 -6.6m ~ +6.8m)</td></tr>
+    <tr><td><b>H_EGM2008</b></td><td>相对 EGM2008 大地水准面的高程 / 正高近似</td><td><code>H_EGM2008 = H_MDT_REF + ΔN</code></td><td><code>ΔN = N_ref - N_EGM2008</code> (范围 -6.6m ~ +6.8m)</td></tr>
     <tr><td><b>h_WGS84</b></td><td>WGS84 几何空间三维椭球高 (GNSS常用)</td><td><code>h_WGS84 = H_EGM2008 + N_EGM2008</code></td><td>通过 EGM2008 大地水准面差距换算</td></tr>
 </table>
 
@@ -182,7 +183,7 @@ MANUAL_HTML = """
         在 DEM 覆盖区以初始间距（默认 4,000 米）自适应构建控制节点。在水陆交界、潮滩急剧变化区域根据误差容忍度阈值（默认 1.0%）自动递归细分至最小间距（默认 500 米）。
     </li>
     <li><b>像元级拓扑连通防护 (Target-Mask-Derived Topology Guard)</b>：
-        根据 DEM 有效像元与 NoData 陆地屏障，自动构建多连通域拓扑标签。像元在双线性插值时仅使用归属于同一拓扑连通域的有效控制节点，基于目标 DEM valid/NoData 掩膜构建连通域，降低潮位跨越岛礁、海堤或掩膜隔离区域的双线性插值风险。
+        根据 DEM 有效像元与 NoData 区域，自动构建多连通域拓扑标签。像元在双线性插值时仅使用归属于同一拓扑连通域的有效控制节点。该防护机制由目标 DEM 的 valid/NoData 掩膜派生，作为空间插值防线与启发式过滤，不等价于真实水动力/水力连通性；目标 NoData 也不必然代表实际物理防潮海堤、陆地或绝对水力阻断结构。
     </li>
     <li><b>角点重归一化 (Degraded Cell Corner Normalization)</b>：
         当四叉树单元局部角点落在陆地无效区或属于不同连通域时，系统自动剔除无效角点并对剩余可用角点权重进行重新归一化，严禁无效节点以 0m 掺入污染。
@@ -313,22 +314,22 @@ MANUAL_HTML = """
 <h2>十六、 v1.7 架构重大升级：MSL 基准统一工作流 (MSL Reference Workflow)</h2>
 <div class="callout-success">
 <b>v1.7 科学范式变革 (Adapted from Seeger & Minderhoud, Nature, 2026):</b><br>
-传统潮滩水动力与淹没分析习惯将瞬时潮位由 MSL 转换为 EGM2008（经过复杂的 Tide + MDT + ΔN），再与 EGM2008 DEM 比较。这种传统模式在沿岸与陆上需要对海洋 MDT 进行未知精度的远距离外推，且容易因多重重力场模型差值引入空间系统偏差。<br>
-<b>CoastTideX v1.7 实现了全新的前置基准对齐工作流 (DEM_EGM2008 &rarr; DEM_MSL)</b>：将陆地高程基准统一到局部平均海平面 (MSL)，随后 FES 原生 MSL 潮位直接与 DEM_MSL 进行几何比较，不仅消除了潮位逐时空计算中的基准转换开销，更保证了潮间带潮水涨落与地形物理基准的严密一致。
+v1.7 MSL-first workflow 的主要价值是将静态垂直基准转换前置，使 DEM 与原生 MSL 潮位在同一参考面直接比较，减少运行时重复 MDT/ΔN 查询，并使 DEM_MSL 可复用。在同一点、相同 MDT、ΔN 和相同空间支撑条件下，旧 Tide&rarr;EGM2008 comparison 与新的 DEM&rarr;MSL comparison 在代数上等价。<br>
+<b>CoastTideX v1.7 实现了全新的前置基准对齐工作流 (DEM_EGM2008 &rarr; DEM_MSL)</b>：将陆地高程基准统一到局部平均海平面 (MSL)，随后 FES 原生 MSL 潮位直接与 DEM_MSL 进行几何比较，使数据基准关系和批处理流程更加清晰高效。
 </div>
 
 <h3>1. 核心数学转换方程</h3>
 <pre>Z_MSL = Z_EGM2008 - MDT - ΔN</pre>
 <p>式中：</p>
 <ul>
-    <li><code>Z_EGM2008</code>: 原始 DEM 像元在 EGM2008 大地水准面下的正高（米）；</li>
+    <li><code>Z_EGM2008</code>: 原始 DEM 像元在 EGM2008 大地水准面下的正高近似（米）；</li>
     <li><code>MDT</code>: 局部平均动态地形（采用 CNES-CLS22 / CMEMS2020 混合产品，大洋双线性插值，沿岸 3D-IDW 外推）；</li>
     <li><code>ΔN</code>: 局部高程异常差值改正 <code>N_ref - N_EGM2008</code>（GOCO06s/EIGEN-6C4 与 EGM2008 的严密闭合差值）；</li>
-    <li><code>Z_MSL</code>: 转换后在局部平均海平面 (MSL) 基准下的绝对高程（米）。</li>
+    <li><code>Z_MSL</code>: 转换后在局部平均海平面 (MSL) 基准下的高程（米）。</li>
 </ul>
 
 <h3>2. 沿岸 MDT 空间外推与可配置 0–500 km 门禁机制 (Adapted from Seeger & Minderhoud, Nature, 2026)</h3>
-<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合潮间带工程的高精度要求，设定了<b>可配置的 0.0 ~ 500.0 km 空间外推门禁（默认推荐 100.0 km）</b>：</p>
+<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合应用范围与工程设计，设定了<b>可配置的 0.0 ~ 500.0 km 空间外推门禁（默认推荐 100.0 km；Seeger & Minderhoud 2026 全球工作流采用距海岸线 500 km 应用范围）</b>：</p>
 <div class="callout-info">
 <b>科学实现方法定位说明：</b> 本系统采用球面三维空间直角坐标 k-NN 反距离加权外推算法（Adapted from Seeger & Minderhoud, Nature, 2026），并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异。
 </div>
@@ -345,14 +346,14 @@ MANUAL_HTML = """
 <ul>
     <li><b>多线程独立隔离 (Thread-Safe Workers)</b>: 支持并发 Workers &gt; 1 处理，采用线程私有独立 Converter 实例，避免局部网格缓存竞态污染；</li>
     <li><b>多因子严格断点恢复 (Strict Resume Skip)</b>: 结合 SHA-256 参数签名、输入文件大小与修改时间、输出 GeoTIFF 头部完整性与元数据标签，实现严密的跳过验证，参数变更或文件损坏时自动强制重算；</li>
-    <li><b>质量控制掩膜优化 (write_qc 开关)</b>: 默认关闭质量控制掩膜 GeoTIFF 的落盘写入，减少 50% 磁盘占用与大量 I/O 开销，需要诊断时可一键勾选开启。</li>
+    <li><b>质量控制掩膜优化 (write_qc 开关)</b>: 默认关闭质量控制掩膜 GeoTIFF 的落盘写入，从而减少额外磁盘占用与写入 I/O；实际节省比例取决于栅格内容、数据类型与压缩率，需要诊断时可一键勾选开启。</li>
 </ul>
 
 <h3>4. GUI 推荐操作流程 (One-Click Seamless Workflow)</h3>
 <ol>
     <li><b>步骤 1 (DEM 转换)</b>：打开 <b>「📐 DEM 基准转换 (EGM2008→MSL)」</b> 标签页，支持单文件转换或批量文件夹转换，点击「🚀 开始 DEM 基准转换」，系统流式输出 <code>*_MSL.tif</code> 并自动内嵌 <code>DATUM=MSL</code> 等元数据标签；</li>
     <li><b>步骤 2 (一键直通)</b>：在转换完成卡片上点击<b>「📊 用于单影像淹没频率分析」</b>或<b>「⏳ 用于单影像露出时间分析」</b>；</li>
-    <li><b>步骤 3 (直接解算)</b>：系统自动切换至栅格分析标签页，自动加载 <code>*_MSL.tif</code>，并自动锁定 DEM 基准面为 <b>MSL</b>，即可直接展开高精度潜在淹没与露出分析。</li>
+    <li><b>步骤 3 (直接解算)</b>：系统自动切换至栅格分析标签页，自动加载 <code>*_MSL.tif</code>，并自动锁定 DEM 基准面为 <b>MSL</b>，即可执行潜在天文潮淹没频率或 Exposure 分析。</li>
 </ol>
 
 </body>

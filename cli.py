@@ -122,7 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inund.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标感知模式 (默认: intertidal)")
     p_inund.add_argument("--export-cache", type=str, default=None, help="可选导出 Tide Cache (*_tide.nc)")
 
-    # 3.3 栅格潜在天文潮露出时间域分析 (v1.6 Beta)
+    # 3.3 栅格潜在天文潮露出时间域分析 (v1.7.1)
     p_exposure = raster_subparsers.add_parser("exposure", help="潜在天文潮露出时间域产品计算 (露出比例、累计时长与连续事件分析)")
     p_exposure.add_argument("--dem", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径")
     p_exposure.add_argument("--output-dir", "-o", type=str, default=None, help="输出产品目录 (默认与 DEM 同级)")
@@ -142,8 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_exposure.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标区域模式 (默认: intertidal)")
     p_exposure.add_argument("--overwrite", action="store_true", help="强制覆盖已存在输出")
 
-    # 3.4 批量潮间带栅格解算 (v1.6 Beta)
-    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.6 Beta)")
+    # 3.4 批量潮间带栅格解算 (v1.7.1)
+    p_batch_raster = raster_subparsers.add_parser("batch", aliases=["batch-intertidal"], help="批量潮间带栅格解算与 Tide Cache 流程 (v1.7.1)")
     p_batch_raster.add_argument("--input-folder", "-i", type=str, required=True, help="输入 GeoTIFF 文件夹路径")
     p_batch_raster.add_argument("--output-folder", "-o", type=str, default=None, help="输出文件夹路径 (默认: <input_folder>/CoastTideX_output)")
     p_batch_raster.add_argument("--mode", type=str, default="tide-inundation", choices=["tide", "tide-inundation", "inundation-from-cache", "tide-exposure", "exposure-from-cache", "all"], help="解算模式 (默认: tide-inundation)")
@@ -419,7 +419,7 @@ def main(args_list: Optional[List[str]] = None):
             print(f"     质量控制掩膜: {summary.qc_output_path}")
 
         elif args.raster_submode == "exposure":
-            print(f"[*] 启动潜在天文潮露出时间域栅格产品解算 (v1.6)...")
+            print(f"[*] 启动潜在天文潮露出时间域栅格产品解算 (v1.7.1)...")
             print(f"[*] 输入 DEM: {args.dem}")
             info = raster_engine.inspect_raster(args.dem, compute_valid_count=False)
             print(f"[*] DEM 规格: {info.width} × {info.height}, 坐标系: {info.crs}")

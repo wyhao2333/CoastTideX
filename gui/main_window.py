@@ -741,7 +741,7 @@ class MainWindow(QMainWindow):
 
         layout_model.addWidget(QLabel("分潮模式:"), 0, 0)
         self.combo_const = QComboBox()
-        self.combo_const.addItem("全部 34 个主分潮 (全精度)", "all")
+        self.combo_const.addItem("全部 34 个分潮 (默认科学配置)", "all")
         self.combo_const.addItem("8 个核心主分潮 (快速预览)", "major8")
         self._make_combo_responsive(self.combo_const)
         layout_model.addWidget(self.combo_const, 0, 1)
@@ -1927,6 +1927,7 @@ class MainWindow(QMainWindow):
         self.combo_raster_mode.addItem("🌊 单时刻空间潮位 / 水面高程 (Snapshot Raster Mode)", "snapshot")
         self.combo_raster_mode.addItem("📊 潜在天文潮淹没频率 (Annual / Period Inundation Frequency)", "inundation")
         self.combo_raster_mode.addItem("⏳ 潜在天文潮露出时间域分析 (Exposure Duration & Events)", "exposure")
+        self._make_combo_responsive(self.combo_raster_mode)
         self.combo_raster_mode.currentIndexChanged.connect(self._on_raster_mode_changed)
         layout_mode.addWidget(self.combo_raster_mode, 0, 1)
 
@@ -1952,20 +1953,23 @@ class MainWindow(QMainWindow):
         self.combo_snap_tz = QComboBox()
         self.combo_snap_tz.addItem("UTC (世界标准时)", "UTC")
         self.combo_snap_tz.addItem("本地时间 (Local Time)", "local")
+        self._make_combo_responsive(self.combo_snap_tz)
         layout_snap.addWidget(self.combo_snap_tz, 0, 3)
 
         layout_snap.addWidget(QLabel("目标垂直基准:"), 1, 0)
         self.combo_snap_datum = QComboBox()
-        self.combo_snap_datum.addItem("EGM2008 (大地水准面严密海拔正高)", "egm2008")
+        self.combo_snap_datum.addItem("EGM2008 (相对 EGM2008 大地水准面的高程 / 正高近似)", "egm2008")
         self.combo_snap_datum.addItem("MSL (相对平均海平面)", "msl")
         self.combo_snap_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
         self.combo_snap_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        self._make_combo_responsive(self.combo_snap_datum)
         layout_snap.addWidget(self.combo_snap_datum, 1, 1)
 
         layout_snap.addWidget(QLabel("分潮方案:"), 1, 2)
         self.combo_snap_const = QComboBox()
-        self.combo_snap_const.addItem("全部 34 个主分潮 (全精度)", "all")
+        self.combo_snap_const.addItem("全部 34 个分潮 (默认科学配置)", "all")
         self.combo_snap_const.addItem("8 个核心主分潮 (快速预览)", "major8")
+        self._make_combo_responsive(self.combo_snap_const)
         layout_snap.addWidget(self.combo_snap_const, 1, 3)
 
         layout_params.addWidget(self.container_snapshot)
@@ -1980,6 +1984,7 @@ class MainWindow(QMainWindow):
         self.combo_inund_time_mode = QComboBox()
         self.combo_inund_time_mode.addItem("整年快捷模式 (Year Mode)", "year")
         self.combo_inund_time_mode.addItem("自定义时段 (Custom Period)", "period")
+        self._make_combo_responsive(self.combo_inund_time_mode)
         self.combo_inund_time_mode.currentIndexChanged.connect(self._on_inund_time_mode_changed)
         layout_inund.addWidget(self.combo_inund_time_mode, 0, 1)
 
@@ -2013,9 +2018,10 @@ class MainWindow(QMainWindow):
         self.combo_inund_freq = QComboBox()
         self.combo_inund_freq.addItem("30分钟 (30min - 标准推荐)", "30min")
         self.combo_inund_freq.addItem("1小时 (1h - 快速解算)", "1h")
-        self.combo_inund_freq.addItem("15分钟 (15min - 高精度)", "15min")
+        self.combo_inund_freq.addItem("15分钟 (15min - 较高时间分辨率)", "15min")
         self.combo_inund_freq.addItem("10分钟 (10min)", "10min")
         self.combo_inund_freq.addItem("5分钟 (5min)", "5min")
+        self._make_combo_responsive(self.combo_inund_freq)
         layout_inund.addWidget(self.combo_inund_freq, 2, 1)
 
         layout_inund.addWidget(QLabel("DEM基准面:"), 2, 2)
@@ -2024,6 +2030,7 @@ class MainWindow(QMainWindow):
         self.combo_inund_datum.addItem("EGM2008 (相对 EGM2008 参考面 - 兼容模式)", "egm2008")
         self.combo_inund_datum.addItem("GOCO06s/EIGEN-6C4 (Tide+MDT)", "goco06s")
         self.combo_inund_datum.addItem("WGS84 (空间几何椭球高)", "wgs84")
+        self._make_combo_responsive(self.combo_inund_datum)
         self.combo_inund_datum.currentIndexChanged.connect(self._on_inund_datum_changed)
         layout_inund.addWidget(self.combo_inund_datum, 2, 3)
 
@@ -2031,6 +2038,7 @@ class MainWindow(QMainWindow):
         self.combo_inund_target_mode = QComboBox()
         self.combo_inund_target_mode.addItem("潮间带模式 (intertidal - 推荐)", "intertidal")
         self.combo_inund_target_mode.addItem("全域网格模式 (standard)", "standard")
+        self._make_combo_responsive(self.combo_inund_target_mode)
         self.combo_inund_target_mode.setToolTip("长周期栅格产品目标区域解算模式 (支持潜在淹没频率与潜在露出时长)")
         self.combo_raster_target_mode = self.combo_inund_target_mode
         layout_inund.addWidget(self.combo_inund_target_mode, 3, 1, 1, 3)
@@ -2501,7 +2509,7 @@ class MainWindow(QMainWindow):
             elif (flags < 0).any():
                 self.lbl_qc_status.setText("<span style='color:#f59e0b;font-weight:bold;'>⚠️ 存在近岸动力学外推 (Flag < 0)</span>")
             else:
-                self.lbl_qc_status.setText("<span style='color:#10b981;font-weight:bold;'>✅ 全程高保真有效 (Flag 1~6)</span>")
+                self.lbl_qc_status.setText("<span style='color:#10b981;font-weight:bold;'>✅ FES 结果有效，未触发 NoData / 外推警告 (Flag 1~6)</span>")
         else:
             self.lbl_qc_status.setText("-")
 
@@ -3083,13 +3091,13 @@ class MainWindow(QMainWindow):
         about_text = (
             "<h3>CoastTideX v1.7.1</h3>"
             "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (MSL Reference Workflow)</b></p>"
-            "<p>致力于为海洋工程、海岸带遥感、大地测量与潮滩生态演变建模提供高保真度的空间潮汐预测与严密基准转换工具。</p>"
+            "<p>面向海洋工程、海岸带遥感、大地测量与潮间带演变研究的空间天文潮模拟与垂直基准转换工具。</p>"
             "<ul>"
             "<li><b>v1.7 MSL 统一基准架构</b>: "
             "<ul>"
             "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
-            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 理论范式，大洋区双线性插值，沿岸默认 100 km (可配置 0–500 km) 球面 3D-IDW 保守外推；</li>"
-            "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界严密一致；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 方法范式，大洋区双线性插值，沿岸默认 100 km (可配置 0–500 km) 球面 3D-IDW 外推；</li>"
+            "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界几何一致；</li>"
             "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
             "</ul></li>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
@@ -3097,22 +3105,22 @@ class MainWindow(QMainWindow):
             "<ul>"
             "<li>MSL (相对平均海平面)</li>"
             "<li>MDT 原始大地水准面基准 (全球大洋 GOCO06s / 地中海与黑海 EIGEN-6C4)</li>"
-            "<li>EGM2008 (经 ΔN 改正的严密海拔正高)</li>"
+            "<li>EGM2008 (相对 EGM2008 大地水准面的高程 / 正高近似)</li>"
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
-            "<li><b>高精度水准面栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
+            "<li><b>全球大地水准面高栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
             "<li><b>潜在天文潮露出时间域分析引擎</b>: "
             "<ul>"
             "<li>固定代表性地形条件下的潜在天文潮露出时长 (Exposure Duration)、最长连续露出、平均事件时长、发生频次与有效时间覆盖率等 7 大独立 GeoTIFF 空间栅格产物；</li>"
-            "<li>高精度时间跨界线性插值 (Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
-            "<li>全系统严格遵循半开区间 [start, end) 时间采样语义，彻底消除末端双重统计。</li>"
+            "<li>基于相邻采样点的一阶时间跨界线性插值 (Sub-timestep Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
+            "<li>栅格与 Tide Cache 严格遵循半开区间 [start, end) 采样语义（点位时间序列支持按配置生成）。</li>"
             "</ul></li>"
             "<li><b>批量潮间带栅格引擎与 Tide Cache (Schema 1.2)</b>: "
             "<ul>"
             "<li>文件夹级自动化发现与轻量扫描，单瓦片顺序推进 (max_parallel_tiles = 1)；</li>"
             "<li>严格二阶段解耦架构：Stage 1 生成持久化 NetCDF Tide Cache，Stage 2 零 FES 快速反演淹没频率与潜在露出时长；</li>"
-            "<li>全要素规范兼容性签名 (SHA-256)、单瓦片失败隔离与防篡改断点恢复。</li>"
+            "<li>全要素规范兼容性签名 (SHA-256)、单瓦片失败隔离与断点恢复。</li>"
             "</ul></li>"
             "</ul>"
             "<p>作者 / 开发者：<b>王宇浩</b> (Yuhao Wang) | 核心引擎：CNES/AVISO pyfes, rasterio, pyproj & scipy</p>"

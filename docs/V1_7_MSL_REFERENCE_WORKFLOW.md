@@ -38,7 +38,7 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
 
 ### 2.2 两阶段 MDT 空间重构与可配置 0–500 km 门禁机制
 1. **阶段 1 (Native Ocean MDT)**：
-   - 对于开阔大洋与有效海域，采用 CNES-CLS22 原生网格高精度双线性插值（Bilinear Interpolation）；
+   - 对于开阔大洋与有效海域，采用 CNES-CLS22 原生网格双线性插值（Bilinear Interpolation）；
    - 质量控制编码标记为：`QC = 0 (native_mdt)`。
 2. **阶段 2 (Coastal & Land Extrapolation)**：
    - 对于潮滩内陆与岸线缺失区，将经纬度 $(\lambda, \varphi)$ 投影至以地球平均曲率半径 $R=6,371,000\text{ m}$ 的球面三维直角空间坐标系 $(X, Y, Z)$：
@@ -90,7 +90,7 @@ python cli.py convert-dem \
 - `--input`, `-i`: 待转换的原始 DEM GeoTIFF（必须为 EGM2008 基准）；
 - `--output`, `-o`: 输出 DEM_MSL GeoTIFF 路径（默认附加 `_MSL.tif`）；
 - `--qc-output`: 输出转换质量控制掩膜 GeoTIFF 路径（仅在需要自定义路径时指定）；
-- `--write-qc`: 是否输出质量控制掩膜 GeoTIFF（默认 False，节省 50% 磁盘 I/O）；
+- `--write-qc`: 是否输出质量控制掩膜 GeoTIFF（默认 False，关闭时避免额外生成 QC 栅格以节约存储与写入开销）；
 - `--max-dist-km`: MDT 空间外推允许的最大物理距离（0.0 - 500.0 km，默认 100.0）；
 - `--block-size`: 2D 空间流式分块边长（默认 1024 像元，内存占用平稳）；
 - `--overwrite`: 覆盖已存在同名输出。
@@ -187,7 +187,7 @@ for i in range(len(lons)):
 ### 6.1 转换 QC 掩膜编码 (`*_conversion_qc.tif` / `*_MSL_qc.tif`)
 | QC 数值 | 宏定义常量 | 几何与物理涵义 | 处理机制 |
 | :---: | :--- | :--- | :--- |
-| **0** | `QC_MDT_NATIVE` | 原始 CNES-CLS22 大洋开阔海域覆盖点 | 双线性插值，高精度保证 |
+| **0** | `QC_MDT_NATIVE` | 原始 CNES-CLS22 大洋开阔海域覆盖点 | 原生网格双线性插值 |
 | **1** | `QC_MDT_EXTRAPOLATED` | 近岸滩涂与陆地缺失点（距离有效海域 $\le \text{max\_dist}$） | 球面 3D 空间 k-NN IDW 外推 |
 | **2** | `QC_MDT_NODATA` | 输入 DEM 原生 NoData 或距离大洋有效海域 $> \text{max\_dist}$ | 严密物理阻断，赋 NoData |
 

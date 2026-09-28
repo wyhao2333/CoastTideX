@@ -1,7 +1,7 @@
 """
 CoastTideX 潜在天文潮露出时间域分析引擎 / Potential Astronomical Tidal Exposure Time-Domain Engine
 模块名称 / Module: core/exposure_engine.py
-版本 / Version: CoastTideX v1.6 Beta
+版本 / Version: CoastTideX v1.7.1
 
 科学定义 / Scientific Definition:
 ---------------------------------
@@ -61,7 +61,7 @@ from .raster_engine import (
 from .tide_cache import TideCacheIntegrityError, TideCacheTimeSeriesReader
 
 # 露出分析质量控制位掩膜定义 / Exposure QC Bitmask Definitions
-QC_EXP_VALID = 0                         # 0: 正常高保真解算 / Normal high-fidelity computation
+QC_EXP_VALID = 0                         # 0: 未触发当前定义的 Exposure QC/degradation bit / No defined exposure degradation bit triggered
 QC_EXP_DEGRADED_CELL = 1                 # bit 0: 四叉树单元部分角点降级插值 / Degraded interpolation in quad cell
 QC_EXP_INSUFFICIENT_NODES = 2            # bit 1: 缺少足够有效控制节点 / Insufficient valid control nodes
 QC_EXP_DATUM_APPROX = 4                  # bit 2: 基准面偏移采用多边形近似 / Datum offset from polygon approximation
@@ -429,7 +429,7 @@ def compute_2d_vec(
     z: np.ndarray
 ) -> Dict[str, np.ndarray]:
     """
-    纯二维向量化潜在天文潮露出时间域计算函数 (用于算法验证与小块高保真解算)。
+    纯二维向量化潜在天文潮露出时间域计算函数 (用于算法验证与小块精细解算)。
     Vectorized 2D exposure calculator for validation and testing.
 
     参数:

@@ -71,7 +71,7 @@ def estimate_control_node_memory(node_count: int, time_samples: int, dtype_bytes
 
 
 # 质量控制位掩码定义 (UInt16 Bitmask)
-QC_BIT_VALID = 0                      # 0: 无异常 / 完全有效高保真解算
+QC_BIT_VALID = 0                      # 0: 未触发当前定义的 Inundation QC/degradation bit / No defined inundation degradation bit triggered
 QC_BIT_FES_EXTRAPOLATED = 1 << 0      # bit 0 (1): 近岸动力学外推 (quality_flag < 0)
 QC_BIT_SPATIAL_FALLBACK = 1 << 1      # bit 1 (2): 空间插值降级 (可用控制节点少于4个)
 QC_BIT_INSUFFICIENT_NODES = 1 << 2    # bit 2 (4): 周围缺乏有效海洋控制节点 (无法插值，输出 NoData)

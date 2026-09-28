@@ -170,7 +170,8 @@ class DEMConversionSummary:
 class DEMDatumConverter:
     """
     DEM 垂直基准转换器 (DEM Vertical Datum Converter)
-    实现 DEM_EGM2008 到 DEM_MSL 的高精度流式转换。
+    实现 DEM_EGM2008 到 DEM_MSL 的流式空间转换。
+    支持大洋区双线性插值与沿岸球面 3D-IDW 外推 (默认 100 km，允许配置 0~500 km)。
     """
 
     def __init__(

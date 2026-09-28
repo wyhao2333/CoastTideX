@@ -1,5 +1,5 @@
 """
-CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.6 Beta)
+CoastTideX 设置与数据源管理对话框 (Settings Dialog v1.7.1)
 提供对 FES2022b 网格、FES2022b 潮位掩膜、MDT 数据、双重 DeltaN 栅格及 Hybrid MDT 来源掩膜的可视化路径配置与深层数据校验。
 """
 
@@ -87,11 +87,11 @@ def _deep_validate_file(path: str, file_type: str) -> tuple[bool, str]:
 
 
 class SettingsDialog(QDialog):
-    """数据源配置弹窗 (v1.6 Beta)"""
+    """数据源配置弹窗 (v1.7.1)"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.6 Beta")
+        self.setWindowTitle("数据源路径与系统设置 - CoastTideX v1.7.1")
         self.resize(720, 520)
         self.config = load_app_config()
 

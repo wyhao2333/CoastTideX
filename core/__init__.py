@@ -1,5 +1,5 @@
 """
-CoastTideX 核心计算包 / Core Computation Package (v1.6 Beta)
+CoastTideX 核心计算包 / Core Computation Package (v1.7.1)
 包含全球潮汐模型解算 (FES2022b)、垂直高程基准转换 (MDT/EGM2008/WGS84)、
 空间栅格解算调度 (Raster Engine)、Tide Cache 缓存管理体系、
 潜在天文潮淹没频率反演 (Inundation)、潜在天文潮露出时间域全要素分析 (Exposure)
