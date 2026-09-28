@@ -909,6 +909,235 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
         self.assertNotIn("上限 100 km", content)
         self.assertNotIn("超出100km", content)
 
+    def test_atomic_overwrite_preserves_old_output_if_replace_fails(self):
+        """FIX 1: 当 allow_overwrite=True 且最终 os.replace 失败时，原有旧输出文件绝不能被提前删除"""
+        dem_p = self._create_synthetic_dem("tile_atomic_src.tif")
+        out_msl = self.out_dir / "tile_atomic_src_MSL.tif"
+        out_qc = self.out_dir / "tile_atomic_src_MSL_conversion_qc.tif"
+
+        # 先写入旧产物，包含可识别的旧数值 123.456
+        transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+        old_data = np.ones((1, 10, 10), dtype=np.float32) * 123.456
+        with rasterio.open(
+            str(out_msl), "w", driver="GTiff", height=10, width=10, count=1,
+            dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+        ) as dst:
+            dst.write(old_data)
+            dst.update_tags(DATUM="MSL", TARGET_VERTICAL_DATUM="MSL", SOURCE_VERTICAL_DATUM="EGM2008")
+
+        conv = DEMDatumConverter(max_extrapolation_distance_km=100.0)
+
+        orig_replace = os.replace
+        def mock_replace(src, dst):
+            if str(dst) == str(out_msl):
+                raise OSError("simulated replace failure for MSL")
+            return orig_replace(src, dst)
+
+        with patch("os.replace", side_effect=mock_replace):
+            with self.assertRaises(OSError):
+                conv.convert_raster(
+                    input_dem_path=str(dem_p),
+                    output_msl_path=str(out_msl),
+                    output_qc_path=str(out_qc),
+                    allow_overwrite=True,
+                    write_qc=True
+                )
+
+        # 核心断言：由于没有在 replace 前调用 os.remove，旧文件依然完好无损存在，且内容依然是 123.456
+        self.assertTrue(out_msl.exists(), "replace 失败时旧 MSL 输出文件绝不能丢失！")
+        with rasterio.open(str(out_msl)) as src:
+            arr = src.read(1)
+            np.testing.assert_allclose(arr, 123.456, atol=1e-3)
+
+    def test_resume_missing_conversion_signature_recomputes(self):
+        """FIX 2 - Test A: 历史清单缺少 conversion_signature 时，严格断点恢复必须拒绝跳过并触发重算"""
+        in_d = self.tmp_path / "in_sig_missing"
+        out_d = self.tmp_path / "out_sig_missing"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_sig_missing.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 5.0
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path="",
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            # 篡改 manifest: 清空 conversion_signature
+            manifest = BatchConversionManifest(str(out_d))
+            manifest.upsert(str(t.resolve()), conversion_signature="")
+            manifest.save()
+
+            # 第 2 次运行: resume=True -> 必须 fail-closed 触发重算
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s2.success_count, 1)
+            self.assertEqual(call_count, 2, "缺少 conversion_signature 时必须触发重新转换")
+
+    def test_resume_missing_input_size_recomputes(self):
+        """FIX 2 - Test B: 历史清单缺少 input_size_bytes 时，严格断点恢复必须拒绝跳过并触发重算"""
+        in_d = self.tmp_path / "in_size_missing"
+        out_d = self.tmp_path / "out_size_missing"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_size_missing.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 5.0
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path="",
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            # 篡改 manifest: 清空 input_size_bytes
+            manifest = BatchConversionManifest(str(out_d))
+            manifest.upsert(str(t.resolve()), input_size_bytes="")
+            manifest.save()
+
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s2.success_count, 1)
+            self.assertEqual(call_count, 2, "缺少 input_size_bytes 时必须触发重新转换")
+
+    def test_resume_missing_input_mtime_recomputes(self):
+        """FIX 2 - Test C: 历史清单缺少 input_mtime_ns 时，严格断点恢复必须拒绝跳过并触发重算"""
+        in_d = self.tmp_path / "in_mtime_missing"
+        out_d = self.tmp_path / "out_mtime_missing"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_mtime_missing.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 5.0
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path="",
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            # 篡改 manifest: 清空 input_mtime_ns
+            manifest = BatchConversionManifest(str(out_d))
+            manifest.upsert(str(t.resolve()), input_mtime_ns="")
+            manifest.save()
+
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s2.success_count, 1)
+            self.assertEqual(call_count, 2, "缺少 input_mtime_ns 时必须触发重新转换")
+
+    def test_resume_missing_distance_tag_recomputes(self):
+        """FIX 2 - Test D: 历史输出 GeoTIFF 缺少 MAX_EXTRAPOLATION_DISTANCE_KM 标签时必须触发重算"""
+        in_d = self.tmp_path / "in_dist_missing"
+        out_d = self.tmp_path / "out_dist_missing"
+        in_d.mkdir(parents=True, exist_ok=True)
+        out_d.mkdir(parents=True, exist_ok=True)
+        t = self._create_synthetic_dem("tile_dist_missing.tif", target_dir=in_d)
+        call_count = 0
+
+        def fake_convert(self, input_dem_path, output_msl_path, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            out_p = Path(output_msl_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_bounds(121.0, 31.0, 121.1, 31.1, 10, 10)
+            data = np.ones((1, 10, 10), dtype=np.float32) * 5.0
+            with rasterio.open(
+                str(out_p), "w", driver="GTiff", height=10, width=10, count=1,
+                dtype=rasterio.float32, crs="EPSG:4326", transform=transform, nodata=-9999.0
+            ) as dst:
+                dst.write(data)
+                dst.update_tags(
+                    DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                )
+            return DEMConversionSummary(
+                input_path=input_dem_path, output_path=output_msl_path, qc_output_path="",
+                width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
+                extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
+                max_extrapolation_distance_km=100.0, metadata={}
+            )
+
+        with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
+            b = BatchDEMDatumConverter()
+            s1 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s1.success_count, 1)
+            self.assertEqual(call_count, 1)
+
+            # 故意去除输出 GeoTIFF 中的 MAX_EXTRAPOLATION_DISTANCE_KM 标签
+            out_p = out_d / "tile_dist_missing_MSL.tif"
+            with rasterio.open(str(out_p), "r+") as dst:
+                dst.update_tags(MAX_EXTRAPOLATION_DISTANCE_KM="")
+
+            s2 = b.run_batch(str(in_d), str(out_d), resume=True)
+            self.assertEqual(s2.success_count, 1)
+            self.assertEqual(call_count, 2, "缺少 MAX_EXTRAPOLATION_DISTANCE_KM 标签时必须触发重新转换")
+
 
 @unittest.skipUnless(HAS_RASTERIO, "需要 rasterio 环境")
 class TestMetadataConsistencyAndCitation(unittest.TestCase):

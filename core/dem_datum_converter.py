@@ -786,14 +786,10 @@ class DEMDatumConverter:
                     with rasterio.open(tmp_qc, 'r+') as dst_qc_meta:
                         dst_qc_meta.update_tags(**meta_tags)
 
-                # 原子替换到最终目标路径
-                if os.path.exists(output_msl_path) and allow_overwrite:
-                    os.remove(output_msl_path)
+                # 真正原子替换到最终目标路径 (直接调用 os.replace，无需提前删除目标文件，避免异常崩溃导致旧产品丢失)
                 os.replace(tmp_msl, output_msl_path)
 
                 if write_qc and tmp_qc and output_qc_path:
-                    if os.path.exists(output_qc_path) and allow_overwrite:
-                        os.remove(output_qc_path)
                     os.replace(tmp_qc, output_qc_path)
 
             except Exception:

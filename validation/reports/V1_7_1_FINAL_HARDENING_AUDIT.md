@@ -43,18 +43,34 @@
 
 ## 2. 自动化测试套件执行与验证统计 (Automated Test Suite Results)
 
-测试在本地独立虚拟环境 (`I:\Test_tide_model\.venv`) 下完整执行：
+测试套件分别在本地独立虚拟环境 (`I:\Test_tide_model\.venv`) 与 GitHub Actions 远端 CI 环境下完整执行并记录权威控制台结果：
 
-| 测试模块 | 测试用例数 | 执行状态 | 耗时 | 重点验证内容 |
-| :--- | :---: | :---: | :---: | :--- |
-| `tests/test_v171_final_hardening.py` | 22 | **22 / 22 PASS** | 2.64s | 0-500km 严格校验、0km 模式、动态支持窗口、180°日界线合成 NetCDF、Workers 并发隔离与数值等价、write_qc 磁盘优化、严格断点恢复多因子防伪、元数据标签 |
-| `tests/test_batch_dem_conversion.py` | 10 | **10 / 10 PASS** | 0.59s | 批量扫描排除规则、断点续传、MSL 标签跳过、双清单生成、故障隔离、CLI 参数、GUI 取消句柄 |
-| `tests/test_dem_msl_conversion.py` | 9 | **9 / 9 PASS** | 2.68s | 代数可逆恒等式、原生大洋插值、近岸 IDW 外推、流式分块写入、原子替换更名、CLI convert-dem 解析 |
-| `tests/test_v17_gui_msl_workflow.py` | 10 | **10 / 10 PASS** | 1.83s | GUI DEM 转换卡片、SpinBox 0-500km 范围、Tab 联动直通、MSL 基准锁定、多线程 Worker 取消 |
-| `tests/test_v171_gui_responsive_layout.py` | 7 | **7 / 7 PASS** | 2.04s | 7 大标签页 QScrollArea 容器包裹、最小窗体无截断、高分屏 DPI 自适应、版本号一致性 |
-| **全库单元测试回归套件 (Full Suite)** | **313** | **313 / 313 PASS** | **59.51s** | 全局四大基准、潮位预测、四叉树空间重构、露出时间域 7 大产品、断点策略预检、CLI/GUI 集成 |
+### 2.1 本地测试执行结果 (Local Execution)
+- **命令**: `& "I:\Test_tide_model\.venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py"`
+- **控制台输出**:
+  ```text
+  Ran 318 tests
+  OK
+  ```
+- **统计**: 318 tests executed, 0 failures, 0 errors.
 
-**全库测试通过率：100.0% (313 / 313 tests passing, 0 failures, 0 errors, 0 skips due to regression)**
+### 2.2 远端 CI 流水线结果 (GitHub Actions CI)
+- **环境**: `ubuntu-latest` (无 pyfes 编译环境，无图形界面)
+- **控制台输出规范**:
+  ```text
+  Ran 318 tests
+  OK (skipped=7)
+  ```
+- **统计**: Ran 318 tests, OK, 7 skipped (无 pyfes 环境正常守卫跳过), 0 failures, 0 errors.
+
+### 2.3 重点模块覆盖统计
+| 测试模块 | 重点验证内容 |
+| :--- | :--- |
+| `tests/test_v171_final_hardening.py` | 0-500km 严格校验、0km 模式、动态支持窗口、180°日界线合成 NetCDF、Workers 1/2/4 并发隔离与数值等价、write_qc 磁盘优化、严格断点恢复多因子防伪、原子覆盖保护、元数据标签 |
+| `tests/test_batch_dem_conversion.py` | 批量扫描排除规则、断点续传、MSL 标签跳过、双清单生成、故障隔离、CLI 参数、GUI 取消句柄 |
+| `tests/test_dem_msl_conversion.py` | 代数可逆恒等式、原生大洋插值、近岸 IDW 外推、流式分块写入、真正原子覆盖更名、CLI convert-dem 解析 |
+| `tests/test_v17_gui_msl_workflow.py` | GUI DEM 转换卡片、SpinBox 0-500km 范围、Tab 联动直通、MSL 基准锁定、多线程 Worker 取消 |
+| `tests/test_v171_gui_responsive_layout.py` | 7 大标签页 QScrollArea 容器包裹、最小窗体无截断、高分屏 DPI 自适应、版本号一致性 |
 
 ---
 

@@ -299,8 +299,10 @@ def verify_resume_skip(
         return False, "输出产物文件缺失或为空"
 
     # 1. 参数指纹检查
-    recorded_sig = str(manifest_entry.get("conversion_signature", ""))
-    if recorded_sig and recorded_sig != current_signature:
+    recorded_sig = str(manifest_entry.get("conversion_signature", "")).strip()
+    if not recorded_sig:
+        return False, "历史清单缺少 conversion_signature，无法完成严格断点验证，需要重新计算"
+    if recorded_sig != current_signature:
         return False, f"转换参数指纹已变更 (记录: {recorded_sig[:8]}, 当前: {current_signature[:8]})"
 
     recorded_dist = manifest_entry.get("max_dist_km")
@@ -318,20 +320,22 @@ def verify_resume_skip(
 
     in_stat = in_file.stat()
     rec_size = manifest_entry.get("input_size_bytes")
-    if rec_size:
-        try:
-            if int(rec_size) != in_stat.st_size:
-                return False, f"输入 DEM 文件大小已改变 ({rec_size} -> {in_stat.st_size})"
-        except (ValueError, TypeError):
-            return False, "输入文件大小记录异常"
+    if rec_size in ("", None):
+        return False, "历史清单缺少 input_size_bytes，需要重新计算"
+    try:
+        if int(rec_size) != in_stat.st_size:
+            return False, f"输入 DEM 文件大小已改变 ({rec_size} -> {in_stat.st_size})"
+    except (ValueError, TypeError):
+        return False, "输入文件大小记录异常"
 
     rec_mtime = manifest_entry.get("input_mtime_ns")
-    if rec_mtime:
-        try:
-            if int(rec_mtime) != in_stat.st_mtime_ns:
-                return False, "输入 DEM 文件修改时间戳已更新"
-        except (ValueError, TypeError):
-            return False, "输入时间戳记录异常"
+    if rec_mtime in ("", None):
+        return False, "历史清单缺少 input_mtime_ns，需要重新计算"
+    try:
+        if int(rec_mtime) != in_stat.st_mtime_ns:
+            return False, "输入 DEM 文件修改时间戳已更新"
+    except (ValueError, TypeError):
+        return False, "输入时间戳记录异常"
 
     # 3. 输出 GeoTIFF 文件结构与元数据健康检查
     try:
@@ -354,12 +358,13 @@ def verify_resume_skip(
                 return False, "输出栅格 SOURCE_VERTICAL_DATUM 标签缺失或非 EGM2008"
 
             tag_dist = tags.get("MAX_EXTRAPOLATION_DISTANCE_KM")
-            if tag_dist is not None:
-                try:
-                    if not np.isclose(float(tag_dist), expected_max_dist_km, atol=1e-3):
-                        return False, f"输出栅格内嵌外推距离标签 ({tag_dist} km) 与当前请求 ({expected_max_dist_km} km) 不符"
-                except ValueError:
-                    return False, "输出栅格内嵌外推距离标签解析异常"
+            if tag_dist is None or str(tag_dist).strip() == "":
+                return False, "历史输出缺少 MAX_EXTRAPOLATION_DISTANCE_KM 标签，需要重新计算"
+            try:
+                if not np.isclose(float(tag_dist), expected_max_dist_km, atol=1e-3):
+                    return False, f"输出栅格内嵌外推距离标签 ({tag_dist} km) 与当前请求 ({expected_max_dist_km} km) 不符"
+            except (ValueError, TypeError):
+                return False, "输出栅格内嵌外推距离标签解析异常"
 
             # 4. 当期望生成 QC 时，校验 QC 产物健康状态
             if expected_write_qc:

@@ -1,5 +1,5 @@
 """
-CoastTideX 命令行工具 (Command-Line Interface v1.6 Beta)
+CoastTideX 命令行工具 (CoastTideX Command-Line Interface v1.7.1)
 用于脚本批处理、无人值守自动化、年度连续模拟、空间栅格潮位解算、淹没频率与潜在露出时间域分析。
 
 使用示例:
@@ -55,7 +55,7 @@ from core.utils import export_dataframe
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.7")
+    parser = argparse.ArgumentParser(description="CoastTideX: 全球海岸带潮位预测与基准转换系统 v1.7.1")
 
     subparsers = parser.add_subparsers(dest="mode", help="运行模式: single (单点), batch (批量), raster (空间栅格), 或 convert-dem (DEM 基准转换)")
 
