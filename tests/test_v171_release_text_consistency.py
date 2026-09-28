@@ -250,6 +250,54 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         self.assertEqual(re_mod.QC_VALID, 0)
         self.assertEqual(re_mod.QC_NODATA, 65535)
 
+    # 13. 验证 Git 跟踪状态下绝无任何 AI/Agent 指令文件
+    def test_git_tracked_no_agent_files(self):
+        """验证 Git 跟踪状态下绝不存在任何 AGENT / AGENTS / GEMINI / CLAUDE / CODEX 指令文件"""
+        import subprocess
+
+        res = subprocess.run(
+            ["git", "ls-files"],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if res.returncode == 0:
+            tracked_files = [line.strip() for line in res.stdout.splitlines() if line.strip()]
+            pattern = re.compile(r"(^|[/\\])(AGENT|AGENTS|GEMINI|CLAUDE|CODEX)\.md$", re.IGNORECASE)
+            tracked_agent_files = [f for f in tracked_files if pattern.search(f)]
+            self.assertEqual(
+                tracked_agent_files,
+                [],
+                f"发现被 Git 跟踪的 Agent 指令文件: {tracked_agent_files}",
+            )
+
+    # 14. 验证生产文件无陈旧版本号且 Exposure SOFTWARE 标签为 CoastTideX v1.7.1
+    def test_production_files_no_stale_versions_and_exposure_software(self):
+        """验证 config.yaml、core/exposure_engine.py、core/raster_engine.py、gui/main_window.py 无陈旧版本文字，且 Exposure 标签为 v1.7.1"""
+        # 1. 验证 config.yaml
+        cfg_text = (PROJECT_ROOT / "config.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("v1.6", cfg_text)
+        self.assertIn("全球海岸带潮位模拟与高程基准转换系统 v1.7.1", cfg_text)
+        self.assertIn("Exposure Engine v1.7.1", cfg_text)
+
+        # 2. 验证 core/exposure_engine.py
+        ee_text = (PROJECT_ROOT / "core" / "exposure_engine.py").read_text(encoding="utf-8")
+        self.assertNotIn("CoastTideX v1.6 Beta", ee_text)
+        self.assertIn('"SOFTWARE": "CoastTideX v1.7.1"', ee_text)
+
+        # 3. 验证 core/raster_engine.py
+        re_text = (PROJECT_ROOT / "core" / "raster_engine.py").read_text(encoding="utf-8")
+        self.assertNotIn("Spatial Raster Tide Engine v1.6", re_text)
+        self.assertNotIn("v1.6: 全系统统一", re_text)
+        self.assertIn("Spatial Raster Tide Engine v1.7.1", re_text)
+
+        # 4. 验证 gui/main_window.py
+        mw_text = (PROJECT_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+        self.assertNotIn("BatchRasterWorker (v1.5)", mw_text)
+        self.assertNotRegex(mw_text, r"BatchRasterWorker\s*\(v1\.5\)")
+
 
 if __name__ == "__main__":
     unittest.main()
+

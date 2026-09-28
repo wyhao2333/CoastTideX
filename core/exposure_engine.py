@@ -816,7 +816,7 @@ def stream_exposure_metrics_interpolation(
         end_utc_iso = str(metadata_tags.get("TIME_END_UTC", pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat())) if metadata_tags else pd.Timestamp(end_utc_epoch, unit="s", tz="UTC").isoformat()
 
     full_meta = {
-        "SOFTWARE": "CoastTideX v1.6 Beta",
+        "SOFTWARE": "CoastTideX v1.7.1",
         "COASTTIDEX_VERSION": COASTTIDEX_VERSION,
         "PRODUCT_TYPE": "Potential Astronomical Tidal Exposure Duration Suite",
         "EXPOSURE_DEFINITION": "Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain (Inundated: H>z, Exposed: H<=z)",

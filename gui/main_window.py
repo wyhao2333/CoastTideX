@@ -369,7 +369,7 @@ class BatchScanWorker(QThread):
 
 
 class BatchRasterWorker(QThread):
-    """批量潮间带栅格解算后台工作线程 (v1.5)"""
+    """批量潮间带栅格解算后台工作线程"""
     progress = pyqtSignal(int, int, str, str, dict)
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
