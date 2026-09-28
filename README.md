@@ -21,12 +21,12 @@
 
 **CoastTideX** 是一款面向**海岸带遥感、海洋测绘、沿海潮滩生态演变与水下水文建模**研发的空间潮位模拟与大地测量垂直基准转换系统。
 
-系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，有效降低了传统规则经纬度网格在曲折海岸线、喇叭形海湾与河口区域由网格台阶逼近带来的近岸潮位误差。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部平均海平面参考 (MSL)、大地水准面高程与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
+系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含 34 个主分潮的 LGP2 二阶非结构有限元网格）** 为核心动力学引擎，CoastTideX 直接使用 FES2022b native unstructured mesh，从而避免在系统内部再次把 native mesh 规则化为经纬度栅格后再进行一轮空间重采样。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部平均海平面参考 (MSL)、大地水准面高程与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
 
-在 **CoastTideX v1.7 / v1.7.1** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**，通过前置 DEM 垂直基准转换 ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) 与近岸 100 km 球面 IDW 外推门禁，实现空间网格淹没与露出解算过程中的零 MDT 重复查询与 100% 决策等价性，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。v1.7.1 进一步新增**大规模海量潮滩 DEM 瓦片批量流式转换引擎 (`convert-dem-batch`)**，支持断点续传、失败瓦片物理隔离与双格式 Manifest 自动化跟踪。
+在 **CoastTideX v1.7 / v1.7.1** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架进行改编实现，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**：通过前置 DEM 垂直基准转换 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$) 与近岸可配置 0–500 km（默认 100 km）球面 IDW 外推门禁，在 MSL-first Stage 1 路径中无需逐控制节点重复执行 MDT/ΔN 基准转换；在相同静态偏移与空间支撑条件下，DEM→MSL 判定与旧版判定代数等价，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。v1.7.1 进一步新增**大规模海量潮滩 DEM 瓦片批量流式转换引擎 (`convert-dem-batch`)**，支持断点续传、失败瓦片物理隔离与双格式 Manifest 自动化跟踪。
 
 > [!NOTE]
-> 当前版本为 **CoastTideX v1.7.1**。系统具备严密分层防御架构与自动化验证套件，已全面通过真实海岸带千万级像元 DEM 端到端科学闭环验证。
+> 当前版本为 **CoastTideX v1.7.1**。系统具备严密分层防御架构与自动化验证套件，已在崇明大型 DEM、synthetic antimeridian cases、batch worker regression 与自动化单元测试中完成相应工程与数值验证（注：这些测试不构成对所有全球海岸环境的统一物理精度保证）。
 
 ---
 
@@ -52,32 +52,94 @@
 
 ### 级联转换严密数学关系式：
 1. **瞬时海面相对局部平均海平面参考 (MSL)**：
-   $$\text{Tide}(t, \lambda, \varphi) = \sum_{k=1}^{34} f_k(t) A_k(\lambda, \varphi) \cos\left( \omega_k t + v_k(t) + u_k(t) - G_k(\lambda, \varphi) \right)$$
+
+   ```math
+   \mathrm{Tide}_{\mathrm{MSL}}(t,\lambda,\varphi)
+   =
+   \sum_{k=1}^{34}
+   f_k(t) A_k(\lambda,\varphi)
+   \cos\left[
+   \omega_k t + v_k(t) + u_k(t) - G_k(\lambda,\varphi)
+   \right]
+   ```
+
 2. **瞬时海面相对 MDT 原始水准面 (Global Ocean: GOCO06s; Med/Black Sea: EIGEN-6C4)**：
-   $$H_{\text{MDT\_REF}}(t, \lambda, \varphi) = \text{Tide}(t, \lambda, \varphi) + \text{MDT}_{\text{CLS22}}(\lambda, \varphi)$$
-3. **改正至 EGM2008 大地水准面参考高程 (EGM2008-referenced geoid height)**：
-   $$H_{\text{EGM2008}}(t, \lambda, \varphi) = H_{\text{MDT\_REF}}(t, \lambda, \varphi) + \Delta N(\lambda, \varphi)$$
-   - 全球大洋：$\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
-   - 地中海/黑海：$\Delta N(\lambda, \varphi) = N_{\text{EIGEN-6C4}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
+
+   ```math
+   H_{\mathrm{MDT\,REF}}(t,\lambda,\varphi)
+   =
+   \mathrm{Tide}_{\mathrm{MSL}}(t,\lambda,\varphi)
+   +
+   \mathrm{MDT}_{\mathrm{CLS22}}(\lambda,\varphi)
+   ```
+
+3. **改正至 EGM2008 大地水准面参考高程 (EGM2008-referenced height / orthometric-height approximation)**：
+
+   ```math
+   H_{\mathrm{EGM2008}}(t,\lambda,\varphi)
+   =
+   H_{\mathrm{MDT\,REF}}(t,\lambda,\varphi)
+   +
+   \Delta N(\lambda,\varphi)
+   ```
+
+   - 全球大洋：
+     ```math
+     \Delta N(\lambda,\varphi)
+     =
+     N_{\mathrm{GOCO06s}}(\lambda,\varphi)
+     -
+     N_{\mathrm{EGM2008}}(\lambda,\varphi)
+     ```
+   - 地中海/黑海：
+     ```math
+     \Delta N(\lambda,\varphi)
+     =
+     N_{\mathrm{EIGEN-6C4}}(\lambda,\varphi)
+     -
+     N_{\mathrm{EGM2008}}(\lambda,\varphi)
+     ```
+
 4. **换算至 WGS84 几何空间三维椭球高**：
-   $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
+
+   ```math
+   h_{\mathrm{WGS84}}(t,\lambda,\varphi)
+   =
+   H_{\mathrm{EGM2008}}(t,\lambda,\varphi)
+   +
+   N_{\mathrm{EGM2008}}(\lambda,\varphi)
+   ```
 
 ### 2.1 v1.7 核心创新: 基于 MSL 统一基准的空间淹没与露出分析架构 (MSL Reference Workflow)
 
 根据国际地球物理研究成果 **Seeger & Minderhoud (Nature, 2026)** "Sea level much higher than assumed in most coastal hazard assessments"，全球绝大多数海岸带灾害评估由于未能正确统一海平面与陆地高程基准，系统性低估了沿岸实际海平面高程。该研究提出利用平均动态地形 (MDT) 作为连接重力大地水准面与局部平均海平面的物理基准，并通过空间外推建立向陆延伸的海平面基准面。
 
 **CoastTideX v1.7** 借鉴该基准统一思想，针对高分辨率潮间带地形分析需求进行工程改编实现（Adapted from Seeger & Minderhoud, 2026）：**将陆地 DEM 前置转换为局部平均海平面 (Local Mean Sea Level, MSL) 基准**：
-$$Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$$
 
-转换后，FES2022b 预测的纯物理动力学潮位 $\text{Tide}_{\text{MSL}}(t)$ 与 $\text{DEM}_{\text{MSL}}$ 直接在同一局部平均海平面几何物理基准下进行无缝比较：
-$$\text{Tide}_{\text{MSL}}(t) > \text{DEM}_{\text{MSL}}$$
+```math
+Z_{\mathrm{MSL}}
+=
+Z_{\mathrm{EGM2008}}
+-
+\mathrm{MDT}
+-
+\Delta N
+```
+
+转换后，FES2022b 预测的纯物理动力学潮位 $\mathrm{Tide}_{\mathrm{MSL}}(t)$ 与 $\mathrm{DEM}_{\mathrm{MSL}}$ 直接在同一局部平均海平面参考基准下进行比较：
+
+```math
+\mathrm{Tide}_{\mathrm{MSL}}(t)
+>
+\mathrm{DEM}_{\mathrm{MSL}}
+```
 
 #### 关键技术特性与科学保证：
-1. **开阔大洋与近岸外推两阶段 MDT 重构**：开阔大洋海域采用 CNES-CLS22 原生网格高精度双线性插值（标记 `QC=0: native_mdt`）；近岸与陆地缺失区采用球面三维空间直角坐标反距离加权（IDW，标记 `QC=1: idw_extrapolated`）；
-2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认推荐 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现*）；
-3. **Stage 1 控制节点零 MDT 查询 (Zero-MDT-Lookup)**：在自适应控制网格求解淹没频率与露出时长时，节点直接解算纯天文潮序列，完全消除数百次重力大地水准面重复采样开销；
-4. **决策等价性 100% 严密闭环**：基于崇明岛 1.5 亿像元高分辨率真实地形进行 10,000 点抽样（240,000 次判定测试），验证代数变换前后淹没判定一致率达到 **100.0000%**（残差仅为单精度浮点极限 $\sim 10^{-7}\text{ m}$）；
-5. **平滑向后兼容**：保留 `dem_datum="egm2008"` 作为向后兼容选项（触发 `DeprecationWarning`），系统默认全面推荐并切换至 `dem_datum="msl"`。
+1. **开阔大洋与近岸外推两阶段 MDT 重构**：开阔大洋海域采用 CNES-CLS22 原生网格双线性插值（标记 `QC=0: native_mdt`，表示原生大洋插值路径，不作为绝对精度保证）；近岸与陆地缺失区采用球面三维空间直角坐标反距离加权（IDW，标记 `QC=1: idw_extrapolated`）；
+2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认推荐 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现；Seeger & Minderhoud (2026) 全球工作流采用距海岸线 500 km 应用范围，CoastTideX 默认 100 km 为本系统应用场景推荐值*）；
+3. **Stage 1 控制节点零 MDT 查询 (Zero-MDT-Lookup)**：在自适应控制网格求解淹没频率与露出时长时，节点直接解算纯天文潮序列，无需在控制节点尺度重复查询 MDT 模型；
+4. **决策等价性严密闭环**：基于崇明岛 1.5 亿像元高分辨率真实地形进行 10,000 点抽样（240,000 次判定测试），验证在相同静态偏移与空间支撑条件下，代数变换前后淹没判定一致率达到 **100.0000%**（残差仅为单精度浮点极限 $\sim 10^{-7}\text{ m}$）；
+5. **平滑向后兼容**：保留 `dem_datum="egm2008"` 作为向后兼容选项（触发 `DeprecationWarning`），系统默认推荐使用 `dem_datum="msl"`。
 
 ---
 
@@ -129,7 +191,7 @@ CoastTideX 实现了**自适应四叉树控制网格与经验互补累积分布 
 ### 科学定义与术语界定 / Strict Terminology Boundary
 > [!WARNING]
 > **科学严谨性声明**：本功能产物严格命名为**“固定代表性地形条件下的潜在天文潮露出时长 (Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain)”**。<br>
-> 本系统基于代表性地形高程 $z$ 与纯天文潮位序列 $H(t)$ 进行高保真连续几何跨界求交与事件积分。
+> 本系统基于代表性地形高程 $z$ 与纯天文潮位序列 $H(t)$ 基于相邻采样点的一阶线性跨界插值与连续事件积分。
 > **严禁在学术报告或生产中混淆为“沙滩干燥时长 (Beach Drying Time)”或“二维水动力退水过程 (2D Hydrodynamic Flooding/Drying)”**，因为实际沙滩沉积物孔隙水渗流、波浪爬高破碎带、地下水位入渗以及气象风暴增水均属于复杂多物理场耦合，非纯天文潮静态几何所能单独决定。
 
 ### 状态判定与严格边界条件：
@@ -146,18 +208,22 @@ CoastTideX 实现了**自适应四叉树控制网格与经验互补累积分布 
 | `*_exposure_mean_event_h.tif` | Float32 | hours | 平均单次连续潜在露出时长：$\frac{\text{累计露出时长}}{\text{连续露出事件段数量}}$ |
 | `*_exposure_event_count.tif` | UInt32 | 次 (count) | 请求时间窗口内识别到的连续潜在露出事件段数量 |
 | `*_exposure_valid_time_fraction.tif` | Float32 | % | 有效时序数据时间覆盖率 (检验时间序列是否存在 NaN 断缺) |
-| `*_exposure_qc.tif` | UInt16 | bitmask | 露出分析专属质量控制位掩膜 (0 表示高保真解算) |
+| `*_exposure_qc.tif` | UInt16 | bitmask | 露出分析专属质量控制位掩膜 (0 表示未触发当前定义的 Exposure QC / degradation bit; 不代表对真实物理环境的绝对精度保证) |
 
 ### 跨界线性插值 (Linear Crossing Interpolation)：
 在离散采样步 $[t_0, t_1]$（如步长 $\Delta t = 30\text{min}$）间，当水面高程跨越高程 $z$ 时，系统通过精确一阶线性插值求解交点时刻 $t^*$：
-$$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
+
+```math
+r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t
+```
+
 避免了整步长阶梯截断带来的离散量化误差。
 
 ---
 
 ## 8. 严格时间采样语义与半开区间 `[start, end)` (Strict Temporal Semantics)
 
-在 CoastTideX v1.6 中，栅格淹没频率统计和 Exposure 露出时间域分析默认统一切片时间语义为严格**半开区间 `[start, end)` (即 `inclusive="left"`)**，同时 Tide Cache Schema 1.2 记录规范的 `TIME_INTERVAL_SEMANTICS`。
+在 CoastTideX 中，栅格淹没频率统计和 Exposure 露出时间域分析工作流采用严格**半开区间 `[start, end)` (即 `inclusive="left"`)**（通用点位时间序列接口保留可配置 inclusivity），同时 Tide Cache Schema 1.2 记录规范的 `TIME_INTERVAL_SEMANTICS`。
 
 ### 核心科学依据：
 1. **样本权重均等**：以 2024 闰年为例，时段为 `2024-01-01 00:00:00` 至 `2025-01-01 00:00:00`，步长为 `30min`。半开区间精确包含 **17,568** 个采样点，每个点代表后续 30 分钟的时间窗口积分，全年等权重；
@@ -187,7 +253,7 @@ $$r = \frac{z - H(t_0)}{H(t_1) - H(t_0)}, \quad t^* = t_0 + r \Delta t$$
 ```
 
 ### Tide Cache Schema 1.2 关键规范：
-- **`CACHE_SCHEMA_VERSION`**: `"1.2"` (完全向下兼容读取 Schema 1.1；注意：Schema 1.1 缓存若缺失 `tide_msl_terminal_m`，用于 Exposure 分析时会自动采用 $t_{N-1}$ 终端潮位平推降级并标记 `QC_EXP_TERMINAL_UNAVAILABLE`；若 Schema 1.1 包含历史 `inclusive='both'`，Exposure 引擎会因时间跨界连续性语义拒绝加载)；
+- **`CACHE_SCHEMA_VERSION`**: `"1.2"`（支持符合当前兼容边界的 Schema 1.1 历史缓存读取；注意：若历史 Schema 1.1 缓存缺失 `tide_msl_terminal_m`，用于 Exposure 分析时最后一个无法闭合的区间不计入有效积分，相应降低 `valid_time_fraction` 并置位 `QC_EXP_TERMINAL_UNAVAILABLE = 8`；若 Schema 1.1 包含历史 `inclusive='both'`，Exposure 引擎会拒绝加载以维护区间语义一致性）；
 - **全要素规范签名 (`CACHE_SIGNATURE`)**: 对源 DEM 文件大小、修改时间、CRS、仿射矩阵、时段、采样率、FES 模型、拓扑分辨率等参数进行确定性 SHA-256 杂凑计算，杜绝参数漂移与缓存错配；
 - **`tide_msl_terminal_m(node)`**: 存储 $t_{\text{end}}$ 时刻各控制节点的瞬时潮位，用于时间域连续性闭合；
 - **流式节点块读取 (Node-chunk streaming)**: 读取缓存时不一次性拉取整个时序矩阵，内存开销极低。
@@ -227,10 +293,13 @@ CoastTideX 严格区分四类科学数据：
 
 在河口、半岛、狭窄沙咀与岛礁区域，若单纯依靠几何欧氏距离进行空间反距离或双线性插值，会导致海陆两侧或不同水体间发生潮位“穿墙泄漏”。
 
-CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Topology Guard)**：
+CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Target-Mask-Derived Topology Guard)**：
 1. **物理尺度掩膜构建**: 按 `topology_max_resolution_m` (默认 100m) 基于输入有效计算区域构建保守二值粗掩膜；
 2. **形态学与连通域分割**: 通过 `scipy.ndimage.label` 标识水体独立连通分量 (Component ID)；
 3. **屏障跨越阻断**: 控制网格节点仅能对同属于同一连通水体域的像元进行空间插值；跨越陆地 NoData 屏障时自动回退为局部单侧插值并标记 `QC_BIT_CONNECTIVITY_FALLBACK`。
+
+> [!NOTE]
+> 该防护机制由目标计算区域的有效/NoData 掩膜派生，作为空间插值防线与启发式过滤，不等价于真实水动力/水力连通性；目标 NoData 也不必然代表实际物理防潮海堤、陆地或绝对水力阻断结构。
 
 ---
 
@@ -251,11 +320,11 @@ CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Topology Guard)**：
 - `65535`: 陆地 / NoData 区域
 
 ### 潜在露出时间域专属 QC 位定义 (`*_exposure_qc.tif`)：
-- `0`: 正常高保真解算 (`QC_EXP_VALID`)
+- `0`: 未触发当前定义的 Exposure QC/degradation bit (`QC_EXP_VALID`; 注: 不代表对真实自然环境误差的绝对精度保证)
 - `bit 0 (1)`: 四角点降级插值 (`QC_EXP_DEGRADED_CELL`)
 - `bit 1 (2)`: 控制节点不足 (`QC_EXP_INSUFFICIENT_NODES`)
 - `bit 2 (4)`: 基准面多边形近似 (`QC_EXP_DATUM_APPROX`)
-- `bit 3 (8)`: 终端时刻水位缺失降级近似 (`QC_EXP_TERMINAL_UNAVAILABLE`，历史版本兼容别名 `QC_EXP_TERMINAL_APPROX`)
+- `bit 3 (8)`: 终端时刻水位缺失降级 (`QC_EXP_TERMINAL_UNAVAILABLE`，历史版本兼容别名 `QC_EXP_TERMINAL_APPROX`)
 - `bit 4 (16)`: 序列含无效数据间隙 (`QC_EXP_PARTIAL_VALID_TIME`)
 - `bit 5 (32)`: 全时段常时淹没像元 (`QC_EXP_PERMANENTLY_SUBMERGED`)
 - `bit 6 (64)`: 全时段常时露出像元 (`QC_EXP_PERMANENTLY_EXPOSED`)
@@ -411,14 +480,15 @@ python -m unittest discover -s tests -p "test_*.py"
 2. **本地全要素真实科学验证 (Local Full Validation Harness)**：
    - 位于 `tests/test_v15_beta_validation_harness.py`；
    - 专用于在配置有真实 FES2022b 原生非结构网格 (`fes2022b/` 3.77 GB) 与崇明东滩/长兴岛真实 DEM 的本地工作站环境下执行物理真实性端到端校验（注：v1.5 Beta 报告属于特定区域样本数据下的受控基准比测，并非全球无约束物理精度证明）。
-3. **v1.6 生产场景严密覆盖 (Production Scenarios)**：
-   - 涵盖时序分块切片读取器 vs 全量 Oracle 高保真等价性、切片时间跨度上界约束、双盆地山脊拓扑屏障隔离、失效角点权重自动重新归一化、多时区转换与缺失终端潮位分母守恒、`_AtomicExposureWriter` 异常临时文件零残留、陈旧 DEM 修改拦截、Stage 2 零 FES 物理调用不变量以及 NetCDF 节点越界完整性校验等专项测试。
+3. **v1.6/v1.7 生产场景严密覆盖 (Production Scenarios)**：
+   - 涵盖时序分块切片读取器 vs 全量 Oracle 数值等价性、切片时间跨度上界约束、双盆地山脊拓扑屏障隔离、失效角点权重自动重新归一化、多时区转换与缺失终端潮位分母守恒、`_AtomicExposureWriter` 异常临时文件零残留、陈旧 DEM 修改拦截、Stage 2 零 FES 物理调用不变量以及 NetCDF 节点越界完整性校验等专项测试。
 
 ---
 
 ## 20. 项目更新日志与版本演进 (Changelog Summary)
 
 完整历史版本日志请参见独立文档 [CHANGELOG.md](CHANGELOG.md)：
+- **v1.7 / v1.7.1**: MSL 统一参考系工作流 (MSL Reference Workflow)、DEM 前置垂直基准转换 (EGM2008 -> MSL)、大规模 DEM 批量转换引擎 (`convert-dem-batch`)、可配置 0–500 km MDT 外推门禁、ParentBBox FES 模型复用与全系统响应式布局。
 - **v1.6 (Beta / Feature Branch)**: 潜在天文潮露出时间域分析引擎 (7大 GeoTIFF 产物)、跨界线性插值、严格半开区间 `[start, end)` 语义统一、Tide Cache Schema 1.2、双语开发规范与外部数据依赖体系。
 - **v1.5 Beta**: 真实 FES2022b 与真实沙滩/潮滩 DEM 科学验证套件与实测比对。
 - **v1.5 Alpha**: 批量潮间带栅格引擎、Tide Cache 持久化、全要素规范兼容性签名与断点恢复。
@@ -434,9 +504,9 @@ python -m unittest discover -s tests -p "test_*.py"
 ```bibtex
 @software{CoastTideX_2026,
   author = {Wang, Yuhao},
-  title = {CoastTideX: A High-Precision Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System},
+  title = {CoastTideX: A Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System},
   year = {2026},
-  version = {v1.6},
+  version = {v1.7.1},
   url = {https://github.com/wyhao2333/CoastTideX}
 }
 ```

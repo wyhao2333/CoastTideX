@@ -1,4 +1,4 @@
-# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.6 Beta)
+# CoastTideX 大地水准面与垂直基准说明 (Geoid and Datum Documentation v1.7.1)
 
 本目录包含 CoastTideX 系统用于高精度潮位垂直基准转换的核心空间栅格数据与大地测量学定义。
 
@@ -52,7 +52,7 @@ CNES-CLS22 官方产品（`mdt_hybrid_cnes_cls22_cmems2020_global.nc`）是全�
 - **黑海 (Black Sea)**：融合 CMEMS2020-BLK，其参考大地水准面为 **EIGEN-6C4** ($d/o=2190$)。
 
 **科学处理与双层判定机制**：
-1. **第一优先级：权威来源掩膜 (`AUTHORITATIVE_MASK`)**：若配置了 `hybrid_mdt_source_mask.tif`，系统优先依据该权威栅格判定每个像元或离散点的基准源，质量评定为高保真度；
+1. **第一优先级：权威来源掩膜 (`AUTHORITATIVE_MASK`)**：若配置了 `hybrid_mdt_source_mask.tif`，系统优先依据该权威栅格判定每个像元或离散点的基准源，质量评定为权威来源分类；
 2. **第二优先级：精细闭合多边形备用 (`QC_DATUM_SOURCE_APPROX`)**：若权威掩膜未配置或像元落入掩膜 NoData 区域，系统自动回退至几何闭合多边形射线法判别，并显式标记质量警告 `QC_DATUM_SOURCE_APPROX`，杜绝未知假设；
 3. **严格标记与输出规范**：
    - 在地中海与黑海，标称主变量 `h_mdt_ref_m` 代表相对 EIGEN-6C4 的海面高；

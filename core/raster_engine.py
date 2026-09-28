@@ -1,5 +1,5 @@
 """
-CoastTideX 空间栅格潮位与自适应控制网格淹没频率解算引擎 (Spatial Raster Tide Engine v1.6)
+CoastTideX 空间栅格潮位与自适应控制网格淹没频率解算引擎 (Spatial Raster Tide Engine v1.7.1)
 支持大范围 GeoTIFF 逐像元空间潮位解算与基于自适应四叉树控制网格 (Adaptive Quadtree Control Grid)
 的年度潜在天文潮淹没频率计算。
 
@@ -71,7 +71,7 @@ def estimate_control_node_memory(node_count: int, time_samples: int, dtype_bytes
 
 
 # 质量控制位掩码定义 (UInt16 Bitmask)
-QC_BIT_VALID = 0                      # 0: 无异常 / 完全有效高保真解算
+QC_BIT_VALID = 0                      # 0: 未触发当前定义的 Inundation QC/degradation bit / No defined inundation degradation bit triggered
 QC_BIT_FES_EXTRAPOLATED = 1 << 0      # bit 0 (1): 近岸动力学外推 (quality_flag < 0)
 QC_BIT_SPATIAL_FALLBACK = 1 << 1      # bit 1 (2): 空间插值降级 (可用控制节点少于4个)
 QC_BIT_INSUFFICIENT_NODES = 1 << 2    # bit 2 (4): 周围缺乏有效海洋控制节点 (无法插值，输出 NoData)
@@ -1488,7 +1488,7 @@ class RasterTideEngine:
         else:
             t_start_str = str(start_time)
             t_end_str = str(end_time)
-            inclusive_mode = 'left'  # v1.6: 全系统统一默认严格半开区间 [start, end) 杜绝端点双重统计
+            inclusive_mode = 'left'  # 栅格/Tide Cache 工作流采用半开区间 [start, end)
 
         _, time_idx_utc, _ = build_time_index(
             start_time=t_start_str,

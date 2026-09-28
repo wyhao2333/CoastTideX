@@ -1,5 +1,5 @@
 """
-CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.6 Beta Hardened)
+CoastTideX 批量潮间带栅格解算调度引擎 (Batch Intertidal Raster Engine v1.7.1)
 支持文件夹级多 GeoTIFF 自动化发现、轻量级元数据检查、确定性排序、
 Tide Cache 序列化与二阶段淹没频率解算、统一 ExistingOutputPolicy 策略调度、
 全流程断点恢复 (Resume)、单文件失败隔离与任务清单 (Manifest) 管理。

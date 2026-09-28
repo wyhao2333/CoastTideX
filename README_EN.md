@@ -17,16 +17,16 @@
 
 ---
 
-## 1. Project Overview & Scientific Mission
+### 1. Project Overview & Scientific Mission
 
 **CoastTideX** is an open-source scientific software system designed for **coastal remote sensing, marine geodesy, intertidal morphodynamics, and hydrodynamic baseline unification**.
 
-Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order discontinuous/continuous polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX mitigates the nearshore staircase distortions and land contamination errors associated with conventional regular latitude-longitude grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' global geoid undulation**, providing a mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
+Powered by the French CNES/AVISO **FES2022b global ocean tide hydrodynamic model (utilizing native LGP2 2nd-order polynomial unstructured finite-element mesh with all 34 constituents)**, CoastTideX directly interfaces with the FES2022b native unstructured mesh, avoiding secondary re-sampling and interpolation back onto intermediate regular grids. Furthermore, it embeds **CNES-CLS22 Mean Dynamic Topography (MDT)** and **NGA EGM2008 2.5' global geoid undulation**, providing a mathematically rigorous transformation pipeline between local Mean Sea Level (MSL), orthometric geoid height (EGM2008), and 3D geometric ellipsoidal height (WGS84).
 
-In **CoastTideX v1.7 / v1.7.1**, based on the coastal geodetic framework proposed by **Seeger & Minderhoud (Nature, 2026)**, the system officially establishes the **MSL Reference Workflow**. By pre-converting terrestrial DEM to the local MSL datum ($Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$) with a rigorous 100 km spherical IDW coastal extrapolation barrier, CoastTideX achieves zero repeated MDT lookups during adaptive control grid evaluation, strict 100% decision equivalence, and ParentBBox model-reuse optimization. v1.7.1 further enhances throughput with a **Batch DEM Datum Conversion Engine (`convert-dem-batch`)**, providing resume checkpointing, failure isolation, and dual-format manifest tracking.
+In **CoastTideX v1.7 / v1.7.1**, based on the coastal geodetic framework adapted from **Seeger & Minderhoud (Nature, 2026)**, the system officially establishes the **MSL Reference Workflow**: by pre-converting terrestrial DEM to the local MSL datum ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$) with a configurable 0–500 km (default: 100 km) spherical IDW coastal extrapolation barrier, CoastTideX eliminates repeated MDT lookups during adaptive control grid evaluation, preserves strict algebraic decision equivalence under identical static offset and spatial support, and optimizes FES execution through ParentBBox model-reuse. v1.7.1 further enhances throughput with a **Batch DEM Datum Conversion Engine (`convert-dem-batch`)**, providing resume checkpointing, failure isolation, and dual-format manifest tracking.
 
 > [!NOTE]
-> Current release: **CoastTideX v1.7.1**. The system features layered defensive architecture, complete unit test coverage, and end-to-end scientific verification on 150M+ pixel coastal DEM datasets.
+> Current release: **CoastTideX v1.7.1**. The system features layered defensive architecture, complete unit test coverage, and comprehensive engineering and numerical verification across Chongming Island DEMs, synthetic antimeridian scenarios, batch worker regressions, and automated unit tests (note: these validations do not constitute an unconstrained physical accuracy guarantee across all global coastal settings).
 
 ---
 
@@ -52,32 +52,94 @@ In coastal geodesy and physical oceanography, vertical datums represent distinct
 
 ### Cascaded Geodetic Conversion Equations:
 1. **Instantaneous Tide relative to local Mean Sea Level (MSL)**:
-   $$\text{Tide}(t, \lambda, \varphi) = \sum_{k=1}^{34} f_k(t) A_k(\lambda, \varphi) \cos\left( \omega_k t + v_k(t) + u_k(t) - G_k(\lambda, \varphi) \right)$$
+
+   ```math
+   \mathrm{Tide}_{\mathrm{MSL}}(t,\lambda,\varphi)
+   =
+   \sum_{k=1}^{34}
+   f_k(t) A_k(\lambda,\varphi)
+   \cos\left[
+   \omega_k t + v_k(t) + u_k(t) - G_k(\lambda,\varphi)
+   \right]
+   ```
+
 2. **Sea Surface Height relative to MDT Reference Geoid (Global: GOCO06s; Med/Black Sea: EIGEN-6C4)**:
-   $$H_{\text{MDT\_REF}}(t, \lambda, \varphi) = \text{Tide}(t, \lambda, \varphi) + \text{MDT}_{\text{CLS22}}(\lambda, \varphi)$$
-3. **Rigorous Transformation to EGM2008 Orthometric Height (Elevation)**:
-   $$H_{\text{EGM2008}}(t, \lambda, \varphi) = H_{\text{MDT\_REF}}(t, \lambda, \varphi) + \Delta N(\lambda, \varphi)$$
-   - Global Ocean: $\Delta N(\lambda, \varphi) = N_{\text{GOCO06s}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
-   - Mediterranean & Black Sea: $\Delta N(\lambda, \varphi) = N_{\text{EIGEN-6C4}}(\lambda, \varphi) - N_{\text{EGM2008}}(\lambda, \varphi)$
+
+   ```math
+   H_{\mathrm{MDT\,REF}}(t,\lambda,\varphi)
+   =
+   \mathrm{Tide}_{\mathrm{MSL}}(t,\lambda,\varphi)
+   +
+   \mathrm{MDT}_{\mathrm{CLS22}}(\lambda,\varphi)
+   ```
+
+3. **Rigorous Transformation to EGM2008 Orthometric Height / Approximation**:
+
+   ```math
+   H_{\mathrm{EGM2008}}(t,\lambda,\varphi)
+   =
+   H_{\mathrm{MDT\,REF}}(t,\lambda,\varphi)
+   +
+   \Delta N(\lambda,\varphi)
+   ```
+
+   - Global Ocean:
+     ```math
+     \Delta N(\lambda,\varphi)
+     =
+     N_{\mathrm{GOCO06s}}(\lambda,\varphi)
+     -
+     N_{\mathrm{EGM2008}}(\lambda,\varphi)
+     ```
+   - Mediterranean & Black Sea:
+     ```math
+     \Delta N(\lambda,\varphi)
+     =
+     N_{\mathrm{EIGEN-6C4}}(\lambda,\varphi)
+     -
+     N_{\mathrm{EGM2008}}(\lambda,\varphi)
+     ```
+
 4. **Transformation to WGS84 Geometric 3D Ellipsoidal Height**:
-   $$h_{\text{WGS84}}(t, \lambda, \varphi) = H_{\text{EGM2008}}(t, \lambda, \varphi) + N_{\text{EGM2008}}(\lambda, \varphi)$$
+
+   ```math
+   h_{\mathrm{WGS84}}(t,\lambda,\varphi)
+   =
+   H_{\mathrm{EGM2008}}(t,\lambda,\varphi)
+   +
+   N_{\mathrm{EGM2008}}(\lambda,\varphi)
+   ```
 
 ### 2.1 v1.7 Scientific Advancement: MSL Reference Workflow (Adapted from Seeger & Minderhoud, Nature 2026)
 
 Groundbreaking geophysical research by **Seeger & Minderhoud (Nature, 2026)** ("Sea level much higher than assumed in most coastal hazard assessments") demonstrated that over 99% of evaluated coastal hazard assessments misjudge coastal sea levels due to inadequate vertical datum alignment between land elevation and local sea-level heights. The authors proposed using Mean Dynamic Topography (MDT) to establish an extrapolated sea-level benchmark extending over coastal land.
 
 **CoastTideX v1.7** adapts this theoretical framework to high-resolution intertidal remote sensing: **Pre-convert terrestrial DEM to the local Mean Sea Level (MSL) reference frame**:
-$$Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$$
 
-Following this forward datum conversion, hydrodynamic astronomical tides predicted by FES2022b ($\text{Tide}_{\text{MSL}}(t)$) are compared directly with $\text{DEM}_{\text{MSL}}$ in the identical physical and geometric reference frame:
-$$\text{Tide}_{\text{MSL}}(t) > \text{DEM}_{\text{MSL}}$$
+```math
+Z_{\mathrm{MSL}}
+=
+Z_{\mathrm{EGM2008}}
+-
+\mathrm{MDT}
+-
+\Delta N
+```
+
+Following this forward datum conversion, hydrodynamic astronomical tides predicted by FES2022b ($\mathrm{Tide}_{\mathrm{MSL}}(t)$) are compared directly with $\mathrm{DEM}_{\mathrm{MSL}}$ in the identical physical and geometric reference frame:
+
+```math
+\mathrm{Tide}_{\mathrm{MSL}}(t)
+>
+\mathrm{DEM}_{\mathrm{MSL}}
+```
 
 #### Key Architectural & Scientific Highlights:
-1. **Two-Stage MDT Spatial Reconstruction**: Open ocean regions utilize CNES-CLS22 native bilinear interpolation (`QC=0: native_mdt`); nearshore and terrestrial data voids employ spherical 3D Cartesian Inverse Distance Weighting (`QC=1: idw_extrapolated`);
-2. **Configurable 0–500 km Physical Extrapolation Cutoff (Default 100 km)**: Supports user-configured cutoff distances between 0.0 and 500.0 km (default: 100.0 km; 0.0 km disables extrapolation and relies solely on native ocean MDT). Pixels beyond the specified distance are assigned NoData (`QC=2: nodata`), preventing unrealistic deep-inland extrapolation. (*Note: Adapted from Seeger & Minderhoud, Nature, 2026; CoastTideX implements a spherical 3D k-NN IDW extrapolation framework and is not an exact pixel-by-pixel reproduction of the ArcGIS Smooth Neighborhood IDW tool*);
+1. **Two-Stage MDT Spatial Reconstruction**: Open ocean regions utilize CNES-CLS22 native bilinear interpolation (`QC=0: native_mdt`, denoting the native ocean interpolation path rather than an absolute accuracy guarantee); nearshore and terrestrial data voids employ spherical 3D Cartesian Inverse Distance Weighting (`QC=1: idw_extrapolated`);
+2. **Configurable 0–500 km Physical Extrapolation Cutoff (Default 100 km)**: Supports user-configured cutoff distances between 0.0 and 500.0 km (default: 100.0 km; 0.0 km disables extrapolation and relies solely on native ocean MDT). Pixels beyond the specified distance are assigned NoData (`QC=2: nodata`), preventing unrealistic deep-inland extrapolation. (*Note: Adapted from Seeger & Minderhoud, Nature, 2026; CoastTideX implements a spherical 3D k-NN IDW extrapolation framework and is not an exact pixel-by-pixel reproduction of the ArcGIS Smooth Neighborhood IDW tool; the Seeger & Minderhoud global workflow applied a 500 km coastal extent, while CoastTideX's 100 km default represents an application-specific configuration*);
 3. **Stage 1 Zero-MDT-Lookup**: During quadtree adaptive control grid evaluation, control nodes compute pure astronomical tides directly without querying gravity geoids or MDT models;
-4. **100% Strict Decision Equivalence**: Rigorously verified across Chongming Island's 150M-pixel dataset with 10,000 spatial samples (240,000 temporal evaluations), confirming **100.0000%** decision consistency (elevation residual at float32 limit $\sim 10^{-7}\text{ m}$);
-5. **Smooth Backward Compatibility**: Retains `dem_datum="egm2008"` as a deprecated compatibility mode (`DeprecationWarning`), with `dem_datum="msl"` now being the default production standard.
+4. **Strict Decision Equivalence**: Rigorously verified across Chongming Island's 150M-pixel dataset with 10,000 spatial samples (240,000 temporal evaluations), confirming **100.0000%** decision consistency under identical static offset and spatial support conditions (elevation residual at float32 limit $\sim 10^{-7}\text{ m}$);
+5. **Smooth Backward Compatibility**: Retains `dem_datum="egm2008"` as a deprecated compatibility mode (`DeprecationWarning`), with `dem_datum="msl"` now being the default recommended standard.
 
 ---
 
@@ -127,7 +189,7 @@ To evaluate annual potential inundation frequency over tens of millions of pixel
 ### Scientific Definition & Terminology Boundary
 > [!WARNING]
 > **Scientific Rigor Statement**: This product is strictly defined as **"Potential Astronomical Tidal Exposure Duration under a Fixed Representative Terrain"**.<br>
-> It calculates geometric continuous exposure events and durations from pure astronomical tide levels $H(t)$ against a static topography $z$.
+> It calculates geometric continuous exposure events and durations from pure astronomical tide levels $H(t)$ based on first-order linear crossing interpolation between adjacent sample points against a static topography $z$.
 > **It MUST NOT be described as "Beach Drying Time" or "2D Hydrodynamic Flooding/Drying"**, as actual sediment drainage and drying depend on sediment porosity, wave runup, groundwater percolation, and meteorological storm surges.
 
 ### Boundary Conditions & State Definitions:
@@ -144,16 +206,22 @@ To evaluate annual potential inundation frequency over tens of millions of pixel
 | `*_exposure_mean_event_h.tif` | Float32 | hours | Mean continuous exposure event duration: $\frac{\text{Total Duration}}{\text{Event Count}}$ |
 | `*_exposure_event_count.tif` | UInt32 | count | Number of continuous potential tidal exposure event segments identified within the requested time window |
 | `*_exposure_valid_time_fraction.tif` | Float32 | % | Temporal valid data coverage ratio over the requested window |
-| `*_exposure_qc.tif` | UInt16 | bitmask | Dedicated exposure quality control bitmask (0 = Valid) |
+| `*_exposure_qc.tif` | UInt16 | bitmask | Dedicated exposure quality control bitmask (0 = No currently defined Exposure QC/degradation bit triggered; does not represent an absolute accuracy guarantee against real physical environmental errors) |
 
 ### Linear Crossing Interpolation:
-Between consecutive discrete timesteps $[t_k, t_{k+1}]$ (e.g. 30min), whenever water level crosses $z$, the exact crossing timestamp $t^*$ is solved by linear interpolation, preventing 30-minute discretization steps from creating quantized staircase errors.
+Between consecutive discrete timesteps $[t_k, t_{k+1}]$ (e.g. 30min), whenever water level crosses $z$, the exact crossing timestamp $t^*$ is solved by linear interpolation:
+
+```math
+r = \frac{z - H(t_k)}{H(t_{k+1}) - H(t_k)}, \quad t^* = t_k + r \Delta t
+```
+
+preventing 30-minute discretization steps from creating quantized staircase errors.
 
 ---
 
 ## 8. Strict Temporal Semantics & Half-Open Interval `[start, end)`
 
-In CoastTideX v1.6, raster inundation frequency statistics and Exposure duration analysis default to adopting the strict **half-open interval `[start, end)` (`inclusive="left"`)**, with Tide Cache Schema 1.2 recording canonical `TIME_INTERVAL_SEMANTICS`:
+In CoastTideX, raster inundation frequency statistics and Exposure duration analysis workflows default to adopting the strict **half-open interval `[start, end)` (`inclusive="left"`)** (the generic point timeseries API retains configurable inclusivity), with Tide Cache Schema 1.2 recording canonical `TIME_INTERVAL_SEMANTICS`:
 - **Uniform Time Weighting**: For the year 2024 (leap year) at 30min intervals, `[2024-01-01 00:00:00, 2025-01-01 00:00:00)` produces exactly **17,568** sample points, each representing a 30-minute duration;
 - **Elimination of Year-End Double Counting**: A closed interval `[start, end]` would erroneously double-count `00:00:00` across adjacent annual cycles;
 - **Continuous Terminal Crossing**: The terminal water level $H(t_{\text{end}})$ is stored as a dedicated array (`tide_msl_terminal_m`) in Tide Cache Schema 1.2 to enable closed crossing interpolation in the final interval without altering discrete sample counts.
@@ -167,7 +235,7 @@ For large-scale workflows, CoastTideX employs a two-stage decoupled architecture
 2. **Stage 2 (Zero-FES Downstream Products)**: Reconstructs quadtree topology and evaluates Inundation Frequency and Exposure Duration directly from cache with **zero FES calls**.
 
 ### Tide Cache Schema 1.2 Highlights:
-- Backward-compatible with Schema 1.1 (Note: if a Schema 1.1 cache lacks `tide_msl_terminal_m`, Exposure analysis automatically degrades terminal crossing using $t_{N-1}$ water level and flags `QC_EXP_TERMINAL_UNAVAILABLE`; if a Schema 1.1 cache contains legacy `inclusive='both'`, Exposure engine rejects it to maintain temporal interval continuity);
+- Backward-compatible with Schema 1.1 (Note: if a Schema 1.1 cache lacks `tide_msl_terminal_m`, Exposure analysis excludes the unclosed final interval from valid integration, reduces `valid_time_fraction`, and flags `QC_EXP_TERMINAL_UNAVAILABLE = 8`; if a Schema 1.1 cache contains legacy `inclusive='both'`, Exposure engine rejects it to maintain temporal interval continuity);
 - Includes variable `tide_msl_terminal_m(node)` for terminal continuous exposure calculations;
 - Encodes deterministic SHA-256 compatibility signatures (`CACHE_SIGNATURE`).
 
@@ -210,6 +278,9 @@ CoastTideX applies **Target-Mask-Derived Topology Guarding**:
 2. **Morphology & Connected Component Labeling**: Identifies independent water body components via `scipy.ndimage.label`;
 3. **Barrier Traversal Blocking**: Restricts control grid interpolation to pixels within the same connected component; when crossing land NoData barriers, automatically falls back to local one-sided nodes and flags `QC_BIT_CONNECTIVITY_FALLBACK`.
 
+> [!NOTE]
+> This protection mechanism is derived from the target computation region's valid/NoData mask as a spatial interpolation safety heuristic, and must not be interpreted as a true hydrodynamic or hydraulic connectivity model; target NoData does not necessarily represent physical seawalls, topography, or absolute hydraulic barriers.
+
 ---
 
 ## 13. Quality Control System & UInt16 Bitmasks
@@ -229,7 +300,7 @@ Every pixel in CoastTideX products carries a bitmask for quality assurance:
 - `65535`: NoData / Land mask
 
 ### Exposure QC Bits:
-- `0`: High-fidelity valid computation (`QC_EXP_VALID`)
+- `0`: No currently defined Exposure QC/degradation bit triggered (`QC_EXP_VALID`; does not represent an absolute accuracy guarantee against real natural environmental errors)
 - `bit 0 (1)`: Degraded cell interpolation (`QC_EXP_DEGRADED_CELL`)
 - `bit 1 (2)`: Insufficient valid nodes (`QC_EXP_INSUFFICIENT_NODES`)
 - `bit 2 (4)`: Datum polygon approximation (`QC_EXP_DATUM_APPROX`)
@@ -357,13 +428,14 @@ python -m unittest discover -s tests -p "test_*.py"
 ### Testing Strategy & Isolation:
 1. **GitHub Actions Remote CI**: Runs in a headless Linux runner without graphical display or C/C++ compiled `pyfes` extensions, leveraging mock predictors and analytical solvers to verify datum closures, quadtree topology guards, Tide Cache NetCDF chunked streaming, and 2D state machine physics (live status reflected by the GitHub Actions CI badge above);
 2. **Local Full Validation Harness**: Located at `tests/test_v15_beta_validation_harness.py`, executing physical end-to-end evaluations with real FES2022b native mesh (3.77 GB) and real coastal DEMs (Note: the v1.5 Beta validation report represents a controlled benchmark test under specific regional sample data rather than an unconstrained global physical accuracy proof);
-3. **v1.6 Release Candidate & Verification Suite**: Scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
+3. **v1.6/v1.7 Production Scenarios & Verification Suite**: Scenarios verifying slice reader bounds, barrier topology isolation, weight re-normalization, timezone parsing, atomic temp file cleanup, stale DEM protection, zero FES call invariance in Stage 2, and corrupt node index integrity errors.
 
 ---
 
 ## 20. Changelog & Version Evolution
 
 See the full history in [CHANGELOG.md](CHANGELOG.md):
+- **v1.7 / v1.7.1**: MSL Reference Workflow, DEM Forward Datum Conversion (EGM2008 -> MSL), Batch DEM Datum Conversion Engine (`convert-dem-batch`), Configurable 0–500 km MDT Extrapolation Barrier, ParentBBox FES Model Reuse, and System-Wide Responsive Layout;
 - **v1.6 (Beta / Feature Release)**: Exposure Duration Engine (7 GeoTIFF products), Linear Crossing Interpolation, Strict `[start, end)` Semantics, Tide Cache Schema 1.2, Bilingual Development Guide;
 - **v1.5 Beta**: Real FES2022b and Real Coastal DEM Validation Suite;
 - **v1.5 Alpha**: Batch Intertidal Raster Engine, Tide Cache Architecture, and Compatibility Signatures;
@@ -381,7 +453,7 @@ If you use CoastTideX in your research or engineering projects, please cite:
   author = {Wang, Yuhao},
   title = {CoastTideX: A Coastal Spatial Raster Tide Simulation and Multi-Datum Transformation System},
   year = {2026},
-  version = {v1.6},
+  version = {v1.7.1},
   url = {https://github.com/wyhao2333/CoastTideX}
 }
 ```

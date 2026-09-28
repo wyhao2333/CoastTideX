@@ -11,7 +11,7 @@ CoastTideX 批量 DEM 垂直基准转换模块 (Batch DEM Datum Converter v1.7.1
 4. 线程安全并发执行 (Thread-Safe Multi-Workers):
    - 基于 threading.local() 为每个 worker thread 维护独立的 DEMDatumConverter 与局部空间索引缓存；
    - 彻底杜绝多线程并发时的 mutable cache 交叉污染与竞态条件 (Race Conditions)；
-   - workers=1, 2, 4 解算结果保证严密科学等价 (Bitwise / Identical)；
+   - 经自动化回归验证，多进程/多线程解算结果满足既定数值一致性阈值 (最大绝对偏差 <= 1e-7 m)；
 5. 轻量化质量控制 (write_qc: bool = False):
    - 默认不产生冗余 QC GeoTIFF，显式开启时精准追踪并写入 manifest；
 6. 错误隔离与高可用调度: 单瓦片异常自动记录并跳过，不中断批处理队列；

@@ -605,7 +605,7 @@ def inspect_tide_cache_metadata(
     """
     轻量读取 Tide Cache NetCDF 全局属性、维度与签名，严禁读取 tide_msl_m 大矩阵。
     当 validate_structure 为 True 时，执行 validate_tide_cache_structure 结构核验。
-    当 validate_signature 为 True 且文件中存在 CACHE_SIGNATURE 时，自重构签名并执行防篡改校验。
+    当 validate_signature 为 True 且文件中存在 CACHE_SIGNATURE 时，自重构签名并执行签名一致性与兼容完整性核查 (Signature Consistency & Integrity Validation)。
     """
     if not os.path.exists(cache_path):
         raise FileNotFoundError(f"未找到指定的 Tide Cache 文件: {cache_path}")
@@ -844,7 +844,7 @@ def validate_tide_cache_compatibility(
             if abs(c_frac - exp_frac) > 1e-4:
                 reasons.append(f"拓扑连通有效比例阈值不匹配: Cache 为 {c_frac}，当前请求为 {exp_frac}")
 
-    # 8. 签名自校验与篡改防御 (Tamper-evidence Verification)
+    # 8. 签名一致性与兼容完整性核查 (Signature Consistency & Integrity Validation)
     stored_sig = str(attrs.get("CACHE_SIGNATURE", "")).strip()
     cache_schema = str(attrs.get("CACHE_SCHEMA_VERSION", attrs.get("schema_version", "1.1"))).strip()
     if stored_sig:

@@ -4,6 +4,32 @@
 
 ---
 
+## [1.7.1] - 2026-09-28
+
+### 新增与重构 (Added & Refactored)
+- **DEM 垂直基准前置转换架构 (MSL Reference Workflow)**：
+  - 贯彻陆地 DEM EGM2008 &rarr; MSL 前置转换流水线 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$)，将潮汐动力学模拟统一于平均海平面 (MSL) 局部基准，消除近岸潮位倾斜系统偏差；
+  - 实现开阔大洋双线性插值与沿岸球面 3D-IDW 外推结合的两阶段 MDT 空间重构机制；
+  - 默认采用专为高分辨率潮间带调校的 100.0 km 保守外推距离，并全面开放 0.0 ~ 500.0 km 动态配置（0 km 纯原生大洋插值，500 km 适配全球大尺度研究范围）；
+  - 全球 $\pm 180^\circ$ 国际日界线 (Antimeridian) 环形经度自适应跨界拼接与无缝 KDTree 空间检索。
+
+### 批量处理与并发安全 (Batch Processing & Concurrency)
+- **批量 DEM 垂直基准转换引擎与 CLI/GUI 全面集成**：
+  - 新增 `core/batch_datum_converter.py` 与 CLI `convert-dem-batch` 命令，支持文件夹级自动化批量转换；
+  - 基于 `threading.local()` 实现 Worker 线程间转换器与空间索引的实例隔离；
+  - 引入全局 NetCDF/HDF5 文件访问线程锁，彻底消除多线程并发读取底层 C 库时的竞态崩溃隐患；
+  - 严格原子写入保护机制：所有产物经临时文件安全写入，解算完成且通过校验后执行原子替换；
+  - 严格断点恢复 (Hardened Strict Resume)：多因子比对参数签名、输入文件大小与修改时间，并在旧/不完整清单存在时安全 fail-closed。
+
+### 文档、GUI 与文字一致性 (Documentation & Text Consistency)
+- **数学公式与科学表述标准化**：
+  - 全面修复 `README.md` 与 `README_EN.md` 在 GitHub 渲染环境下的 KaTeX 公式语法（消除 `\text{..._...}`，采用独立 ```` ```math ```` 块）；
+  - GUI 系统手册 (`gui/manual_dialog.py`) 全面升级至 v1.7.1，系统性阐述 5 大业务场景、MSL 参考工作流、7 大 Exposure 产物体系与基于目标掩膜的 Topology Guard 内插防线机制；
+  - 全面审查并中性化 GUI 界面标签、关于窗口 (About Dialog) 与源码注释，严格界定算法适用边界与科学归因；
+  - 建立自动化文字与元数据一致性测试套件 (`tests/test_v171_release_text_consistency.py`)，杜绝后续版本文字回归。
+
+---
+
 ## [1.6.0-rc.2] - 2026-09-19 (Round 9 Final Evidence, Metadata & Documentation Closure)
 
 ### 修复与加固 (Fixed & Hardened)

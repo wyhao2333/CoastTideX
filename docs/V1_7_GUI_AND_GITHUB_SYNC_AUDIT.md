@@ -1,5 +1,10 @@
 # CoastTideX v1.7 — GUI Product Integration, Nature-Method Conformity & GitHub Release Sync Audit
 
+> [!NOTE]
+> **历史快照说明 (SUPERSEDED / HISTORICAL SNAPSHOT)**
+> 本文档记录的是 CoastTideX v1.7 初始合入时的历史审查状态，仅供版本演化追溯参考。
+> 当前生产版本 (v1.7.1) 中 MDT 空间外推算法参数已进一步演进为 $k=8, p=2$，外推距离已全面支持 0–500 km 动态配置（CoastTideX 默认推荐 100 km）。最新规范请以 v1.7.1 官方文档与生产源码为准。
+
 ## 1. 概述与版本定位 (Executive Summary)
 
 **CoastTideX v1.7** 是系统在垂直基准科学性、计算性能与工程产品化方面的重大里程碑升级。本版本系统性地落实了以下核心突破：

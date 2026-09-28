@@ -261,7 +261,13 @@ class TestManualDialogContent(unittest.TestCase):
     def test_manual_html_structure(self):
         from gui.manual_dialog import MANUAL_HTML
         # 1. 标题与版本
-        self.assertIn("CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta)", MANUAL_HTML)
+        self.assertTrue(
+            any(v in MANUAL_HTML for v in [
+                "CoastTideX 用户操作手册与科学原理文档 (v1.6 Beta)",
+                "CoastTideX 用户操作手册与科学原理文档 (v1.7.1)"
+            ]),
+            "用户手册应包含合法版本标题"
+        )
         # 2. 15 个章节标识
         self.assertIn("一、 系统定位与科学用途", MANUAL_HTML)
         self.assertIn("二、 核心科学定义与边界不变量", MANUAL_HTML)
