@@ -56,7 +56,7 @@ validation/scratch/
 *.pdf
 参考文献/
 
-# 本地 Agent 说明文件 (仅本地保留，不纳入仓库跟踪)
+# Agent 指令文件 (仅本地保留，不纳入仓库跟踪)
 AGENTS.md
 AGENT.md
 
