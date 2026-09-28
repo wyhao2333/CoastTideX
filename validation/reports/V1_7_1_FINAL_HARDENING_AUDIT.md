@@ -61,7 +61,7 @@
   Ran 318 tests
   OK (skipped=7)
   ```
-- **统计**: Ran 318 tests, OK, 7 skipped (无 pyfes 环境正常守卫跳过), 0 failures, 0 errors.
+- **统计**: 远端 CI 共运行/发现 318 项测试，其中 7 项因运行环境或外部科学数据依赖条件未满足而按既定测试守卫跳过；0 failures，0 errors。
 
 ### 2.3 重点模块覆盖统计
 | 测试模块 | 重点验证内容 |
