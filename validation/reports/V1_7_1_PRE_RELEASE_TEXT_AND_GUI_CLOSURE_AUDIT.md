@@ -96,13 +96,15 @@
 ## 5. 自动化测试结果 (Automated Test Suite)
 
 - **文字与界面一致性测试 (`tests/test_v171_release_text_consistency.py`)**:
-  - 测试项数: 17 项
-  - 运行结果: `Ran 17 tests in 1.280s -> OK` (包含新增的 Test 17 严格扫描)
+  - 测试项数: 18 项
+  - 运行结果: `Ran 18 tests in 1.212s -> OK` (包含全部 18 项严格扫描)
 - **本地全要素测试套件 (`tests/test_*.py`)**:
-  - 测试项数: 335 项
-  - 运行结果: `Ran 335 tests in 38.317s -> OK` (零失败、零错误)
+  - 测试项数: 336 项
+  - 运行结果: `Ran 336 tests in 38.973s -> OK` (零失败、零错误)
 - **Git 差异与格式检查 (`git diff --check`)**:
   - 结果: 0 warnings, 0 errors, 零多余空白字符与换行错误。
+- **GitHub Actions CI 状态追踪**:
+  - 最终 GitHub Actions 状态以 Draft PR #1 对应 HEAD 的 checks 为准；为避免 self-referential commit/CI metadata loop，本报告不强制嵌入当前 commit 自身产生的最终 CI Run ID。
 
 ---
 
@@ -142,3 +144,27 @@
 10. **Batch CLI default**: 保持 `egm2008` 历史兼容默认值不变。
 11. **自动化测试加固**:
     - `tests/test_v171_release_text_consistency.py` 新增 Test 18 专项检查，对上述所有禁用词（包括“转换科学范式”、“理论范式改编”、“测地空间距离”等）与对应规范词进行强断言，确保闭环不反弹。
+
+---
+
+## 8. 最终内务收尾 (Final Housekeeping Closure)
+
+本轮对项目进行最后的受控内务收尾（Housekeeping Closure）：
+
+1. **测试统计数字校准**:
+   - 文字一致性测试（Text consistency tests）统计数字由 17 项校准更新为 18 项；
+   - 全要素测试套件（Full test suite）统计数字由 335 项校准更新为 336 项；
+   - 确认两项测试套件均已在本地与远端 PR CI 中稳定 100% 通过。
+2. **方法文档残余地理措辞中性化**:
+   - `docs/V1_7_MSL_REFERENCE_WORKFLOW.md` 中将 0 km 模式下的“陆地缺失区直接标记 NoData”修正为中性的“原生 MDT 缺失目标位置直接标记 NoData”；
+   - 将距离大于门禁的“深陆区”表述修正为中性的“超出配置 support-distance cutoff 的目标位置”；
+   - 表格与说明中同步清理残余的地理化推论，保留已建立的 `3D Cartesian chord distance on the spherical embedding` 严谨物理定义。
+3. **Nature 2026 500 km 描述精准对齐**:
+   - 在 `core/dem_datum_converter.py` 顶部 docstring 中，进一步明确描述为“Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5)，并使用约 500 km 基于海岸线的应用范围 (coastline-based application extent)；注意该范围与 CoastTideX 到最近有效 MDT support 点的 support-distance cutoff 是不同定义”。
+4. **运行时与算法零变更 (No Behavioral / Algorithmic Changes)**:
+   - **Runtime behavior change**: **NO**；
+   - **Scientific algorithm change**: **NO**；
+   - **Batch CLI default change**: **NO**（保持 `default="egm2008"` 历史兼容）。
+5. **CI 与评审门禁策略**:
+   - Draft PR #1 持续作为最终 GitHub CI 状态的唯一权威跟踪点（Authoritative Tracking Location）；
+   - 完成后严格停留在 Draft PR 人工审核关口，未 merge、未将 Draft 改为 Ready、未创建 Tag 或 Release。

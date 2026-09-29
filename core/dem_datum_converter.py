@@ -12,9 +12,9 @@ CoastTideX DEM 垂直基准转换模块 (DEM Datum Converter v1.7.1)
        - 转换后 DEM_MSL 与 FES2022b 潮位序列 Tide_MSL(t) 直接在 MSL 空间物理基准下进行严格比较：
              Tide_MSL(t) > DEM_MSL
     2. 工程实现改编说明 (Adapted Engineering Implementation):
-       - Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5) 并在沿岸 500 km 宏观范围内实施分析；
+       - Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5)，并使用约 500 km 基于海岸线的应用范围 (coastline-based application extent)；
        - CoastTideX 采用高性能 Python / SciPy 球面三维笛卡尔直角坐标 k-最近邻反距离加权 (Spherical 3D k-NN IDW, k=8, p=2)；
-       - CoastTideX 默认配置外推门禁为 100.0 km，同时允许用户配置 0.0 ~ 500.0 km（注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义）。
+       - CoastTideX 默认配置外推门禁为 100.0 km，同时允许用户配置 0.0 ~ 500.0 km（注意：Seeger & Minderhoud 2026 的约 500 km 为基于海岸线的应用范围，与 CoastTideX 到最近有效 MDT support 点的 support-distance cutoff 是不同定义）。
        - 本模块并非 ArcGIS 原生工作流的无差别复现 (not an exact reproduction)，而是面向全球自动化流式生产的改编工程实现。
 
 【核心特性】:

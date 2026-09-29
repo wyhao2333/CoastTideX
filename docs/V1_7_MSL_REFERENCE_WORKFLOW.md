@@ -48,9 +48,9 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
 3. **可配置 0–500 km 物理距离门禁阻断 (Configurable Extrapolation Guard)**：
    - 默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
    - 允许配置范围：`0.0 ~ 500.0 km`（非数值或超出范围抛出 `ValueError`，杜绝静默截断）；
-   - **0 km 模式**：若配置距离为 0.0 km，则完全禁用 IDW 空间外推，纯使用大洋原生插值，陆地缺失区直接标记 NoData (`QC = 2`)；
+   - **0 km 模式**：若配置距离为 0.0 km，则完全禁用 IDW 空间外推，纯使用大洋原生插值，原生 MDT 缺失目标位置直接标记 NoData (`QC = 2`)；
    - **特别说明**：*Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推算法，并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异*；
-   - 凡至最近有效大洋网格点在球面三维空间中的欧氏直线距离（3D Cartesian chord distance on the spherical embedding）大于门禁距离的深陆区，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
+   - 凡目标位置到最近有效 MDT support 点在球面三维空间中的欧氏直线距离（3D Cartesian chord distance on the spherical embedding）大于配置门禁距离时，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
    - 质量控制编码标记为：`QC = 2 (nodata)`，坚决杜绝内陆无限外推造成的失真。
 
 ### 2.3 动态空间索引与 ±180° 国际日界线支持 (Dynamic Window & Antimeridian Support)
@@ -65,7 +65,7 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
 | :--- | :--- | :--- | :--- |
 | **比较物理基准** | EGM2008 大地水准面 | 局部平均海平面 (MSL) | 基准转换前置，DEM_MSL 可复用且代数等价 |
 | **Stage 1 控制节点 MDT 查询** | 逐节点频繁查询 (78+ 次) | **零查询 (0 次)** | Stage 1 纯潮位解算零额外依赖 |
-| **MDT 沿岸外推边界** | 无明确物理距离截断 | **可配置 0–500 km (默认 100 km)** | 消除深陆区无限外推风险 |
+| **MDT 沿岸外推边界** | 无明确物理距离截断 | **可配置 0–500 km (默认 100 km)** | 消除超出有效支撑距离过度外推失真风险 |
 | **决策边界一致性** | 基准一致 | **100.0000% 严密等价** | 240,000 次判定残差 $< 10^{-7}\text{ m}$ |
 | **批处理流式吞吐** | 重复解算基准偏移量 | 一次转换 DEM，后续零开销复用 | 显著提升多方案/多时段分析效率 |
 | **多线程并发安全性** | 单线程 | **Thread-Local 实例隔离** | 消除 Workers 并发全局缓存竞态污染 |
@@ -188,7 +188,7 @@ for i in range(len(lons)):
 | QC 数值 | 宏定义常量 | 几何与物理涵义 | 处理机制 |
 | :---: | :--- | :--- | :--- |
 | **0** | `QC_MDT_NATIVE` | 原始 CNES-CLS22 大洋开阔海域覆盖点 | 原生网格双线性插值 |
-| **1** | `QC_MDT_EXTRAPOLATED` | 近岸滩涂与陆地缺失点（距离有效海域 $\le \text{max\_dist}$） | 球面 3D 空间 k-NN IDW 外推 |
+| **1** | `QC_MDT_EXTRAPOLATED` | 近岸滩涂与原生 MDT 缺失有效支撑点（距离有效海域 $\le \text{max\_dist}$） | 球面 3D 空间 k-NN IDW 外推 |
 | **2** | `QC_MDT_NODATA` | 输入 DEM 原生 NoData 或距离大洋有效海域 $> \text{max\_dist}$ | 严密物理阻断，赋 NoData |
 
 ### 6.2 输出 GeoTIFF 元数据溯源标签 (Provenance Tags)
