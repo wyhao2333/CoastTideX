@@ -56,8 +56,9 @@ validation/scratch/
 *.pdf
 参考文献/
 
-# Agent / AI 开发指令文件（仅本地保留，不纳入仓库）
+# Agent / AI 开发指令文件与本地规则（仅本地保留，不纳入仓库）
 AGENTS.md
 AGENT.md
 GEMINI.md
+.agents/
 

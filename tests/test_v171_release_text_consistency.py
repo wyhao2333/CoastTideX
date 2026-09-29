@@ -250,9 +250,9 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         self.assertEqual(re_mod.QC_VALID, 0)
         self.assertEqual(re_mod.QC_NODATA, 65535)
 
-    # 13. 验证 Git 跟踪状态下绝无任何 AI/Agent 指令文件
+    # 13. 验证 Git 跟踪状态下绝无任何 AI/Agent 指令文件与本地规则目录
     def test_git_tracked_no_agent_files(self):
-        """验证 Git 跟踪状态下绝不存在任何 AGENT / AGENTS / GEMINI / CLAUDE / CODEX 指令文件"""
+        """验证 Git 跟踪状态下绝不存在任何 AGENT / AGENTS / GEMINI / CLAUDE / CODEX 指令文件或 .agents/ 目录"""
         import subprocess
 
         res = subprocess.run(
@@ -264,12 +264,24 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         )
         if res.returncode == 0:
             tracked_files = [line.strip() for line in res.stdout.splitlines() if line.strip()]
-            pattern = re.compile(r"(^|[/\\])(AGENT|AGENTS|GEMINI|CLAUDE|CODEX)\.md$", re.IGNORECASE)
-            tracked_agent_files = [f for f in tracked_files if pattern.search(f)]
+            tracked_agent_files = []
+            for f in tracked_files:
+                normalized = f.replace("\\", "/")
+                if re.search(
+                    r"(^|/)(AGENT|AGENTS|GEMINI|CLAUDE|CODEX)\.md$",
+                    normalized,
+                    re.IGNORECASE,
+                ):
+                    tracked_agent_files.append(f)
+                    continue
+
+                if normalized.startswith(".agents/"):
+                    tracked_agent_files.append(f)
+
             self.assertEqual(
                 tracked_agent_files,
                 [],
-                f"发现被 Git 跟踪的 Agent 指令文件: {tracked_agent_files}",
+                f"发现被 Git 跟踪的本地 AI/Agent 指令文件或目录: {tracked_agent_files}",
             )
 
     # 14. 验证生产文件无陈旧版本号且 Exposure SOFTWARE 标签为 CoastTideX v1.7.1
