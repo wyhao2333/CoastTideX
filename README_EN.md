@@ -136,7 +136,7 @@ Following this forward datum conversion, hydrodynamic astronomical tides predict
 
 #### Key Technical Characteristics and Scope:
 1. **Two-Stage MDT Spatial Reconstruction**: Open ocean regions utilize CNES-CLS22 native bilinear interpolation (`QC=0: native_mdt`, denoting the native ocean interpolation path rather than an absolute accuracy guarantee); nearshore and terrestrial data voids employ spherical 3D Cartesian Inverse Distance Weighting (`QC=1: idw_extrapolated`);
-2. **Configurable 0–500 km Physical Extrapolation Cutoff (Default 100 km)**: Supports user-configured cutoff distances between 0.0 and 500.0 km (default: 100.0 km; 0.0 km disables extrapolation and relies solely on native ocean MDT). Pixels beyond the specified distance are assigned NoData (`QC=2: nodata`), preventing unrealistic deep-inland extrapolation. (*Note: Adapted from Seeger & Minderhoud, Nature, 2026; CoastTideX implements a spherical 3D k-NN IDW extrapolation framework and is not an exact pixel-by-pixel reproduction of the ArcGIS Smooth Neighborhood IDW tool; note the distinction: Seeger & Minderhoud (2026) applied an approximate 500 km global terrestrial application extent from coastlines, whereas CoastTideX's extrapolation cutoff is defined as the 3D spherical physical distance to the nearest valid MDT support, configurable from 0–500 km with a default recommendation of 100 km*);
+2. **Configurable 0–500 km Physical Extrapolation Cutoff (Default 100 km)**: Supports user-configured cutoff distances between 0.0 and 500.0 km (default: 100.0 km; 0.0 km disables extrapolation and relies solely on native ocean MDT). Pixels beyond the specified distance are assigned NoData (`QC=2: nodata`), preventing unrealistic deep-inland extrapolation. (*Note: Adapted from Seeger & Minderhoud, Nature, 2026; CoastTideX implements a spherical 3D k-NN IDW extrapolation framework and is not an exact pixel-by-pixel reproduction of the ArcGIS Smooth Neighborhood IDW tool; note the distinction: Seeger & Minderhoud (2026) applied an approximate 500 km global terrestrial application extent from coastlines, whereas CoastTideX's extrapolation cutoff is defined as the 3D spherical physical distance to the nearest valid MDT support, configurable from 0–500 km with a default configuration of 100 km*);
 3. **Stage 1 Zero-MDT-Lookup**: During quadtree adaptive control grid evaluation, control nodes compute pure astronomical tides directly without querying gravity geoids or MDT models;
 4. **Strict Decision Equivalence**: Rigorously verified across Chongming Island's 150M-pixel dataset with 10,000 spatial samples (240,000 temporal evaluations), confirming **100.0000%** decision consistency under identical static offset and spatial support conditions (elevation residual at float32 limit $\sim 10^{-7}\text{ m}$);
 5. **Smooth Backward Compatibility**: Retains `dem_datum="egm2008"` as a deprecated compatibility mode (`DeprecationWarning`), with `dem_datum="msl"` now being the default recommended standard.
@@ -161,7 +161,7 @@ CoastTideX operates directly on the **native unstructured mesh (3.77 GB NS-grid)
 Conventional marine packages rely on fixed lat-lon grids, which fail on tidal flats and beaches:
 - **Staircase Artifacts**: Rectangular pixels chop natural curvilinear coastlines into discrete blocks, causing spurious steps in tidal elevation;
 - **Land Extrapolation Contamination**: Mathematical extrapolation into coastal land pixels introduces artificial surges or dampening;
-- **Resolution Mismatch**: When remote sensing DEMs reach 10m/30m resolution, a 1/30° (~3.7 km) grid cannot resolve tidal phase lags across intertidal creeks.
+- **Resolution Mismatch**: High-resolution DEMs define the terrain-conditioned output grid, but do not add tidal-dynamic information below the spatial scales resolved by the underlying FES2022b finite-element solution. When remote sensing DEMs reach 10m/30m resolution, a 1/30° (~3.7 km) grid cannot resolve tidal phase lags across intertidal creeks.
 
 ---
 
@@ -295,8 +295,8 @@ CoastTideX strictly distinguishes four categories of scientific data:
 In complex archipelagoes, narrow sandbars, and bifurcated estuaries, Euclidean distance interpolation can mistakenly leak tidal signals across land barriers.
 CoastTideX applies **Target-Mask-Derived Topology Guarding**:
 1. **Physical Scale Mask Derivation**: Constructs a conservative binary coarse mask (`topology_max_resolution_m`, default 100m) based on valid target computation areas;
-2. **Morphology & Connected Component Labeling**: Identifies independent water body components via `scipy.ndimage.label`;
-3. **Barrier Traversal Blocking**: Restricts control grid interpolation to pixels within the same connected component; when crossing land NoData barriers, automatically falls back to local one-sided nodes and flags `QC_BIT_CONNECTIVITY_FALLBACK`.
+2. **Morphology & Connected Component Labeling**: Identifies target computation mask connected components via `scipy.ndimage.label`;
+3. **Barrier Traversal Blocking**: Restricts control grid interpolation to pixels within the same target mask connected component; when crossing NoData barriers, automatically falls back to local one-sided nodes and flags `QC_BIT_CONNECTIVITY_FALLBACK`.
 
 > [!NOTE]
 > This protection mechanism is derived from the target computation region's valid/NoData mask as a spatial interpolation safety heuristic, and must not be interpreted as a true hydrodynamic or hydraulic connectivity model; target NoData does not necessarily represent physical seawalls, topography, or absolute hydraulic barriers.
@@ -317,7 +317,7 @@ Every pixel in CoastTideX products carries a bitmask for quality assurance:
 - `bit 6 (64)`: Connectivity fallback across topological barrier (`QC_BIT_CONNECTIVITY_FALLBACK`)
 - `bit 7 (128)`: FES validity boundary discontinuity (`QC_BIT_FES_VALIDITY_BOUNDARY`)
 - `bit 8 (256)`: Maximum refinement depth reached (`QC_BIT_MAX_REFINEMENT_REACHED`)
-- `65535`: NoData / Land mask
+- `65535`: NoData / outside target computation region
 
 ### Exposure QC Bits:
 - `0`: No currently defined Exposure QC/degradation bit triggered (`QC_EXP_VALID`; does not represent an absolute accuracy guarantee against real natural environmental errors)
@@ -328,7 +328,7 @@ Every pixel in CoastTideX products carries a bitmask for quality assurance:
 - `bit 4 (16)`: Invalid time gaps present (`QC_EXP_PARTIAL_VALID_TIME`)
 - `bit 5 (32)`: Permanently submerged pixel (`QC_EXP_PERMANENTLY_SUBMERGED`)
 - `bit 6 (64)`: Permanently exposed pixel (`QC_EXP_PERMANENTLY_EXPOSED`)
-- `65535`: NoData / Land mask (`QC_EXP_NODATA`)
+- `65535`: NoData / outside target computation region (`QC_EXP_NODATA`)
 
 ---
 
@@ -356,7 +356,7 @@ pip install -r requirements.txt
 ## 15. Quick Start: CLI Guide
 
 ```bash
-# 0. DEM Datum Conversion: EGM2008 -> MSL (v1.7 / v1.7.1 Batch Enhancement)
+# 0. DEM Datum Conversion: EGM2008 -> MSL (v1.7 / v1.7.1 Batch Enhancement, recommended first step)
 # Single DEM tile conversion:
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
@@ -365,7 +365,7 @@ python cli.py convert-dem \
     --block-size 1024 \
     --write-qc
 
-# Batch DEM folder conversion (New in v1.7.1, multi-worker, strict resume, manifest):
+# Batch DEM folder conversion (Multi-worker, strict resume, manifest):
 python cli.py convert-dem-batch \
     --input-dir path/to/egm2008_dems/ \
     --output-dir path/to/msl_dems/ \
@@ -373,34 +373,50 @@ python cli.py convert-dem-batch \
     --workers 2 \
     --resume
 
-# 1. Potential Tidal Exposure Duration Analysis (New in v1.6)
+# 1. Potential Astronomical Tidal Exposure Duration Analysis (MSL recommended)
+# Full exposure analysis directly from MSL-converted DEM (--dem-datum msl is default):
 python cli.py raster exposure \
-    --dem path/to/beach_dem.tif \
+    --dem path/to/beach_dem_msl.tif \
+    --year 2024 --step 30min \
+    --dem-datum msl \
+    --output-dir path/to/output_dir
+
+# Fast zero-FES exposure evaluation from existing Tide Cache:
+python cli.py raster exposure \
+    --dem path/to/beach_dem_msl.tif \
     --cache path/to/beach_dem_tide.nc \
     --output-dir path/to/output_dir
+
+# Legacy direct-input compatibility path (retained for backward compatibility):
+# python cli.py raster exposure --dem path/to/beach_dem_egm2008.tif --year 2024 --step 30min --dem-datum egm2008 --output-dir path/to/output_dir
 
 # 2. Spatial Raster Snapshot
 python cli.py raster snapshot \
     --input path/to/dem.tif \
     -o path/to/snapshot.tif \
     --time "2024-06-15 12:00:00" \
-    --datum egm2008
+    --datum msl
 
-# 3. Adaptive Inundation Frequency
+# 3. Adaptive Inundation Frequency (MSL recommended)
 python cli.py raster inundation \
-    --dem path/to/dem.tif \
+    --dem path/to/input_dem_msl.tif \
     -o path/to/inundation.tif \
     --year 2024 --step 30min \
-    --dem-datum egm2008 \
+    --dem-datum msl \
     --export-cache path/to/cache_tide.nc
 
-# 4. Batch Intertidal Raster Processing
+# Legacy direct-input compatibility path:
+# python cli.py raster inundation --dem path/to/input_dem_egm2008.tif -o path/to/inundation.tif --year 2024 --step 30min --dem-datum egm2008
+
+# 4. Batch Intertidal Raster Processing (MSL recommended)
 python cli.py raster batch \
-    -i path/to/dem_folder \
+    -i path/to/msl_dem_folder \
     -o path/to/output_folder \
     --mode all \
     --year 2024 --step 30min \
+    --dem-datum msl \
     --existing-policy resume
+# Note: raster batch retains default egm2008 for backward compatibility when --dem-datum is omitted.
 ```
 
 ---

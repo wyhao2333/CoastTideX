@@ -351,6 +351,65 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         # 3. 生态边界检查 (不得写潜在耐干时长)
         self.assertNotIn("潜在耐干时长", readme_zh)
 
+    # 17. 验证全库关键发布文件科学措辞与中性化用语闭环
+    def test_pre_release_scientific_claims_and_terminology_closure(self):
+        """验证用户可见生产文档与界面文案彻底清除夸大与误导用词，且规范用语完整覆盖"""
+        targets = {
+            "README.md": (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"),
+            "README_EN.md": (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8"),
+            "CHANGELOG.md": (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+            "gui/manual_dialog.py": (PROJECT_ROOT / "gui" / "manual_dialog.py").read_text(encoding="utf-8"),
+            "gui/main_window.py": (PROJECT_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8"),
+            "cli.py": (PROJECT_ROOT / "cli.py").read_text(encoding="utf-8"),
+            "core/dem_datum_converter.py": (PROJECT_ROOT / "core" / "dem_datum_converter.py").read_text(encoding="utf-8"),
+        }
+
+        banned_phrases = [
+            "消除近岸潮位倾斜系统偏差",
+            "专为高分辨率潮间带调校",
+            "科学范式变革",
+            "水体独立连通分量",
+            "同一连通水体域",
+            "沙滩动力学完整时间域分析",
+            "底层潮汐流场",
+            "34 个半日潮、日潮与长周期分潮",
+            "all 34 major constituents",
+            "34 个主分潮",
+            "保障物理边界几何一致",
+            "严密转换为局部平均海平面基准",
+        ]
+
+        for fname, text in targets.items():
+            for phrase in banned_phrases:
+                self.assertNotIn(
+                    phrase,
+                    text,
+                    f"在生产文件 {fname} 中发现禁止的陈旧/夸大措辞: '{phrase}'"
+                )
+
+        # 验证核心中性化与规范词汇出现
+        readme_zh = targets["README.md"]
+        readme_en = targets["README_EN.md"]
+        manual_zh = targets["gui/manual_dialog.py"]
+        main_win = targets["gui/main_window.py"]
+
+        self.assertIn("海岸带遥感", readme_zh)
+        self.assertIn("Coastal Remote Sensing", readme_en)
+        self.assertIn("全部 34 个分潮", readme_zh)
+        self.assertIn("MSL Reference Workflow", readme_zh)
+        self.assertIn("MSL 统一参考工作流", readme_zh)
+        self.assertIn("Target-Mask-Derived Topology Guard", readme_zh)
+        self.assertIn("基于目标计算掩膜派生的拓扑插值安全启发式", readme_zh)
+        self.assertIn("固定代表性地形条件下的潜在天文潮露出时长", readme_zh)
+
+        self.assertIn("v1.7 MSL 统一参考工作流", manual_zh)
+        self.assertIn("native MDT interpolation path", manual_zh)
+        self.assertIn("spherical 3D k-NN IDW", manual_zh)
+        self.assertIn("NoData / 非计算区域", manual_zh)
+
+        self.assertIn("面向海岸带遥感与潮间带地形分析", main_win)
+        self.assertIn("EGM2008 大地水准面起伏格网", main_win)
+
 
 if __name__ == "__main__":
     unittest.main()

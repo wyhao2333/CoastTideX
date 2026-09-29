@@ -136,7 +136,7 @@ Z_{\mathrm{EGM2008}}
 
 #### 关键技术特性与适用边界：
 1. **开阔大洋与近岸外推两阶段 MDT 重构**：开阔大洋海域采用 CNES-CLS22 原生网格双线性插值（标记 `QC=0: native_mdt`，表示原生大洋插值路径，不作为绝对精度保证）；近岸与陆地缺失区采用球面三维空间直角坐标反距离加权（IDW，标记 `QC=1: idw_extrapolated`）；
-2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认推荐 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现；需明确区分：Seeger & Minderhoud (2026) 研究使用的是距海岸线约 500 km 的全球陆地应用范围，而 CoastTideX 的外推门禁定义为到最近有效 MDT 空间支撑点的球面空间物理距离，可配置 0–500 km，默认推荐 100 km*）；
+2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认配置值为 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现；需明确区分：Seeger & Minderhoud (2026) 研究使用的是距海岸线约 500 km 的全球陆地应用范围，而 CoastTideX 的外推门禁定义为到最近有效 MDT 空间支撑点的球面空间物理距离，可配置 0–500 km，默认配置值为 100 km*）；
 3. **Stage 1 控制节点零 MDT 查询 (Zero-MDT-Lookup)**：在自适应控制网格求解淹没频率与露出时长时，节点直接解算纯天文潮序列，无需在控制节点尺度重复查询 MDT 模型；
 4. **决策等价性严密闭环**：基于崇明岛 1.5 亿像元高分辨率真实地形进行 10,000 点抽样（240,000 次判定测试），验证在相同静态偏移与空间支撑条件下，代数变换前后淹没判定一致率达到 **100.0000%**（残差仅为单精度浮点极限 $\sim 10^{-7}\text{ m}$）；
 5. **平滑向后兼容**：保留 `dem_datum="egm2008"` 作为向后兼容选项（触发 `DeprecationWarning`），系统默认推荐使用 `dem_datum="msl"`。
@@ -161,7 +161,7 @@ CoastTideX 核心解算器直接驱动 **FES2022b 原生非结构网格 (3.77 GB
 传统海洋软件采用规则矩形网格（如 1/16°、1/30°），在沿岸沙滩和潮间带存在潜在局限：
 - **阶梯网格效应 (Staircase Grid Effects)**：矩形像元逼近自然斜坡海岸时，可能在狭长潮沟与滩涂边缘引入锯齿状过渡；
 - **陆地外推不确定性 (Land Extrapolation Uncertainty)**：规则网格在靠近陆地边界像元缺少动力学解时，数学外推算法在浅水地形剧烈变化带可能产生虚假数值波动；
-- **微地貌相位差异平滑**：当遥感 DEM 达到 10m/30m 像元级别时，1/30° (~3.7 km) 规则格网若直接进行全局双线性插值，可能平滑微地貌复杂潮沟内的局部潮波相位过渡。
+- **微地貌相位差异平滑**：高分辨率 DEM 决定地形条件化输出网格，但不会使底层 FES2022b 获得 DEM 像元尺度的新动力学信息。当遥感 DEM 达到 10m/30m 像元级别时，1/30° (~3.7 km) 规则格网若直接进行全局双线性插值，可能平滑微地貌复杂潮沟内的局部潮波相位过渡。
 
 ---
 
@@ -297,10 +297,10 @@ CoastTideX 严格区分四类科学数据：
 
 在河口、半岛、狭窄沙咀与岛礁区域，若单纯依靠几何欧氏距离进行空间反距离或双线性插值，会导致海陆两侧或不同水体间发生潮位“穿墙泄漏”。
 
-CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Target-Mask-Derived Topology Guard)**：
+CoastTideX 引入了**基于目标计算掩膜派生的拓扑插值安全启发式 (Target-Mask-Derived Topology Guard)**：
 1. **物理尺度掩膜构建**: 按 `topology_max_resolution_m` (默认 100m) 基于输入有效计算区域构建保守二值粗掩膜；
-2. **形态学与连通域分割**: 通过 `scipy.ndimage.label` 标识水体独立连通分量 (Component ID)；
-3. **屏障跨越阻断**: 控制网格节点仅能对同属于同一连通水体域的像元进行空间插值；跨越陆地 NoData 屏障时自动回退为局部单侧插值并标记 `QC_BIT_CONNECTIVITY_FALLBACK`。
+2. **形态学与连通域分割**: 通过 `scipy.ndimage.label` 标识目标计算掩膜连通分量 (Component ID)；
+3. **屏障跨越阻断**: 控制网格节点仅能对同属于同一目标掩膜连通域的像元进行空间插值；跨越 NoData 屏障时自动回退为局部单侧插值并标记 `QC_BIT_CONNECTIVITY_FALLBACK`。
 
 > [!NOTE]
 > 该防护机制由目标计算区域的有效/NoData 掩膜派生，作为空间插值防线与启发式过滤，不等价于真实水动力/水力连通性；目标 NoData 也不必然代表实际物理防潮海堤、陆地或绝对水力阻断结构。
@@ -321,7 +321,7 @@ CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Target-Mask-Derived 
 - `bit 6 (64)`: 跨越拓扑阻隔回退 (`QC_BIT_CONNECTIVITY_FALLBACK`)
 - `bit 7 (128)`: FES 海洋突变边界 (`QC_BIT_FES_VALIDITY_BOUNDARY`)
 - `bit 8 (256)`: 达到最大网格细分深度限制 (`QC_BIT_MAX_REFINEMENT_REACHED`)
-- `65535`: 陆地 / NoData 区域
+- `65535`: NoData / 非计算区域
 
 ### 潜在露出时间域专属 QC 位定义 (`*_exposure_qc.tif`)：
 - `0`: 未触发当前定义的 Exposure QC/degradation bit (`QC_EXP_VALID`; 注: 不代表对真实自然环境误差的绝对精度保证)
@@ -332,7 +332,7 @@ CoastTideX 引入了**目标计算掩膜拓扑连通防护 (Target-Mask-Derived 
 - `bit 4 (16)`: 序列含无效数据间隙 (`QC_EXP_PARTIAL_VALID_TIME`)
 - `bit 5 (32)`: 全时段常时淹没像元 (`QC_EXP_PERMANENTLY_SUBMERGED`)
 - `bit 6 (64)`: 全时段常时露出像元 (`QC_EXP_PERMANENTLY_EXPOSED`)
-- `65535`: 陆地 / NoData 像元 (`QC_EXP_NODATA`)
+- `65535`: NoData / 非计算区域 (`QC_EXP_NODATA`)
 
 ---
 
@@ -362,11 +362,11 @@ pip install -r requirements.txt
 
 CoastTideX 提供完整无头运行能力的命令行工具 `cli.py`：
 
-### 0. DEM 垂直基准转换: EGM2008 -> MSL (v1.7 / v1.7.1 批量增强)
+### 0. DEM 垂直基准前置转换: EGM2008 -> MSL (v1.7 / v1.7.1 批量增强，推荐首选工作流)
 
 #### 单幅 DEM 影像转换:
 ```bash
-# 将任意 EGM2008 基准陆地高程 DEM 严密转换为局部平均海平面 MSL 基准 (Adapted from Nature 2026 统一架构)
+# 将 EGM2008 基准陆地高程 DEM 前置转换为局部平均海平面 MSL 基准 (Adapted from Seeger & Minderhoud 2026)
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
     --output path/to/coastal_dem_msl.tif \
@@ -386,20 +386,23 @@ python cli.py convert-dem-batch \
     --resume
 ```
 
-### 1. 潜在天文潮露出时间域分析 (v1.6 新增)
+### 1. 潜在天文潮露出时间域分析
 ```bash
+# 推荐首选：从已转换为 MSL 的 DEM 执行完整露出分析 (--dem-datum msl 为默认项)
+python cli.py raster exposure \
+    --dem path/to/beach_dem_msl.tif \
+    --year 2024 --step 30min \
+    --dem-datum msl \
+    --output-dir path/to/output_dir
+
 # 从已有 Tide Cache 执行零 FES 快速露出分析
 python cli.py raster exposure \
-    --dem path/to/beach_dem.tif \
+    --dem path/to/beach_dem_msl.tif \
     --cache path/to/beach_dem_tide.nc \
     --output-dir path/to/output_dir
 
-# 从 DEM 直接执行完整露出分析
-python cli.py raster exposure \
-    --dem path/to/beach_dem.tif \
-    --year 2024 --step 30min \
-    --dem-datum egm2008 \
-    --output-dir path/to/output_dir
+# 历史兼容路径：直接输入 EGM2008 DEM (保留用于向下兼容/历史直投工作流)
+# python cli.py raster exposure --dem path/to/beach_dem_egm2008.tif --year 2024 --step 30min --dem-datum egm2008 --output-dir path/to/output_dir
 ```
 
 ### 2. 单时刻空间水面快照 (Snapshot)
@@ -408,27 +411,34 @@ python cli.py raster snapshot \
     --input path/to/input_dem.tif \
     -o path/to/snapshot_20240615.tif \
     --time "2024-06-15 12:00:00" \
-    --datum egm2008
+    --datum msl
 ```
 
 ### 3. 单景 DEM 自适应控制网格淹没频率 (Inundation)
 ```bash
+# 推荐首选：使用已转换为 MSL 的 DEM 进行淹没频率反演 (--dem-datum msl 为默认项)
 python cli.py raster inundation \
-    --dem path/to/input_dem.tif \
+    --dem path/to/input_dem_msl.tif \
     -o path/to/inundation_2024.tif \
     --year 2024 --step 30min \
-    --dem-datum egm2008 \
+    --dem-datum msl \
     --export-cache path/to/cache_tide.nc
+
+# 历史兼容路径：直接输入 EGM2008 DEM (保留用于向下兼容/历史直投工作流)
+# python cli.py raster inundation --dem path/to/input_dem_egm2008.tif -o path/to/inundation_2024.tif --year 2024 --step 30min --dem-datum egm2008
 ```
 
 ### 4. 批量潮间带栅格与 Tide Cache 流程 (Batch)
 ```bash
+# 推荐首选：处理已转换为 MSL 的 DEM 文件夹 (显式指定 --dem-datum msl)
 python cli.py raster batch \
-    -i path/to/dem_folder \
+    -i path/to/msl_dem_folder \
     -o path/to/output_folder \
     --mode all \
     --year 2024 --step 30min \
+    --dem-datum msl \
     --existing-policy resume
+# 注：raster batch 命令在未显式指定 --dem-datum 时默认保留为 egm2008 历史兼容模式。
 ```
 
 ---

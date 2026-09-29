@@ -42,16 +42,16 @@ MANUAL_HTML = """
 <h1>📖 CoastTideX 用户操作手册与科学原理文档 (v1.7.1)</h1>
 
 <div class="callout-info">
-<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7.1)</b> 是专为海岸带环境遥感、海洋工程、大地测量垂直基准统一与潮间带生态水文模拟研发的桌面与命令行空间天文潮模拟与垂直基准转换系统。
+<b>CoastTideX (全球潮汐与高程基准空间模拟系统 v1.7.1)</b> 是一套面向海岸带遥感与潮间带地形分析的天文潮空间模拟和垂直基准转换工具，主要提供 FES2022b 潮位模拟、DEM 垂直基准统一、潜在天文潮淹没频率及 Exposure 时间域分析等功能。
 </div>
 
 <h2>一、 系统定位与科学用途 (System Overview & Scientific Scope)</h2>
-<p>CoastTideX v1.7.1 提供全链路、可追溯的潮汐动力学模拟与空间栅格产品反演能力，涵盖五大主要业务场景：</p>
+<p>CoastTideX v1.7.1 提供可追溯的天文潮计算、垂直基准转换与空间栅格产品生成和分析能力，涵盖五大主要业务场景：</p>
 <ul>
-    <li><b>单点连续潮位模拟</b>：支持全球任意经纬度的自定义时段或整年连续模拟，支持分钟级或小时级时间采样间隔，支持 34 个半日潮、日潮与长周期分潮。</li>
+    <li><b>单点连续潮位模拟</b>：支持全球任意经纬度的自定义时段或整年连续模拟，支持分钟级或小时级时间采样间隔，支持 FES2022b 全部 34 个分潮（默认科学配置）。</li>
     <li><b>批量站点时序解算</b>：面向沿海勘测点、浮标、验潮站，支持导入包含经纬度与时间戳的 CSV 表格，批量进行多基准面矢量化解算。</li>
     <li><b>单景影像空间栅格解算</b>：针对带有标准地理参考 (CRS) 的 GeoTIFF 影像，计算指定时刻空间水面高程快照 (Snapshot)、整年/时段潜在天文潮淹没频率 (Inundation Frequency) 及潜在天文潮露出时间域产品 (Exposure Duration)。</li>
-    <li><b>文件夹级批量潮间带栅格解算</b>：面向千万像元级沿海 10m/30m 高分辨率 DEM，通过自适应四叉树控制网格、持久化 NetCDF Tide Cache 架构、断点恢复与任务清单实现大规模无人值守作业。</li>
+    <li><b>文件夹级批量潮间带栅格解算</b>：面向沿海 10m/30m 高分辨率 DEM（像元尺寸决定输出栅格网格布局，底层 FES2022b 潮汐动力学保持其原始物理网格尺度），通过自适应四叉树控制网格（自适应节点密度，非动力学分辨率）、持久化 NetCDF Tide Cache 架构、断点恢复与任务清单实现大规模无人值守作业。</li>
     <li><b>DEM 垂直基准转换 (EGM2008 &rarr; MSL)</b>：将陆地 DEM 垂直基准前置转换为局部平均海平面基准，支持单瓦片流式解算与大规模文件夹级多线程安全批量转换。</li>
 </ul>
 
@@ -211,7 +211,7 @@ MANUAL_HTML = """
         <td><b>Tide Cache Only</b></td>
         <td><code>tide</code></td>
         <td>仅解算自适应控制网格并生成 <code>*_tide.nc</code> 缓存文件。</td>
-        <td>前期预解算、多任务共享底层潮汐流场。</td>
+        <td>前期预解算、多任务复用控制节点潮位时序缓存。</td>
     </tr>
     <tr>
         <td><b>Tide + Inundation</b></td>
@@ -229,7 +229,7 @@ MANUAL_HTML = """
         <td><b>Tide + Exposure</b></td>
         <td><code>tide-exposure</code></td>
         <td>先生成 Tide Cache，再反演潜在天文潮露出时间域 7 大空间产物。</td>
-        <td>潮滩生态、沙滩动力学完整时间域分析。</td>
+        <td>潮间带 Exposure 时间域分析与生态环境协变量生成。</td>
     </tr>
     <tr>
         <td><b>Exposure from Cache</b></td>
@@ -271,7 +271,7 @@ MANUAL_HTML = """
     <tr><td>bit 4</td><td>16</td><td><code>QC_EXP_PARTIAL_VALID_TIME</code></td><td>时间序列存在无效数据间隙，有效时间覆盖率 &lt; 100%。</td></tr>
     <tr><td>bit 5</td><td>32</td><td><code>QC_EXP_PERMANENTLY_SUBMERGED</code></td><td>全有效时段内水面始终高于地形（常时淹没区）。</td></tr>
     <tr><td>bit 6</td><td>64</td><td><code>QC_EXP_PERMANENTLY_EXPOSED</code></td><td>全有效时段内水面始终低于地形（常时露出区）。</td></tr>
-    <tr><td>-</td><td>65535</td><td><code>QC_EXP_NODATA</code></td><td>DEM 陆地无效屏蔽区或无数据像元。</td></tr>
+    <tr><td>-</td><td>65535</td><td><code>QC_EXP_NODATA</code></td><td>NoData / 非计算区域（DEM 无数据像元或目标计算区域外）。</td></tr>
 </table>
 
 <h2>十二、 批处理清单与产物追溯 (Batch Manifest & Provenance)</h2>
@@ -294,7 +294,7 @@ MANUAL_HTML = """
 <ol>
     <li><b>固定代表性地形假设</b>：计算假定 DEM 在模拟时段内保持几何恒定，无法反映台风暴潮引起的高强度泥沙侵蚀与滩涂冲淤变化。</li>
     <li><b>纯天文潮驱动</b>：水位时序完全源于天文引潮力调和常数，未叠加气压骤降、强风增水引起的风暴潮增减水与海啸波浪。</li>
-    <li><b>几何视界浸没模型</b>：采用基于连通域保护的水位-高程几何相交，未求解二维浅水动力学 Navier-Stokes 方程，无法模拟水流流速、波浪破碎爬高与退水水力阻力。</li>
+    <li><b>静态水位–地形几何比较模型</b>：采用静态水位与 DEM 高程的几何相交判定；空间插值阶段可使用 Target-Mask-Derived Topology Guard（由目标 valid/NoData 掩膜派生的插值安全启发式，非二维水动力或水力连通模型），未求解二维浅水动力学 Navier-Stokes 方程，无法模拟流速、波浪破碎爬高与退水水力阻力。</li>
     <li><b>沙滩非干燥时间</b>：露出仅代表天文潮水面低于地形，不代表沙滩表面已干燥，沙滩实际湿润状态受地下水位与蒸发控制。</li>
 </ol>
 
@@ -303,7 +303,7 @@ MANUAL_HTML = """
     <li><b>工作流 A: 沿海潮滩大范围潜在淹没频率反演 (v1.7 推荐规范)</b>：
         准备沿海 DEM 文件夹 &rarr; 在「DEM 基准转换」标签页中将 EGM2008 DEM 转换至 MSL 基准 &rarr; 在栅格解算中基准面选择 MSL &rarr; 运行生成淹没频率与质量掩膜。
     </li>
-    <li><b>工作流 B: 潮间带生态/沙滩潜在露出时间域分析 (MSL 统一基准)</b>：
+    <li><b>工作流 B: 潮间带潜在露出时间域分析与生态环境协变量生成 (MSL 统一基准)</b>：
         使用已转为 MSL 的 DEM &rarr; 选择 <code>tide-exposure</code> 或 <code>exposure-from-cache</code> &rarr; 运行生成 7 大时间域露出空间栅格产物。
     </li>
     <li><b>工作流 C: 遥感影像潮汐校正与瞬时水面高程反演</b>：
@@ -313,7 +313,7 @@ MANUAL_HTML = """
 
 <h2>十六、 v1.7 架构重大升级：MSL 基准统一工作流 (MSL Reference Workflow)</h2>
 <div class="callout-success">
-<b>v1.7 科学范式变革 (Adapted from Seeger & Minderhoud, Nature, 2026):</b><br>
+<b>v1.7 MSL 统一参考工作流 (Adapted from Seeger & Minderhoud, Nature, 2026):</b><br>
 v1.7 MSL-first workflow 的主要价值是将静态垂直基准转换前置，使 DEM 与原生 MSL 潮位在同一参考面直接比较，减少运行时重复 MDT/ΔN 查询，并使 DEM_MSL 可复用。在同一点、相同 MDT、ΔN 和相同空间支撑条件下，旧 Tide&rarr;EGM2008 comparison 与新的 DEM&rarr;MSL comparison 在代数上等价。<br>
 <b>CoastTideX v1.7 实现了全新的前置基准对齐工作流 (DEM_EGM2008 &rarr; DEM_MSL)</b>：将陆地高程基准统一到局部平均海平面 (MSL)，随后 FES 原生 MSL 潮位直接与 DEM_MSL 进行几何比较，使数据基准关系和批处理流程更加清晰高效。
 </div>
@@ -329,15 +329,15 @@ v1.7 MSL-first workflow 的主要价值是将静态垂直基准转换前置，�
 </ul>
 
 <h3>2. 沿岸 MDT 空间外推与可配置 0–500 km 门禁机制 (Adapted from Seeger & Minderhoud, Nature, 2026)</h3>
-<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合应用范围与工程设计，设定了<b>可配置的 0.0 ~ 500.0 km 空间外推门禁（默认推荐 100.0 km；Seeger & Minderhoud 2026 全球工作流采用距海岸线 500 km 应用范围）</b>：</p>
+<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合应用范围与工程设计，设定了<b>可配置的 0.0 ~ 500.0 km MDT support-distance cutoff（默认配置值为 100.0 km；注意 Seeger & Minderhoud 2026 使用约 500 km 基于海岸线的应用范围 coastline-based application extent，这与 CoastTideX 到最近有效 MDT support 的球面空间距离截断是两个完全不同的距离定义）</b>：</p>
 <div class="callout-info">
 <b>科学实现方法定位说明：</b> 本系统采用球面三维空间直角坐标 k-NN 反距离加权外推算法（Adapted from Seeger & Minderhoud, Nature, 2026），并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异。
 </div>
 <ul>
-    <li><b>大洋与近海区 (距离 = 0)</b>: 采用原生 CNES-CLS22 规则网格双线性插值 (Bilinear Interpolation)，QC 标记为 0；</li>
-    <li><b>0 km 模式 (纯大洋原生模式)</b>: 若设置外推距离为 0.0 km，则完全禁用 IDW 空间外推，仅保留大洋原生插值，陆地缺失区直接标记 NoData (QC=2)；</li>
-    <li><b>沿岸潮滩区 (0 &lt; 距离 &le; 门禁距离)</b>: 建立局部 3D 空间直角坐标球面 KD-Tree 索引，采用反距离加权 (IDW, k=8, p=2.0) 沿岸向陆外推，QC 标记为 1；</li>
-    <li><b>深陆区 (距离 &gt; 门禁距离)</b>: 严格判定超出有效外推边界，强制输出 NoData，QC 标记为 2，严禁深陆无物理约束的无限外推；</li>
+    <li><b>原生有效 MDT support 区域</b>: 当目标位置可直接由有效 CNES-CLS22 MDT 网格执行原生插值时，采用 native MDT interpolation path，QC 标记为 0；</li>
+    <li><b>0 km 模式 (纯原生 MDT 模式)</b>: 若设置外推距离为 0.0 km，则完全禁用 IDW 空间外推，仅保留原生有效 MDT 插值，其余缺失区域直接标记 NoData (QC=2)；</li>
+    <li><b>原生 MDT 缺失、但位于配置 support-distance cutoff 内的目标位置</b>: 建立局部 3D 空间直角坐标球面 KD-Tree 索引，采用 spherical 3D k-NN IDW (k=8, p=2.0) 空间外推，QC 标记为 1；</li>
+    <li><b>超出配置 support-distance cutoff 的目标位置</b>: 判定超出有效 MDT support 空间门禁，输出 NoData，QC 标记为 2，避免无有效支撑的远距离外推；</li>
     <li><b>国际日界线支持</b>: 算法内嵌环形圆周最小区间自适应解算，无缝支持跨越 ±180° 经线的海岛与海岸区域。</li>
 </ul>
 
