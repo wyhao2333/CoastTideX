@@ -4,7 +4,7 @@
 
 ---
 
-## [1.7.1] - 2026-09-28
+## [1.7.1] - Unreleased
 
 ### 新增与重构 (Added & Refactored)
 - **DEM 垂直基准前置转换架构 (MSL Reference Workflow)**：

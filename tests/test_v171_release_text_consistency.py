@@ -309,6 +309,48 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         self.assertNotIn("BatchRasterWorker (v1.5)", mw_text)
         self.assertNotRegex(mw_text, r"BatchRasterWorker\s*\(v1\.5\)")
 
+    # 15. 验证中英文 README 中 GUI 快速上手部分准确描述全部 5 个选项卡
+    def test_readme_gui_quickstart_covers_all_5_tabs(self):
+        """验证 README.md 与 README_EN.md 的 GUI 快速上手部分完整包含 5 个选项卡，且与源码一致"""
+        readme_zh = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en = (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8")
+        mw_code = (PROJECT_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+
+        # 验证源码中 addTab 调用次数为 5
+        tab_calls = re.findall(r"self\.tabs\.addTab\(", mw_code)
+        self.assertEqual(len(tab_calls), 5, f"gui/main_window.py 中 tabs.addTab 次数不为 5: {len(tab_calls)}")
+
+        # 验证中文 README
+        for tab_str in ["选项卡 1", "选项卡 2", "选项卡 3", "选项卡 4", "选项卡 5", "DEM 基准转换"]:
+            self.assertIn(tab_str, readme_zh, f"README.md 缺少 {tab_str}")
+
+        # 验证英文 README
+        for tab_str in ["Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "DEM Datum Conversion"]:
+            self.assertIn(tab_str, readme_en, f"README_EN.md 缺少 {tab_str}")
+
+    # 16. 验证作者研究方向、未正式发布状态徽章与生态边界措辞
+    def test_readme_author_release_state_and_ecology_boundary(self):
+        """验证作者研究方向中英一致、Release 徽章已下线以及生态边界中性化"""
+        readme_zh = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en = (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8")
+
+        # 1. 作者研究方向检查
+        self.assertIn("海岸带遥感", readme_zh)
+        self.assertIn("Coastal Remote Sensing", readme_en)
+        self.assertNotIn("沿海海洋动力学与大地测量学", readme_zh)
+        self.assertNotIn("Coastal Ocean Dynamics & Geodesy", readme_en)
+
+        # 2. Release 状态检查 (不得声称正式 Release)
+        self.assertNotIn("Release-v1.7.1", readme_zh)
+        self.assertNotIn("Release-v1.7.1", readme_en)
+        self.assertNotIn("Current release: CoastTideX v1.7.1", readme_en)
+        self.assertIn("Version-v1.7.1", readme_zh)
+        self.assertIn("Version-v1.7.1", readme_en)
+        self.assertIn("Current code version: **CoastTideX v1.7.1**", readme_en)
+
+        # 3. 生态边界检查 (不得写潜在耐干时长)
+        self.assertNotIn("潜在耐干时长", readme_zh)
+
 
 if __name__ == "__main__":
     unittest.main()
