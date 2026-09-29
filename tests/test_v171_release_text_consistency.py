@@ -410,6 +410,68 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         self.assertIn("面向海岸带遥感与潮间带地形分析", main_win)
         self.assertIn("EGM2008 大地水准面起伏格网", main_win)
 
+    # 18. 验证 v1.7.1 最终 pre-merge 科学措辞与界面文案闭环
+    def test_v171_final_premerge_wording_closure(self):
+        """验证 GUI、方法文档与用户手册彻底消除残留的科学范式、500km旧定义、测地距离与Navier-Stokes混淆"""
+        main_win_path = PROJECT_ROOT / "gui" / "main_window.py"
+        method_doc_path = PROJECT_ROOT / "docs" / "V1_7_MSL_REFERENCE_WORKFLOW.md"
+        manual_path = PROJECT_ROOT / "gui" / "manual_dialog.py"
+        readme_zh_path = PROJECT_ROOT / "README.md"
+
+        self.assertTrue(main_win_path.exists())
+        self.assertTrue(method_doc_path.exists())
+        self.assertTrue(manual_path.exists())
+        self.assertTrue(readme_zh_path.exists())
+
+        main_win_text = main_win_path.read_text(encoding="utf-8")
+        method_doc_text = method_doc_path.read_text(encoding="utf-8")
+        manual_text = manual_path.read_text(encoding="utf-8")
+        readme_zh_text = readme_zh_path.read_text(encoding="utf-8")
+
+        # 1. gui/main_window.py 禁用项检查
+        banned_main_win = [
+            "转换科学范式",
+            "理论范式改编",
+            "Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围",
+            "严密转换四大垂直基准",
+            "消除沿岸潮位-高程系统偏差",
+        ]
+        for phrase in banned_main_win:
+            self.assertNotIn(
+                phrase, main_win_text,
+                f"gui/main_window.py 中包含禁止的措辞: '{phrase}'"
+            )
+
+        # gui/main_window.py 必须包含的规范项
+        self.assertIn("MSL 垂直基准转换方法与参数配置", main_win_text)
+        self.assertIn("转换四类垂直基准", main_win_text)
+        self.assertIn("MDT support-distance cutoff", main_win_text)
+        self.assertIn("注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。", main_win_text)
+
+        # 2. docs/V1_7_MSL_REFERENCE_WORKFLOW.md 禁用项检查
+        banned_method_doc = [
+            "默认推荐：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM",
+            "测地空间距离",
+            "核心范式跃迁",
+        ]
+        for phrase in banned_method_doc:
+            self.assertNotIn(
+                phrase, method_doc_text,
+                f"docs/V1_7_MSL_REFERENCE_WORKFLOW.md 中包含禁止的措辞: '{phrase}'"
+            )
+
+        # docs/V1_7_MSL_REFERENCE_WORKFLOW.md 必须包含的规范项
+        self.assertIn("默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM", method_doc_text)
+        self.assertIn("3D Cartesian chord distance", method_doc_text)
+
+        # 3. gui/manual_dialog.py shallow-water 规范检查
+        self.assertNotIn("二维浅水动力学 Navier-Stokes 方程", manual_text)
+        self.assertIn("未求解二维浅水方程 (shallow-water equations)", manual_text)
+
+        # 4. README.md 拓扑守卫中性化检查
+        self.assertNotIn("海陆两侧或不同水体间发生潮位“穿墙泄漏”", readme_zh_text)
+        self.assertIn("海陆两侧或由目标计算掩膜分隔的区域之间发生插值“穿墙泄漏”", readme_zh_text)
+
 
 if __name__ == "__main__":
     unittest.main()

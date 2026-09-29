@@ -72,7 +72,7 @@ QC_MDT_NATIVE = 0        # 原始大洋 MDT 双线性插值覆盖区
 QC_MDT_EXTRAPOLATED = 1  # IDW 沿岸/陆地外推有效区 (在配置距离之内)
 QC_MDT_NODATA = 2        # 超出配置距离门禁或输入 DEM 本身属于 NoData
 
-# 地球平均曲率半径 (用于 3D 空间直角坐标测地弦长测算)
+# 地球平均曲率半径 (用于球面三维空间直角坐标弦长测算)
 EARTH_RADIUS_M = 6371000.0
 
 

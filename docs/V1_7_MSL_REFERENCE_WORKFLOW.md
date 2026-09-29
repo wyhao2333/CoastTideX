@@ -14,8 +14,8 @@ $$\text{Tide}_{\text{EGM2008}}(t) = \text{Tide}_{\text{MSL}}(t) + \text{MDT} + \
 1. **统一物理几何基准**：借鉴 Seeger & Minderhoud (2026) 提出的基准统一思想，将陆面 DEM 前置转换为局部平均海平面基准，彻底消除水动力模型与静态地形比较时的基准错位；
 2. **计算解耦与消除冗余**：前置基准转换使得在后续自适应四叉树控制网格解算中，控制节点无需反复查询 MDT 与大地水准面，实现纯动力学潮位的零冗余快速评估。
 
-### v1.7 / v1.7.1 核心范式跃迁 (Paradigm Shift)
-**CoastTideX v1.7.1** 正式实现基准统一框架跃迁：**将陆地 DEM 前置转换为局部平均海平面 (Local Mean Sea Level, MSL) 基准**（Adapted from Seeger & Minderhoud, 2026）：
+### v1.7 / v1.7.1 垂直基准工作流架构 (Vertical Reference Workflow Architecture)
+**CoastTideX v1.7.1** 正式确立 MSL 基准统一工作流：**将陆地 DEM 前置转换为局部平均海平面 (Local Mean Sea Level, MSL) 基准**（Adapted from Seeger & Minderhoud, 2026）：
 
 $$Z_{\text{MSL}} = Z_{\text{EGM2008}} - \text{MDT} - \Delta N$$
 
@@ -46,11 +46,11 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
    - 基于 `scipy.spatial.cKDTree` 构建大洋有效边界点的高维空间索引，进行反距离加权（IDW，幂次 $p=2.0$，近邻点数 $k=8$）空间外推；
    - 质量控制编码标记为：`QC = 1 (idw_extrapolated)`。
 3. **可配置 0–500 km 物理距离门禁阻断 (Configurable Extrapolation Guard)**：
-   - 默认推荐：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
+   - 默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
    - 允许配置范围：`0.0 ~ 500.0 km`（非数值或超出范围抛出 `ValueError`，杜绝静默截断）；
    - **0 km 模式**：若配置距离为 0.0 km，则完全禁用 IDW 空间外推，纯使用大洋原生插值，陆地缺失区直接标记 NoData (`QC = 2`)；
    - **特别说明**：*Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推算法，并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异*；
-   - 凡至最近有效大洋网格点的测地空间距离大于门禁距离的深陆区，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
+   - 凡至最近有效大洋网格点在球面三维空间中的欧氏直线距离（3D Cartesian chord distance on the spherical embedding）大于门禁距离的深陆区，系统严密阻断外推，强制赋值 `NoData`（`NaN`）；
    - 质量控制编码标记为：`QC = 2 (nodata)`，坚决杜绝内陆无限外推造成的失真。
 
 ### 2.3 动态空间索引与 ±180° 国际日界线支持 (Dynamic Window & Antimeridian Support)

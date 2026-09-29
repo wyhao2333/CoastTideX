@@ -110,5 +110,35 @@
 
 1. **固定代表性地形假设**: 不包含台风暴潮引起的强泥沙冲淤与地形动态演变；
 2. **纯天文潮驱动**: 未叠加气象风暴增减水、涌浪爬高与海啸；
-3. **静态几何比较模型**: 采用静态几何相交判定，非求解二维浅水 Navier-Stokes 方程的动力学模型；
+3. **静态几何比较模型**: 采用静态几何相交判定，未求解二维浅水方程 (shallow-water equations) 或其他显式水动力控制方程；
 4. **沙滩湿润度物理界限**: 露出仅代表天文潮位低于地形，不代表沙滩表面已干燥，沉积物含水率受孔隙水和蒸发控制。
+
+---
+
+## 7. 最终合并前文字收口与一致性闭环 (Final Pre-Merge Terminology Closure)
+
+本轮针对 Draft PR #1 执行最终合并前的细微科学措辞闭环，彻底消除残留不一致项：
+
+1. **GUI “科学范式”中性化**:
+   - `gui/main_window.py` 单影像 DEM 转换 GroupBox 由 `2. 转换科学范式与参数配置 (Seeger & Minderhoud, Nature, 2026 理论范式改编)` 更新为中性客观的 `2. MSL 垂直基准转换方法与参数配置 (MSL Reference Workflow)`；
+   - 目标基准 Tooltip 由 `转换科学范式 (公式: Z_MSL = ...)` 更新为 `MSL 垂直基准转换关系：Z_MSL = Z_EGM2008 - MDT - ΔN`；
+   - 关于对话框中关于 Seeger & Minderhoud 的表述由“方法范式”更新为“方法框架”；
+   - 动态基准提示标签中删除“范式”与“消除近岸系统偏差”等绝对化修饰，中性表述为基准对齐与统一基准比较。
+2. **两个 500 km Tooltip 定义严格区分与更正**:
+   - `gui/main_window.py` 单影像与批量转换控件中的两个 Tooltip 彻底重构，明确界定：CoastTideX 参数为目标位置到最近有效 MDT support 点在球面 XYZ 空间中的三维欧氏距离门限（默认配置 100.0 km，允许范围 0.0 ~ 500.0 km；0 km 禁用 IDW 外推）；特别提醒 Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的宏观应用范围 (coastline-based application extent)，二者为完全不同的距离定义。
+3. **方法文档“默认推荐”客观化**:
+   - `docs/V1_7_MSL_REFERENCE_WORKFLOW.md` 中将 `默认推荐：DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km` 统一调整为 `默认配置：DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`，不暗示经过特定最优化，保持纯粹的工程默认配置定位。
+4. **support-distance 真实几何距离实现对齐**:
+   - 经审查 `core/dem_datum_converter.py` 的真实底层代码（基于经纬度转换为球坐标 $(X,Y,Z)$ 后通过 `cKDTree` 计算三维直线距离），其实质为球面空间直角三维欧氏弦长距离（3D Cartesian chord distance on the spherical embedding），而非沿地球表面的大圆/测地弧长（geodesic distance）。
+   - 在 `docs/V1_7_MSL_REFERENCE_WORKFLOW.md` 中准确更正为“球面三维空间中的欧氏直线距离（3D Cartesian chord distance on the spherical embedding）”，并在代码注释中同步剔除“测地弦长”混淆，完全对齐代码真实行为。
+5. **GUI 状态文案“严密转换”中性化**:
+   - `gui/main_window.py` 运行状态文字由 `严密转换四大垂直基准` 调整为 `转换四类垂直基准`，避免向用户暗示绝对无误差精度保证。
+6. **GUI Manual 中 shallow-water 动力学表述更正**:
+   - `gui/manual_dialog.py` 科学局限性章节中，将 `未求解二维浅水动力学 Navier-Stokes 方程` 更正为严谨规范的 `未求解二维浅水方程 (shallow-water equations) 或其他显式水动力控制方程`，杜绝方程混淆。
+7. **README Topology Guard 前言中性化**:
+   - `README.md` 第 12 节前言将 `海陆两侧或不同水体间发生潮位“穿墙泄漏”` 严密化为 `海陆两侧或由目标计算掩膜分隔的区域之间发生插值“穿墙泄漏”`，精准契合其基于目标掩膜派生的空间防线本质。
+8. **运行时行为变化 (Runtime Behavior Change)**: **NO（未改变任何运行时默认值或代码逻辑）**。
+9. **科学算法修改 (Scientific Algorithm Change)**: **NO（零算法变动，零物理改动）**。
+10. **Batch CLI default**: 保持 `egm2008` 历史兼容默认值不变。
+11. **自动化测试加固**:
+    - `tests/test_v171_release_text_consistency.py` 新增 Test 18 专项检查，对上述所有禁用词（包括“转换科学范式”、“理论范式改编”、“测地空间距离”等）与对应规范词进行强断言，确保闭环不反弹。

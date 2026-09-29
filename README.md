@@ -295,7 +295,7 @@ CoastTideX 严格区分四类科学数据：
 
 ## 12. 基于目标计算掩膜的拓扑连通防护与插值安全启发式 (Target-Mask-Derived Topology Guard & Interpolation Safety Heuristic)
 
-在河口、半岛、狭窄沙咀与岛礁区域，若单纯依靠几何欧氏距离进行空间反距离或双线性插值，会导致海陆两侧或不同水体间发生潮位“穿墙泄漏”。
+在河口、半岛、狭窄沙咀与岛礁区域，若单纯依靠几何欧氏距离进行空间反距离或双线性插值，会导致海陆两侧或由目标计算掩膜分隔的区域之间发生插值“穿墙泄漏”。
 
 CoastTideX 引入了**基于目标计算掩膜派生的拓扑插值安全启发式 (Target-Mask-Derived Topology Guard)**：
 1. **物理尺度掩膜构建**: 按 `topology_max_resolution_m` (默认 100m) 基于输入有效计算区域构建保守二值粗掩膜；
