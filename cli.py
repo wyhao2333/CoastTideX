@@ -12,17 +12,23 @@ CoastTideX 命令行工具 (CoastTideX Command-Line Interface v1.7.1)
     # 批量计算
     python cli.py batch --input input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
 
+    # DEM 垂直基准前置转换 (EGM2008 -> MSL, v1.7 推荐首选步骤)
+    python cli.py convert-dem --input coastal_dem.tif --output coastal_dem_msl.tif --max-dist-km 100.0
+
+    # 批量 DEM 垂直基准转换 (多线程 Workers)
+    python cli.py convert-dem-batch --input-dir ./egm_dems/ --output-dir ./msl_dems/ --workers 2 --resume
+
     # 空间栅格单时刻解算 (Snapshot Raster)
-    python cli.py raster snapshot --input water_boundary.tif --output tide_snapshot.tif --time "2024-06-15 12:00:00" --datum egm2008
+    python cli.py raster snapshot --input water_boundary.tif --output tide_snapshot.tif --time "2024-06-15 12:00:00" --datum msl
 
-    # 潮滩 DEM 潜在天文潮淹没频率解算 (Annual Inundation Frequency)
-    python cli.py raster inundation --dem coastal_dem.tif --output inundation_freq.tif --year 2024 --step 30min --dem-datum egm2008
+    # 潮滩 DEM 潜在天文潮淹没频率解算 (推荐首选 MSL 基准；保留 egm2008 用于向下兼容)
+    python cli.py raster inundation --dem coastal_dem_msl.tif --output inundation_freq.tif --year 2024 --step 30min --dem-datum msl
 
-    # 潮滩 DEM 潜在天文潮露出时间域分析 (7 大产品生成)
-    python cli.py raster exposure --dem coastal_dem.tif --output-dir ./exposure_out/ --year 2024 --step 30min --dem-datum egm2008
+    # 潮滩 DEM 潜在天文潮露出时间域分析 (7 大产品生成，推荐首选 MSL 基准)
+    python cli.py raster exposure --dem coastal_dem_msl.tif --output-dir ./exposure_out/ --year 2024 --step 30min --dem-datum msl
 
-    # 文件夹级批量栅格解算 (全要素模式: Tide Cache + 淹没频率 + 潜在露出产品)
-    python cli.py raster batch --input-folder ./tifs/ --output-folder ./batch_out/ --mode all --year 2024 --existing-policy resume
+    # 文件夹级批量栅格解算 (推荐处理已转换至 MSL 的 DEM；batch-raster 命令默认保留 egm2008 历史兼容)
+    python cli.py raster batch --input-folder ./msl_dems/ --output-folder ./batch_out/ --mode all --year 2024 --step 30min --dem-datum msl --existing-policy resume
 """
 
 import os
@@ -151,7 +157,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch_raster.add_argument("--start", type=str, default=None, help="自定义起始时间")
     p_batch_raster.add_argument("--end", type=str, default=None, help="自定义结束时间")
     p_batch_raster.add_argument("--step", type=str, default="30min", help="采样间隔 (默认: 30min)")
-    p_batch_raster.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008)")
+    p_batch_raster.add_argument("--dem-datum", type=str, default="egm2008", choices=["egm2008", "msl", "goco06s", "wgs84"], help="DEM 高程基准 (默认: egm2008 历史兼容；推荐使用已转为 MSL 的 DEM 并显式指定 msl)")
     p_batch_raster.add_argument("--constituents", type=str, default="all", help="分潮集合 (默认: all)")
     p_batch_raster.add_argument("--target-mode", type=str, default="intertidal", choices=["intertidal", "standard"], help="目标区域模式 (默认: intertidal)")
     p_batch_raster.add_argument("--initial-spacing", type=float, default=4000.0, help="初始控制网格间距 (米，默认: 4000)")
@@ -166,11 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch_raster.add_argument("--non-strict", action="store_true", help="允许基准缺失或近似回退")
 
     # 4. DEM 垂直基准转换模式 (v1.7 MSL Reference Workflow)
-    p_convert = subparsers.add_parser("convert-dem", help="将陆地高程 DEM (EGM2008) 严密转换为局部平均海平面基准 (DEM_MSL)")
+    p_convert = subparsers.add_parser("convert-dem", help="将陆地高程 DEM (EGM2008) 转换为局部平均海平面基准 (DEM_MSL)")
     p_convert.add_argument("--input", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (EGM2008 基准)")
     p_convert.add_argument("--output", "-o", type=str, default=None, help="输出 DEM_MSL GeoTIFF 路径 (默认: <input>_msl.tif)")
     p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (仅在 --write-qc 时生效)")
-    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
+    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 100.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
     p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
     p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
     p_convert.add_argument("--write-qc", action="store_true", default=False, help="保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
@@ -179,7 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch_convert = subparsers.add_parser("convert-dem-batch", help="批量将 DEM 文件夹从 EGM2008 基准转换为局域 MSL 基准 (v1.7.1)")
     p_batch_convert.add_argument("--input-dir", "-i", type=str, required=True, help="输入包含待转换 DEM (*.tif) 的文件夹路径")
     p_batch_convert.add_argument("--output-dir", "-o", type=str, required=True, help="转换后 MSL DEM 输出目录")
-    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT 外推距离门禁 (km) [默认: 100.0; 允许范围: 0.0 - 500.0; Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围]")
+    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 100.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
     p_batch_convert.add_argument("--workers", type=int, default=1, help="并发工作线程/任务数 (默认: 1, 逐瓦片顺序执行)")
     p_batch_convert.add_argument("--resume", action="store_true", help="开启断点恢复模式 (跳过清单中已成功的瓦片)")
     p_batch_convert.add_argument("--overwrite", action="store_true", help="允许覆盖既有输出文件")

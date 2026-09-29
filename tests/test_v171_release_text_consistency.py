@@ -309,6 +309,169 @@ class TestV171ReleaseTextConsistency(unittest.TestCase):
         self.assertNotIn("BatchRasterWorker (v1.5)", mw_text)
         self.assertNotRegex(mw_text, r"BatchRasterWorker\s*\(v1\.5\)")
 
+    # 15. 验证中英文 README 中 GUI 快速上手部分准确描述全部 5 个选项卡
+    def test_readme_gui_quickstart_covers_all_5_tabs(self):
+        """验证 README.md 与 README_EN.md 的 GUI 快速上手部分完整包含 5 个选项卡，且与源码一致"""
+        readme_zh = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en = (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8")
+        mw_code = (PROJECT_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8")
+
+        # 验证源码中 addTab 调用次数为 5
+        tab_calls = re.findall(r"self\.tabs\.addTab\(", mw_code)
+        self.assertEqual(len(tab_calls), 5, f"gui/main_window.py 中 tabs.addTab 次数不为 5: {len(tab_calls)}")
+
+        # 验证中文 README
+        for tab_str in ["选项卡 1", "选项卡 2", "选项卡 3", "选项卡 4", "选项卡 5", "DEM 基准转换"]:
+            self.assertIn(tab_str, readme_zh, f"README.md 缺少 {tab_str}")
+
+        # 验证英文 README
+        for tab_str in ["Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "DEM Datum Conversion"]:
+            self.assertIn(tab_str, readme_en, f"README_EN.md 缺少 {tab_str}")
+
+    # 16. 验证作者研究方向、未正式发布状态徽章与生态边界措辞
+    def test_readme_author_release_state_and_ecology_boundary(self):
+        """验证作者研究方向中英一致、Release 徽章已下线以及生态边界中性化"""
+        readme_zh = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+        readme_en = (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8")
+
+        # 1. 作者研究方向检查
+        self.assertIn("海岸带遥感", readme_zh)
+        self.assertIn("Coastal Remote Sensing", readme_en)
+        self.assertNotIn("沿海海洋动力学与大地测量学", readme_zh)
+        self.assertNotIn("Coastal Ocean Dynamics & Geodesy", readme_en)
+
+        # 2. Release 状态检查 (不得声称正式 Release)
+        self.assertNotIn("Release-v1.7.1", readme_zh)
+        self.assertNotIn("Release-v1.7.1", readme_en)
+        self.assertNotIn("Current release: CoastTideX v1.7.1", readme_en)
+        self.assertIn("Version-v1.7.1", readme_zh)
+        self.assertIn("Version-v1.7.1", readme_en)
+        self.assertIn("Current code version: **CoastTideX v1.7.1**", readme_en)
+
+        # 3. 生态边界检查 (不得写潜在耐干时长)
+        self.assertNotIn("潜在耐干时长", readme_zh)
+
+    # 17. 验证全库关键发布文件科学措辞与中性化用语闭环
+    def test_pre_release_scientific_claims_and_terminology_closure(self):
+        """验证用户可见生产文档与界面文案彻底清除夸大与误导用词，且规范用语完整覆盖"""
+        targets = {
+            "README.md": (PROJECT_ROOT / "README.md").read_text(encoding="utf-8"),
+            "README_EN.md": (PROJECT_ROOT / "README_EN.md").read_text(encoding="utf-8"),
+            "CHANGELOG.md": (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8"),
+            "gui/manual_dialog.py": (PROJECT_ROOT / "gui" / "manual_dialog.py").read_text(encoding="utf-8"),
+            "gui/main_window.py": (PROJECT_ROOT / "gui" / "main_window.py").read_text(encoding="utf-8"),
+            "cli.py": (PROJECT_ROOT / "cli.py").read_text(encoding="utf-8"),
+            "core/dem_datum_converter.py": (PROJECT_ROOT / "core" / "dem_datum_converter.py").read_text(encoding="utf-8"),
+        }
+
+        banned_phrases = [
+            "消除近岸潮位倾斜系统偏差",
+            "专为高分辨率潮间带调校",
+            "科学范式变革",
+            "水体独立连通分量",
+            "同一连通水体域",
+            "沙滩动力学完整时间域分析",
+            "底层潮汐流场",
+            "34 个半日潮、日潮与长周期分潮",
+            "all 34 major constituents",
+            "34 个主分潮",
+            "保障物理边界几何一致",
+            "严密转换为局部平均海平面基准",
+        ]
+
+        for fname, text in targets.items():
+            for phrase in banned_phrases:
+                self.assertNotIn(
+                    phrase,
+                    text,
+                    f"在生产文件 {fname} 中发现禁止的陈旧/夸大措辞: '{phrase}'"
+                )
+
+        # 验证核心中性化与规范词汇出现
+        readme_zh = targets["README.md"]
+        readme_en = targets["README_EN.md"]
+        manual_zh = targets["gui/manual_dialog.py"]
+        main_win = targets["gui/main_window.py"]
+
+        self.assertIn("海岸带遥感", readme_zh)
+        self.assertIn("Coastal Remote Sensing", readme_en)
+        self.assertIn("全部 34 个分潮", readme_zh)
+        self.assertIn("MSL Reference Workflow", readme_zh)
+        self.assertIn("MSL 统一参考工作流", readme_zh)
+        self.assertIn("Target-Mask-Derived Topology Guard", readme_zh)
+        self.assertIn("基于目标计算掩膜派生的拓扑插值安全启发式", readme_zh)
+        self.assertIn("固定代表性地形条件下的潜在天文潮露出时长", readme_zh)
+
+        self.assertIn("v1.7 MSL 统一参考工作流", manual_zh)
+        self.assertIn("native MDT interpolation path", manual_zh)
+        self.assertIn("spherical 3D k-NN IDW", manual_zh)
+        self.assertIn("NoData / 非计算区域", manual_zh)
+
+        self.assertIn("面向海岸带遥感与潮间带地形分析", main_win)
+        self.assertIn("EGM2008 大地水准面起伏格网", main_win)
+
+    # 18. 验证 v1.7.1 最终 pre-merge 科学措辞与界面文案闭环
+    def test_v171_final_premerge_wording_closure(self):
+        """验证 GUI、方法文档与用户手册彻底消除残留的科学范式、500km旧定义、测地距离与Navier-Stokes混淆"""
+        main_win_path = PROJECT_ROOT / "gui" / "main_window.py"
+        method_doc_path = PROJECT_ROOT / "docs" / "V1_7_MSL_REFERENCE_WORKFLOW.md"
+        manual_path = PROJECT_ROOT / "gui" / "manual_dialog.py"
+        readme_zh_path = PROJECT_ROOT / "README.md"
+
+        self.assertTrue(main_win_path.exists())
+        self.assertTrue(method_doc_path.exists())
+        self.assertTrue(manual_path.exists())
+        self.assertTrue(readme_zh_path.exists())
+
+        main_win_text = main_win_path.read_text(encoding="utf-8")
+        method_doc_text = method_doc_path.read_text(encoding="utf-8")
+        manual_text = manual_path.read_text(encoding="utf-8")
+        readme_zh_text = readme_zh_path.read_text(encoding="utf-8")
+
+        # 1. gui/main_window.py 禁用项检查
+        banned_main_win = [
+            "转换科学范式",
+            "理论范式改编",
+            "Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围",
+            "严密转换四大垂直基准",
+            "消除沿岸潮位-高程系统偏差",
+        ]
+        for phrase in banned_main_win:
+            self.assertNotIn(
+                phrase, main_win_text,
+                f"gui/main_window.py 中包含禁止的措辞: '{phrase}'"
+            )
+
+        # gui/main_window.py 必须包含的规范项
+        self.assertIn("MSL 垂直基准转换方法与参数配置", main_win_text)
+        self.assertIn("转换四类垂直基准", main_win_text)
+        self.assertIn("MDT support-distance cutoff", main_win_text)
+        self.assertIn("注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。", main_win_text)
+
+        # 2. docs/V1_7_MSL_REFERENCE_WORKFLOW.md 禁用项检查
+        banned_method_doc = [
+            "默认推荐：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM",
+            "测地空间距离",
+            "核心范式跃迁",
+        ]
+        for phrase in banned_method_doc:
+            self.assertNotIn(
+                phrase, method_doc_text,
+                f"docs/V1_7_MSL_REFERENCE_WORKFLOW.md 中包含禁止的措辞: '{phrase}'"
+            )
+
+        # docs/V1_7_MSL_REFERENCE_WORKFLOW.md 必须包含的规范项
+        self.assertIn("默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM", method_doc_text)
+        self.assertIn("3D Cartesian chord distance", method_doc_text)
+
+        # 3. gui/manual_dialog.py shallow-water 规范检查
+        self.assertNotIn("二维浅水动力学 Navier-Stokes 方程", manual_text)
+        self.assertIn("未求解二维浅水方程 (shallow-water equations)", manual_text)
+
+        # 4. README.md 拓扑守卫中性化检查
+        self.assertNotIn("海陆两侧或不同水体间发生潮位“穿墙泄漏”", readme_zh_text)
+        self.assertIn("海陆两侧或由目标计算掩膜分隔的区域之间发生插值“穿墙泄漏”", readme_zh_text)
+
 
 if __name__ == "__main__":
     unittest.main()

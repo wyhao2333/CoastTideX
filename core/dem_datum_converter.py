@@ -12,10 +12,9 @@ CoastTideX DEM 垂直基准转换模块 (DEM Datum Converter v1.7.1)
        - 转换后 DEM_MSL 与 FES2022b 潮位序列 Tide_MSL(t) 直接在 MSL 空间物理基准下进行严格比较：
              Tide_MSL(t) > DEM_MSL
     2. 工程实现改编说明 (Adapted Engineering Implementation):
-       - Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5) 并在沿岸 500 km 宏观范围内实施分析；
+       - Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5)，并使用约 500 km 基于海岸线的应用范围 (coastline-based application extent)；
        - CoastTideX 采用高性能 Python / SciPy 球面三维笛卡尔直角坐标 k-最近邻反距离加权 (Spherical 3D k-NN IDW, k=8, p=2)；
-       - CoastTideX 默认推荐外推门禁为 100.0 km (专为高分辨率潮滩与河口潮间带设定的保守稳定工程参数)，
-         同时允许用户灵活配置 0.0 ~ 500.0 km 以满足大型三角洲或全球大尺度敏感性对比实验。
+       - CoastTideX 默认配置外推门禁为 100.0 km，同时允许用户配置 0.0 ~ 500.0 km（注意：Seeger & Minderhoud 2026 的约 500 km 为基于海岸线的应用范围，与 CoastTideX 到最近有效 MDT support 点的 support-distance cutoff 是不同定义）。
        - 本模块并非 ArcGIS 原生工作流的无差别复现 (not an exact reproduction)，而是面向全球自动化流式生产的改编工程实现。
 
 【核心特性】:
@@ -73,7 +72,7 @@ QC_MDT_NATIVE = 0        # 原始大洋 MDT 双线性插值覆盖区
 QC_MDT_EXTRAPOLATED = 1  # IDW 沿岸/陆地外推有效区 (在配置距离之内)
 QC_MDT_NODATA = 2        # 超出配置距离门禁或输入 DEM 本身属于 NoData
 
-# 地球平均曲率半径 (用于 3D 空间直角坐标测地弦长测算)
+# 地球平均曲率半径 (用于球面三维空间直角坐标弦长测算)
 EARTH_RADIUS_M = 6371000.0
 
 
@@ -81,7 +80,7 @@ def validate_mdt_extrapolation_distance(dist_km: Optional[Union[float, int]]) ->
     """
     验证近岸 MDT 外推距离门禁 (0.0 - 500.0 km)。
 
-    :param dist_km: 待验证的外推距离 (km)。若为 None 则返回默认推荐值 100.0 km。
+    :param dist_km: 待验证的外推距离 (km)。若为 None 则返回默认配置值 100.0 km。
     :return: 验证后的浮点数距离 (km)。
     :raises ValueError: 当输入非有限数值、小于 0.0 或大于 500.0 km 时抛出，严禁静默截断 (Silent Clamping)。
     """
@@ -98,7 +97,7 @@ def validate_mdt_extrapolation_distance(dist_km: Optional[Union[float, int]]) ->
     if val < MIN_MDT_EXTRAPOLATION_DISTANCE_KM or val > MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM:
         raise ValueError(
             f"MDT 外推距离超出允许范围 [{MIN_MDT_EXTRAPOLATION_DISTANCE_KM:.1f}, {MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM:.1f}] km，"
-            f"收到: {val:.2f} km。(CoastTideX 默认推荐 100.0 km; 全球大尺度分析/敏感性对比最大允许 500.0 km)"
+            f"收到: {val:.2f} km。(CoastTideX 默认配置值为 100.0 km; 最大允许配置 500.0 km)"
         )
     return val
 

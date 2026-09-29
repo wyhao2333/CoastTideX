@@ -129,8 +129,8 @@ class SingleTideWorker(QThread):
                 self.finished.emit(df, scalar_datum)
                 return
 
-            # 3. 运行严密四大垂直基准转换 (MSL -> MDT_REF -> EGM2008 -> WGS84)
-            p_cb(85, "严密转换四大垂直基准 (MSL/MDT_REF/EGM2008/WGS84)...")
+            # 3. 运行四大垂直基准转换 (MSL -> MDT_REF -> EGM2008 -> WGS84)
+            p_cb(85, "转换四类垂直基准 (MSL/MDT_REF/EGM2008/WGS84)...")
             transformer = DatumTransformer()
             strict_mode = (self.datum_mode != 'msl')
             datum_res = transformer.convert_tide_datums(
@@ -1042,15 +1042,15 @@ class MainWindow(QMainWindow):
 
         layout_single.addWidget(grp_in)
 
-        # 1.2 转换科学范式与参数配置
-        grp_params = QGroupBox("2. 转换科学范式与参数配置 (Seeger & Minderhoud, Nature, 2026 理论范式改编)")
+        # 1.2 转换方法与参数配置
+        grp_params = QGroupBox("2. MSL 垂直基准转换方法与参数配置 (MSL Reference Workflow)")
         layout_params = QGridLayout(grp_params)
         layout_params.setSpacing(8)
 
         layout_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
         combo_target_datum = QComboBox()
         combo_target_datum.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
-        combo_target_datum.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        combo_target_datum.setToolTip("MSL 垂直基准转换关系：Z_MSL = Z_EGM2008 - MDT - ΔN")
         self._make_combo_responsive(combo_target_datum)
         combo_target_datum.setEnabled(False)
         layout_params.addWidget(combo_target_datum, 0, 1, 1, 3)
@@ -1058,7 +1058,7 @@ class MainWindow(QMainWindow):
         layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
         combo_mdt_source = QComboBox()
         combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT", "cnes_cls22")
-        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认 100 km, 可配置 0–500 km)")
+        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认配置 100 km, 可配置 0–500 km)")
         self._make_combo_responsive(combo_mdt_source)
         combo_mdt_source.setEnabled(False)
         layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
@@ -1069,7 +1069,12 @@ class MainWindow(QMainWindow):
         self.spin_dem_max_dist.setValue(100.0)
         self.spin_dem_max_dist.setSingleStep(10.0)
         self.spin_dem_max_dist.setSuffix(" km")
-        self.spin_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
+        self.spin_dem_max_dist.setToolTip(
+            "MDT support-distance cutoff (默认配置 100.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
+            "该距离表示目标位置到最近有效 MDT support 点在球面 XYZ 空间中的三维欧氏距离门限。\n"
+            "0 km 表示禁用 IDW 外推，仅保留原生 MDT 插值。\n"
+            "注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。"
+        )
         layout_params.addWidget(self.spin_dem_max_dist, 2, 1)
 
         layout_params.addWidget(QLabel("2D 分块流式大小:"), 2, 2)
@@ -1282,7 +1287,7 @@ class MainWindow(QMainWindow):
         layout_batch_params.addWidget(QLabel("目标垂直基准:"), 0, 0)
         combo_batch_target = QComboBox()
         combo_batch_target.addItem("EGM2008 → 局部平均海平面 (Local MSL)", "msl")
-        combo_batch_target.setToolTip("转换科学范式 (公式: Z_MSL = Z_EGM2008 - MDT - ΔN)")
+        combo_batch_target.setToolTip("MSL 垂直基准转换关系：Z_MSL = Z_EGM2008 - MDT - ΔN")
         self._make_combo_responsive(combo_batch_target)
         combo_batch_target.setEnabled(False)
         layout_batch_params.addWidget(combo_batch_target, 0, 1, 1, 3)
@@ -1293,7 +1298,12 @@ class MainWindow(QMainWindow):
         self.spin_batch_dem_max_dist.setValue(100.0)
         self.spin_batch_dem_max_dist.setSingleStep(10.0)
         self.spin_batch_dem_max_dist.setSuffix(" km")
-        self.spin_batch_dem_max_dist.setToolTip("MDT 沿岸 IDW 空间外推物理截断距离 (默认: 100.0 km; 允许范围: 0.0 ~ 500.0 km)。\n(0 km 表示不外推；Seeger & Minderhoud 2026 全球研究采用 500 km 分析范围)")
+        self.spin_batch_dem_max_dist.setToolTip(
+            "MDT support-distance cutoff (默认配置 100.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
+            "该距离表示目标位置到最近有效 MDT support 点在球面 XYZ 空间中的三维欧氏距离门限。\n"
+            "0 km 表示禁用 IDW 外推，仅保留原生 MDT 插值。\n"
+            "注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。"
+        )
         layout_batch_params.addWidget(self.spin_batch_dem_max_dist, 1, 1)
 
         layout_batch_params.addWidget(QLabel("2D 分块流式大小:"), 1, 2)
@@ -2054,7 +2064,7 @@ class MainWindow(QMainWindow):
         self.btn_browse_qc.clicked.connect(self._browse_inund_qc)
         layout_inund.addWidget(self.btn_browse_qc, 4, 3)
 
-        self.lbl_inund_datum_hint = QLabel("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+        self.lbl_inund_datum_hint = QLabel("✅ MSL 推荐模式：高程基准对齐，水深与淹没直接对比 DEM_MSL (Adapted from Seeger & Minderhoud, Nature, 2026)。")
         self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
         self.lbl_inund_datum_hint.setWordWrap(True)
         layout_inund.addWidget(self.lbl_inund_datum_hint, 5, 0, 1, 4)
@@ -2820,10 +2830,10 @@ class MainWindow(QMainWindow):
     def _on_inund_datum_changed(self):
         val = self.combo_inund_datum.currentData()
         if val == 'msl':
-            self.lbl_inund_datum_hint.setText("✅ MSL 推荐模式：高程基准严密对齐，水深与淹没直接对比 DEM_MSL (Seeger & Minderhoud, Nature, 2026 范式)。")
+            self.lbl_inund_datum_hint.setText("✅ MSL 推荐模式：高程基准对齐，水深与淹没直接对比 DEM_MSL (Adapted from Seeger & Minderhoud, Nature, 2026)。")
             self.lbl_inund_datum_hint.setStyleSheet("color: #4ade80; font-size: 11px;")
         elif val == 'egm2008':
-            self.lbl_inund_datum_hint.setText("⚠️ EGM2008 为兼容模式。v1.7 推荐先使用 [DEM 基准转换] 标签页将 DEM 转换至 MSL 基准，以消除沿岸潮位-高程系统偏差。")
+            self.lbl_inund_datum_hint.setText("⚠️ EGM2008 为兼容模式。v1.7.1 推荐先使用 [DEM 基准转换] 标签页将 DEM 转换至 MSL 基准，实现统一垂直基准比较。")
             self.lbl_inund_datum_hint.setStyleSheet("color: #fbbf24; font-size: 11px;")
         else:
             self.lbl_inund_datum_hint.setText("")
@@ -3091,13 +3101,13 @@ class MainWindow(QMainWindow):
         about_text = (
             "<h3>CoastTideX v1.7.1</h3>"
             "<p><b>全球海岸带空间栅格潮位模拟与高程基准转换系统 (MSL Reference Workflow)</b></p>"
-            "<p>面向海洋工程、海岸带遥感、大地测量与潮间带演变研究的空间天文潮模拟与垂直基准转换工具。</p>"
+            "<p>面向海岸带遥感与潮间带地形分析的空间天文潮模拟与垂直基准转换工具。</p>"
             "<ul>"
             "<li><b>v1.7 MSL 统一基准架构</b>: "
             "<ul>"
             "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
-            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 方法范式，大洋区双线性插值，沿岸默认 100 km (可配置 0–500 km) 球面 3D-IDW 外推；</li>"
-            "<li>FES 原生 MSL 潮位与 DEM_MSL 直接比较，消除潮位逐时空计算中的基准转换开销并保障物理边界几何一致；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 方法框架，大洋区双线性插值，沿岸采用 spherical 3D k-NN IDW 空间外推（默认配置 100 km，可配置 0–500 km）；</li>"
+            "<li>FES MSL 潮位与 DEM_MSL 在统一垂直参考系中直接比较，并避免默认 MSL-first Stage 1 在控制节点尺度重复执行 MDT / DeltaN 基准转换；</li>"
             "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
             "</ul></li>"
             "<li><b>潮汐动力学</b>: FES2022b 原生非结构有限元三角形网格 (LGP2, 34分潮)</li>"
@@ -3109,11 +3119,11 @@ class MainWindow(QMainWindow):
             "<li>WGS84 (GNSS 空间几何三维椭球高)</li>"
             "</ul></li>"
             "<li><b>平均动态地形</b>: CNES-CLS22 MDT (全球大洋与边缘海混合产品，可选配置 Hybrid MDT 来源分类栅格；未配置时使用几何多边形备用并标记质量预警)</li>"
-            "<li><b>全球大地水准面高栅格</b>: NGA EGM2008 2.5' 全球全分辨率网格</li>"
+            "<li><b>EGM2008 大地水准面起伏格网</b>: NGA EGM2008 2.5′ geoid-undulation grid，用于 EGM2008-referenced height 与 WGS84 ellipsoidal height 之间的转换</li>"
             "<li><b>潜在天文潮露出时间域分析引擎</b>: "
             "<ul>"
             "<li>固定代表性地形条件下的潜在天文潮露出时长 (Exposure Duration)、最长连续露出、平均事件时长、发生频次与有效时间覆盖率等 7 大独立 GeoTIFF 空间栅格产物；</li>"
-            "<li>基于相邻采样点的一阶时间跨界线性插值 (Sub-timestep Linear Crossing Interpolation) 与空间双线性流式累加；</li>"
+            "<li>在像元尺度重构同步潮位轨迹，并结合相邻采样时刻的一阶线性 crossing 进行 Exposure 时间积分和事件统计；</li>"
             "<li>栅格与 Tide Cache 严格遵循半开区间 [start, end) 采样语义（点位时间序列支持按配置生成）。</li>"
             "</ul></li>"
             "<li><b>批量潮间带栅格引擎与 Tide Cache (Schema 1.2)</b>: "

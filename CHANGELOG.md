@@ -4,13 +4,13 @@
 
 ---
 
-## [1.7.1] - 2026-09-28
+## [1.7.1] - Unreleased
 
 ### 新增与重构 (Added & Refactored)
 - **DEM 垂直基准前置转换架构 (MSL Reference Workflow)**：
-  - 贯彻陆地 DEM EGM2008 &rarr; MSL 前置转换流水线 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$)，将潮汐动力学模拟统一于平均海平面 (MSL) 局部基准，消除近岸潮位倾斜系统偏差；
+  - 将 DEM 垂直基准转换前置 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$)，使 DEM_MSL 可在后续栅格分析中复用，并减少 Stage 1 控制节点尺度的重复 MDT / DeltaN 查询；在相同 MDT、DeltaN 与 spatial-support 条件下，新旧比较方式代数等价；
   - 实现开阔大洋双线性插值与沿岸球面 3D-IDW 外推结合的两阶段 MDT 空间重构机制；
-  - 默认采用专为高分辨率潮间带调校的 100.0 km 保守外推距离，并全面开放 0.0 ~ 500.0 km 动态配置（0 km 纯原生大洋插值，500 km 适配全球大尺度研究范围）；
+  - 默认 MDT support-distance cutoff 为 100.0 km，可配置范围为 0.0 ~ 500.0 km（0 km 纯原生大洋插值；注意 CoastTideX support-distance cutoff 与 Nature 2026 基于海岸线约 500 km 的应用范围不是同一距离定义）；
   - 全球 $\pm 180^\circ$ 国际日界线 (Antimeridian) 环形经度自适应跨界拼接与无缝 KDTree 空间检索。
 
 ### 批量处理与并发安全 (Batch Processing & Concurrency)
