@@ -329,7 +329,7 @@ v1.7 MSL-first workflow 的主要价值是将静态垂直基准转换前置，�
 </ul>
 
 <h3>2. 沿岸 MDT 空间外推与可配置 0–500 km 门禁机制 (Adapted from Seeger & Minderhoud, Nature, 2026)</h3>
-<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合应用范围与工程设计，设定了<b>可配置的 0.0 ~ 500.0 km MDT support-distance cutoff（默认配置值为 100.0 km；注意 Seeger & Minderhoud 2026 使用约 500 km 基于海岸线的应用范围 coastline-based application extent，这与 CoastTideX 到最近有效 MDT support 的球面空间距离截断是两个完全不同的距离定义）</b>：</p>
+<p>由于卫星测高 MDT 产品仅在大洋和深水区有效，在浅海、河口、潮滩及陆面存在数据缺失。CoastTideX 借鉴 Seeger & Minderhoud (Nature, 2026) 提出的反距离加权 (IDW) 空间外推思路，结合应用范围与工程设计，设定了<b>可配置的 0.0 ~ 500.0 km MDT support-distance cutoff（默认配置值为 500.0 km；注意 Seeger & Minderhoud 2026 使用约 500 km 基于海岸线的应用范围 coastline-based application extent，这与 CoastTideX 到最近有效 MDT support 的球面空间距离截断是两个完全不同的距离定义）</b>：</p>
 <div class="callout-info">
 <b>科学实现方法定位说明：</b> 本系统采用球面三维空间直角坐标 k-NN 反距离加权外推算法（Adapted from Seeger & Minderhoud, Nature, 2026），并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异。
 </div>

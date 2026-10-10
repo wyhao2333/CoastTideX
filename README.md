@@ -23,7 +23,7 @@
 
 系统以法国 CNES/AVISO 的 **FES2022b 全球流体潮汐动力学模型（包含全部 34 个分潮的 LGP2 二阶非结构有限元网格，默认科学配置）** 为核心动力学引擎，CoastTideX 直接驱动 FES2022b native unstructured mesh，避免在系统内部再次把 native mesh 规则化为经纬度栅格后再进行一轮空间重采样。同时，系统无缝集成 **CNES-CLS22 全球平均动态地形 (MDT)** 与 **NGA EGM2008 2.5分高阶大地水准面**，构建了连接局部平均海平面参考 (MSL)、大地水准面高程与 WGS84 三维几何椭球高的四大多元基准级联转换链条。
 
-在 **CoastTideX v1.7 / v1.7.1** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架进行改编实现，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**：通过前置 DEM 垂直基准转换 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$) 与近岸可配置 0–500 km（默认 100 km）球面 IDW 外推门禁，在 MSL-first Stage 1 路径中无需逐控制节点重复执行 MDT/ΔN 基准转换；在相同静态偏移与空间支撑条件下，DEM→MSL 判定与旧版判定代数等价，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。v1.7.1 进一步新增**大规模海量潮滩 DEM 瓦片批量流式转换引擎 (`convert-dem-batch`)**，支持断点续传、失败瓦片物理隔离与双格式 Manifest 自动化跟踪。
+在 **CoastTideX v1.7 / v1.7.1** 中，系统依据 **Seeger & Minderhoud (Nature, 2026)** 提出的近岸基准统一框架进行改编实现，正式确立 **MSL 统一参考系工作流 (MSL Reference Workflow)**：通过前置 DEM 垂直基准转换 ($Z_{\mathrm{MSL}} = Z_{\mathrm{EGM2008}} - \mathrm{MDT} - \Delta N$) 与近岸可配置 0–500 km（默认 500 km）球面 IDW 外推门禁，在 MSL-first Stage 1 路径中无需逐控制节点重复执行 MDT/ΔN 基准转换；在相同静态偏移与空间支撑条件下，DEM→MSL 判定与旧版判定代数等价，并全面集成 FES 模型作用域复用优化 (ParentBBox Reuse)。v1.7.1 进一步新增**大规模海量潮滩 DEM 瓦片批量流式转换引擎 (`convert-dem-batch`)**，支持断点续传、失败瓦片物理隔离与双格式 Manifest 自动化跟踪。
 
 > [!NOTE]
 > 当前版本为 **CoastTideX v1.7.1**。系统具备严密分层防御架构与自动化单元及集成测试套件，已在崇明大型 DEM、synthetic antimeridian cases、batch worker regression 与自动化单元测试中完成相应工程与数值验证（注：这些测试不构成对所有全球海岸环境的统一物理精度保证）。
@@ -136,7 +136,7 @@ Z_{\mathrm{EGM2008}}
 
 #### 关键技术特性与适用边界：
 1. **开阔大洋与近岸外推两阶段 MDT 重构**：开阔大洋海域采用 CNES-CLS22 原生网格双线性插值（标记 `QC=0: native_mdt`，表示原生大洋插值路径，不作为绝对精度保证）；近岸与陆地缺失区采用球面三维空间直角坐标反距离加权（IDW，标记 `QC=1: idw_extrapolated`）；
-2. **可配置 0–500 km 物理距离门禁阻断 (默认 100 km)**：支持 0.0 ~ 500.0 km 范围配置（默认配置值为 100.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现；需明确区分：Seeger & Minderhoud (2026) 研究使用的是距海岸线约 500 km 的全球陆地应用范围，而 CoastTideX 的外推门禁定义为到最近有效 MDT 空间支撑点的球面空间物理距离，可配置 0–500 km，默认配置值为 100 km*）；
+2. **可配置 0–500 km 物理距离门禁阻断 (默认 500 km)**：支持 0.0 ~ 500.0 km 范围配置（默认配置值为 500.0 km；0 km 为纯原生大洋 MDT 模式）。超出设定距离的深陆区确定性输出 NoData 并标记 `QC=2: nodata`，杜绝深陆无限外推。（*特别说明：Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推，并非 ArcGIS Smooth Neighborhood IDW 工具的像素级逐像元复现；需明确区分：Seeger & Minderhoud (2026) 研究使用的是距海岸线约 500 km 的全球陆地应用范围，而 CoastTideX 的外推门禁定义为到最近有效 MDT 空间支撑点的球面空间物理距离，可配置 0–500 km，默认配置值为 500 km*）；
 3. **Stage 1 控制节点零 MDT 查询 (Zero-MDT-Lookup)**：在自适应控制网格求解淹没频率与露出时长时，节点直接解算纯天文潮序列，无需在控制节点尺度重复查询 MDT 模型；
 4. **决策等价性严密闭环**：基于崇明岛 1.5 亿像元高分辨率真实地形进行 10,000 点抽样（240,000 次判定测试），验证在相同静态偏移与空间支撑条件下，代数变换前后淹没判定一致率达到 **100.0000%**（残差仅为单精度浮点极限 $\sim 10^{-7}\text{ m}$）；
 5. **平滑向后兼容**：保留 `dem_datum="egm2008"` 作为向后兼容选项（触发 `DeprecationWarning`），系统默认推荐使用 `dem_datum="msl"`。
@@ -370,7 +370,7 @@ CoastTideX 提供完整无头运行能力的命令行工具 `cli.py`：
 python cli.py convert-dem \
     --input path/to/coastal_dem_egm2008.tif \
     --output path/to/coastal_dem_msl.tif \
-    --max-dist-km 100.0 \
+    --max-dist-km 500.0 \
     --block-size 1024 \
     --write-qc
 ```
@@ -381,7 +381,7 @@ python cli.py convert-dem \
 python cli.py convert-dem-batch \
     --input-dir path/to/egm2008_dems/ \
     --output-dir path/to/msl_dems/ \
-    --max-dist-km 100.0 \
+    --max-dist-km 500.0 \
     --workers 2 \
     --resume
 ```

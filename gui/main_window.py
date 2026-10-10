@@ -38,7 +38,7 @@ from core.datum_engine import DatumTransformer
 from core.raster_engine import RasterTideEngine, RasterInfo, RasterResultSummary, RasterCalculationCancelled
 from core.dem_datum_converter import (
     DEMDatumConverter, convert_dem_to_msl, DEMConversionSummary,
-    MAX_MDT_EXTRAPOLATION_DISTANCE_KM
+    MAX_MDT_EXTRAPOLATION_DISTANCE_KM, DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM
 )
 from core.batch_datum_converter import (
     BatchDEMDatumConverter, scan_dem_directory, BatchConversionSummary
@@ -456,7 +456,7 @@ class DEMDatumConversionWorker(QThread):
                 input_dem_path=self.params['input_path'],
                 output_msl_path=self.params.get('output_path'),
                 output_qc_path=self.params.get('qc_output_path'),
-                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                max_extrapolation_distance_km=self.params.get('max_dist_km', DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM),
                 block_size=self.params.get('block_size', 512),
                 allow_overwrite=self.params.get('allow_overwrite', True),
                 write_qc=save_qc,
@@ -501,14 +501,14 @@ class BatchDEMDatumConversionWorker(QThread):
                     self.progress.emit(idx, total, cur_file, msg, stats)
 
             converter = BatchDEMDatumConverter(
-                max_extrapolation_distance_km=self.params.get('max_dist_km', 100.0),
+                max_extrapolation_distance_km=self.params.get('max_dist_km', DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM),
                 block_size=self.params.get('block_size', 512)
             )
 
             summary = converter.run_batch(
                 input_dir=self.params['input_dir'],
                 output_dir=self.params['output_dir'],
-                max_dist_km=self.params.get('max_dist_km', 100.0),
+                max_dist_km=self.params.get('max_dist_km', DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM),
                 resume=self.params.get('resume', True),
                 overwrite=self.params.get('overwrite', False),
                 workers=self.params.get('workers', 1),
@@ -1058,7 +1058,7 @@ class MainWindow(QMainWindow):
         layout_params.addWidget(QLabel("MDT 模型与方法:"), 1, 0)
         combo_mdt_source = QComboBox()
         combo_mdt_source.addItem("CNES-CLS22 / CMEMS2020 混合大洋 MDT", "cnes_cls22")
-        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认配置 100 km, 可配置 0–500 km)")
+        combo_mdt_source.setToolTip("原生大洋双线性插值 + 沿岸 3D-IDW 外推 (默认配置 500 km, 可配置 0–500 km)")
         self._make_combo_responsive(combo_mdt_source)
         combo_mdt_source.setEnabled(False)
         layout_params.addWidget(combo_mdt_source, 1, 1, 1, 3)
@@ -1066,11 +1066,11 @@ class MainWindow(QMainWindow):
         layout_params.addWidget(QLabel("沿岸外推距离上限:"), 2, 0)
         self.spin_dem_max_dist = QDoubleSpinBox()
         self.spin_dem_max_dist.setRange(0.0, 500.0)
-        self.spin_dem_max_dist.setValue(100.0)
+        self.spin_dem_max_dist.setValue(DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM)
         self.spin_dem_max_dist.setSingleStep(10.0)
         self.spin_dem_max_dist.setSuffix(" km")
         self.spin_dem_max_dist.setToolTip(
-            "MDT support-distance cutoff (默认配置 100.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
+            "MDT support-distance cutoff (默认配置 500.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
             "该距离表示目标位置到最近有效 MDT support 点在球面 XYZ 空间中的三维欧氏距离门限。\n"
             "0 km 表示禁用 IDW 外推，仅保留原生 MDT 插值。\n"
             "注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。"
@@ -1295,11 +1295,11 @@ class MainWindow(QMainWindow):
         layout_batch_params.addWidget(QLabel("沿岸外推距离上限:"), 1, 0)
         self.spin_batch_dem_max_dist = QDoubleSpinBox()
         self.spin_batch_dem_max_dist.setRange(0.0, 500.0)
-        self.spin_batch_dem_max_dist.setValue(100.0)
+        self.spin_batch_dem_max_dist.setValue(DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM)
         self.spin_batch_dem_max_dist.setSingleStep(10.0)
         self.spin_batch_dem_max_dist.setSuffix(" km")
         self.spin_batch_dem_max_dist.setToolTip(
-            "MDT support-distance cutoff (默认配置 100.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
+            "MDT support-distance cutoff (默认配置 500.0 km; 允许范围 0.0 ~ 500.0 km)。\n"
             "该距离表示目标位置到最近有效 MDT support 点在球面 XYZ 空间中的三维欧氏距离门限。\n"
             "0 km 表示禁用 IDW 外推，仅保留原生 MDT 插值。\n"
             "注意：Seeger & Minderhoud (2026) 的约 500 km 为基于海岸线的应用范围，与本参数不是同一距离定义。"
@@ -3106,7 +3106,7 @@ class MainWindow(QMainWindow):
             "<li><b>v1.7 MSL 统一基准架构</b>: "
             "<ul>"
             "<li>前置陆地 DEM 垂直基准转换 (EGM2008 &rarr; MSL)，公式: <code>Z_MSL = Z_EGM2008 - MDT - ΔN</code>；</li>"
-            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 方法框架，大洋区双线性插值，沿岸采用 spherical 3D k-NN IDW 空间外推（默认配置 100 km，可配置 0–500 km）；</li>"
+            "<li>借鉴 Seeger & Minderhoud (Nature, 2026) 方法框架，大洋区双线性插值，沿岸采用 spherical 3D k-NN IDW 空间外推（默认配置 500 km，可配置 0–500 km）；</li>"
             "<li>FES MSL 潮位与 DEM_MSL 在统一垂直参考系中直接比较，并避免默认 MSL-first Stage 1 在控制节点尺度重复执行 MDT / DeltaN 基准转换；</li>"
             "<li>FES ParentBBox 模型空间复用优化，显著降低大范围分块加载延迟。</li>"
             "</ul></li>"

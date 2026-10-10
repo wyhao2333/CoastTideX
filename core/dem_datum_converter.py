@@ -14,7 +14,7 @@ CoastTideX DEM 垂直基准转换模块 (DEM Datum Converter v1.7.1)
     2. 工程实现改编说明 (Adapted Engineering Implementation):
        - Seeger & Minderhoud (2026) 在 ArcGIS 中采用 Smooth Neighborhood IDW (平滑因子 0.5)，并使用约 500 km 基于海岸线的应用范围 (coastline-based application extent)；
        - CoastTideX 采用高性能 Python / SciPy 球面三维笛卡尔直角坐标 k-最近邻反距离加权 (Spherical 3D k-NN IDW, k=8, p=2)；
-       - CoastTideX 默认配置外推门禁为 100.0 km，同时允许用户配置 0.0 ~ 500.0 km（注意：Seeger & Minderhoud 2026 的约 500 km 为基于海岸线的应用范围，与 CoastTideX 到最近有效 MDT support 点的 support-distance cutoff 是不同定义）。
+       - CoastTideX 默认配置外推门禁为 500.0 km，同时允许用户配置 0.0 ~ 500.0 km（注意：Seeger & Minderhoud 2026 的约 500 km 为基于海岸线的应用范围，与 CoastTideX 到最近有效 MDT support 点的 support-distance cutoff 是不同定义）。
        - 本模块并非 ArcGIS 原生工作流的无差别复现 (not an exact reproduction)，而是面向全球自动化流式生产的改编工程实现。
 
 【核心特性】:
@@ -59,7 +59,7 @@ from .datum_engine import DatumTransformer, DatumDataError
 # ==============================================================================
 # 外推距离门禁常量定义 (Extrapolation Distance Constants)
 # ==============================================================================
-DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0
+DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 500.0
 MIN_MDT_EXTRAPOLATION_DISTANCE_KM = 0.0
 MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM = 500.0
 
@@ -80,7 +80,7 @@ def validate_mdt_extrapolation_distance(dist_km: Optional[Union[float, int]]) ->
     """
     验证近岸 MDT 外推距离门禁 (0.0 - 500.0 km)。
 
-    :param dist_km: 待验证的外推距离 (km)。若为 None 则返回默认配置值 100.0 km。
+    :param dist_km: 待验证的外推距离 (km)。若为 None 则返回默认配置值 500.0 km。
     :return: 验证后的浮点数距离 (km)。
     :raises ValueError: 当输入非有限数值、小于 0.0 或大于 500.0 km 时抛出，严禁静默截断 (Silent Clamping)。
     """
@@ -97,7 +97,7 @@ def validate_mdt_extrapolation_distance(dist_km: Optional[Union[float, int]]) ->
     if val < MIN_MDT_EXTRAPOLATION_DISTANCE_KM or val > MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM:
         raise ValueError(
             f"MDT 外推距离超出允许范围 [{MIN_MDT_EXTRAPOLATION_DISTANCE_KM:.1f}, {MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM:.1f}] km，"
-            f"收到: {val:.2f} km。(CoastTideX 默认配置值为 100.0 km; 最大允许配置 500.0 km)"
+            f"收到: {val:.2f} km。(CoastTideX 默认配置值为 {DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM:.1f} km; 最大允许配置 500.0 km)"
         )
     return val
 
@@ -170,7 +170,7 @@ class DEMDatumConverter:
     """
     DEM 垂直基准转换器 (DEM Vertical Datum Converter)
     实现 DEM_EGM2008 到 DEM_MSL 的流式空间转换。
-    支持大洋区双线性插值与沿岸球面 3D-IDW 外推 (默认 100 km，允许配置 0~500 km)。
+    支持大洋区双线性插值与沿岸球面 3D-IDW 外推 (默认 500 km，允许配置 0~500 km)。
     """
 
     def __init__(
@@ -556,7 +556,7 @@ class DEMDatumConverter:
         :param input_dem_path: 输入 DEM 文件路径 (EGM2008 基准)
         :param output_msl_path: 输出 DEM_MSL 路径 (默认: <input>_MSL.tif)
         :param output_qc_path: 输出 QC 路径 (若提供路径或 write_qc=True 时生效)
-        :param max_extrapolation_distance_km: MDT 外推距离门禁 (0 - 500 km, 默认: 100 km)
+        :param max_extrapolation_distance_km: MDT 外推距离门禁 (0 - 500 km, 默认: 500 km)
         :param block_size: 2D 空间流式分块大小 (默认 1024)
         :param allow_overwrite: 是否允许覆盖既有输出
         :param write_qc: 是否落盘保存质量控制掩膜 GeoTIFF (默认: False，若显式提供 output_qc_path 则默认开启)
@@ -842,7 +842,7 @@ def convert_dem_to_msl(
     :param input_dem_path: 输入 DEM 文件路径 (EGM2008)
     :param output_msl_path: 输出 DEM_MSL 路径
     :param output_qc_path: 输出 QC 掩膜路径 (若提供路径或 write_qc=True 生效)
-    :param max_extrapolation_distance_km: MDT 外推距离门禁 (0.0 - 500.0 km, 默认: 100.0 km)
+    :param max_extrapolation_distance_km: MDT 外推距离门禁 (0.0 - 500.0 km, 默认: 500.0 km)
     :param block_size: 空间分块流式大小
     :param allow_overwrite: 允许覆盖
     :param write_qc: 是否输出质量控制掩膜 GeoTIFF (默认: False，若显式提供 output_qc_path 则默认开启)

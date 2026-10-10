@@ -14,7 +14,9 @@ from scipy.ndimage import map_coordinates
 from core.datum_engine import (
     DatumTransformer, _longitude_seam_geometry, _sample_geoid_grid,
 )
-from core.batch_datum_converter import compute_conversion_signature
+from core.batch_datum_converter import BatchDEMDatumConverter, compute_conversion_signature
+from core.dem_datum_converter import DEMDatumConverter, QC_MDT_EXTRAPOLATED, QC_MDT_NODATA
+from cli import build_parser
 
 
 class TestGeoidLongitudeSeam(unittest.TestCase):
@@ -172,6 +174,57 @@ class TestGeoidLongitudeSeam(unittest.TestCase):
                            coords={'time': [0], 'latitude': lats, 'longitude': lons}).to_netcdf(path)
                 actual = DatumTransformer(mdt_path=str(path)).get_mdt(-45, 0)
                 np.testing.assert_array_equal([actual], [expected])
+
+
+class TestDefaultMDT500(unittest.TestCase):
+    def test_default_transport_and_explicit_override(self):
+        parser = build_parser()
+        single = parser.parse_args(['convert-dem', '--input', 'dem.tif'])
+        batch = parser.parse_args(['convert-dem-batch', '--input-dir', 'in', '--output-dir', 'out'])
+        self.assertEqual(single.max_dist_km, 500.0)
+        self.assertEqual(batch.max_dist_km, 500.0)
+        explicit = parser.parse_args(['convert-dem', '--input', 'dem.tif', '--max-dist-km', '100'])
+        self.assertEqual(explicit.max_dist_km, 100.0)
+        self.assertEqual(BatchDEMDatumConverter().max_extrapolation_distance_km, 500.0)
+        self.assertNotEqual(compute_conversion_signature(),
+                            compute_conversion_signature(max_extrapolation_distance_km=100.0))
+
+    def test_default_accepts_300km_support_but_rejects_over_500km(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lons = np.arange(-8., 8.01, .25)
+            lats = np.arange(-2., 2.01, .25)
+            data = np.full((1, len(lats), len(lons)), np.nan)
+            data[:, :, np.abs(lons) <= .25] = 1.2
+            nc = root / 'mdt.nc'
+            xr.Dataset({'mdt': (('time', 'latitude', 'longitude'), data)},
+                       coords={'time': [0], 'latitude': lats, 'longitude': lons}).to_netcdf(nc)
+            trans = DatumTransformer(source_mask_path='missing_mask.tif')
+            trans.set_synthetic_fixture(delta_goco=0., delta_eigen=0.)
+            default = DEMDatumConverter(mdt_path=str(nc), transformer=trans)
+            limited = DEMDatumConverter(mdt_path=str(nc), transformer=trans,
+                                        max_extrapolation_distance_km=100.)
+            _, mdt, _, qc = default.convert_points([3., 5.], [0., 0.], [5., 5.])
+            self.assertEqual(qc[0], QC_MDT_EXTRAPOLATED)
+            self.assertAlmostEqual(mdt[0], 1.2, places=6)
+            self.assertEqual(qc[1], QC_MDT_NODATA)
+            self.assertTrue(np.isnan(mdt[1]))
+            _, mdt_old, _, qc_old = limited.convert_points([3.], [0.], [5.])
+            self.assertEqual(qc_old[0], QC_MDT_NODATA)
+            self.assertTrue(np.isnan(mdt_old[0]))
+
+            source, output = root / 'source.tif', root / 'output.tif'
+            with rasterio.open(source, 'w', driver='GTiff', height=1, width=2,
+                               count=1, dtype='float32', crs='EPSG:4326',
+                               transform=from_origin(2, .5, 2, 1), nodata=-9999) as ds:
+                ds.write(np.full((1, 2), 5, dtype=np.float32), 1)
+            summary = default.convert_raster(str(source), str(output))
+            self.assertEqual(summary.max_extrapolation_distance_km, 500.)
+            with rasterio.open(output) as ds:
+                self.assertEqual(float(ds.tags()['MAX_EXTRAPOLATION_DISTANCE_KM']), 500.)
+                values = ds.read(1)
+                self.assertAlmostEqual(float(values[0, 0]), 3.8, places=5)
+                self.assertEqual(values[0, 1], ds.nodata)
 
 
 if __name__ == '__main__':

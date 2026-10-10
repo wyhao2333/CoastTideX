@@ -13,7 +13,7 @@ CoastTideX 命令行工具 (CoastTideX Command-Line Interface v1.7.1)
     python cli.py batch --input input_points.csv --lon-col lon --lat-col lat --time-col time --output batch_out.csv
 
     # DEM 垂直基准前置转换 (EGM2008 -> MSL, v1.7 推荐首选步骤)
-    python cli.py convert-dem --input coastal_dem.tif --output coastal_dem_msl.tif --max-dist-km 100.0
+    python cli.py convert-dem --input coastal_dem.tif --output coastal_dem_msl.tif --max-dist-km 500.0
 
     # 批量 DEM 垂直基准转换 (多线程 Workers)
     python cli.py convert-dem-batch --input-dir ./egm_dems/ --output-dir ./msl_dems/ --workers 2 --resume
@@ -58,6 +58,7 @@ from core.tide_engine import FESTidePredictor
 from core.datum_engine import DatumTransformer
 from core.raster_engine import RasterTideEngine
 from core.utils import export_dataframe
+from core.dem_datum_converter import DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -176,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_convert.add_argument("--input", "-i", type=str, required=True, help="输入 DEM GeoTIFF 路径 (EGM2008 基准)")
     p_convert.add_argument("--output", "-o", type=str, default=None, help="输出 DEM_MSL GeoTIFF 路径 (默认: <input>_msl.tif)")
     p_convert.add_argument("--qc-output", type=str, default=None, help="输出转换质量控制掩膜 GeoTIFF 路径 (仅在 --write-qc 时生效)")
-    p_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 100.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
+    p_convert.add_argument("--max-dist-km", type=float, default=DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 500.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
     p_convert.add_argument("--block-size", type=int, default=1024, help="2D 空间流式分块大小 (默认: 1024)")
     p_convert.add_argument("--overwrite", action="store_true", help="允许覆盖已存在的输出文件")
     p_convert.add_argument("--write-qc", action="store_true", default=False, help="保存转换质量控制掩膜 GeoTIFF (Conversion QC Mask, 默认: 否)")
@@ -185,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch_convert = subparsers.add_parser("convert-dem-batch", help="批量将 DEM 文件夹从 EGM2008 基准转换为局域 MSL 基准 (v1.7.1)")
     p_batch_convert.add_argument("--input-dir", "-i", type=str, required=True, help="输入包含待转换 DEM (*.tif) 的文件夹路径")
     p_batch_convert.add_argument("--output-dir", "-o", type=str, required=True, help="转换后 MSL DEM 输出目录")
-    p_batch_convert.add_argument("--max-dist-km", type=float, default=100.0, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 100.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
+    p_batch_convert.add_argument("--max-dist-km", type=float, default=DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM, help="近岸陆面 MDT support-distance cutoff (km) [默认配置: 500.0; 允许范围: 0.0 - 500.0; 注意与 Seeger & Minderhoud 2026 约 500 km 基于海岸线的应用范围是不同定义]")
     p_batch_convert.add_argument("--workers", type=int, default=1, help="并发工作线程/任务数 (默认: 1, 逐瓦片顺序执行)")
     p_batch_convert.add_argument("--resume", action="store_true", help="开启断点恢复模式 (跳过清单中已成功的瓦片)")
     p_batch_convert.add_argument("--overwrite", action="store_true", help="允许覆盖既有输出文件")

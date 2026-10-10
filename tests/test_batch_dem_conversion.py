@@ -242,9 +242,11 @@ class TestBatchDEMConversion(unittest.TestCase):
                     DATUM="MSL",
                     TARGET_VERTICAL_DATUM="MSL",
                     SOURCE_VERTICAL_DATUM="EGM2008",
-                    MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                    MAX_EXTRAPOLATION_DISTANCE_KM=str(kwargs["max_extrapolation_distance_km"])
                 )
-            return self._mock_dem_summary(kwargs["input_dem_path"], str(out_p))
+            summary = self._mock_dem_summary(kwargs["input_dem_path"], str(out_p))
+            summary.max_extrapolation_distance_km = kwargs["max_extrapolation_distance_km"]
+            return summary
 
         with patch.object(converter.converter, "convert_raster", side_effect=fake_convert):
             # 第一轮：完全处理 2 个文件

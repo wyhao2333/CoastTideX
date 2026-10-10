@@ -1,5 +1,7 @@
 # CoastTideX v1.7.1 — MSL Reference Workflow 架构设计与用户指南
 
+> v1.7.2 更新：单幅与批量 DEM 转换默认 MDT 支撑距离现为 500 km，仍可显式选择 0–500 km。此参数是到最近有效 MDT 支撑点的距离，与论文的海岸线距离定义不同。
+
 ---
 
 ## 1. 科学背景与理论依据 (Scientific Foundations)
@@ -46,7 +48,7 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
    - 基于 `scipy.spatial.cKDTree` 构建大洋有效边界点的高维空间索引，进行反距离加权（IDW，幂次 $p=2.0$，近邻点数 $k=8$）空间外推；
    - 质量控制编码标记为：`QC = 1 (idw_extrapolated)`。
 3. **可配置 0–500 km 物理距离门禁阻断 (Configurable Extrapolation Guard)**：
-   - 默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 100.0 km`；
+   - 默认配置：`DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM = 500.0 km`；
    - 允许配置范围：`0.0 ~ 500.0 km`（非数值或超出范围抛出 `ValueError`，杜绝静默截断）；
    - **0 km 模式**：若配置距离为 0.0 km，则完全禁用 IDW 空间外推，纯使用大洋原生插值，原生 MDT 缺失目标位置直接标记 NoData (`QC = 2`)；
    - **特别说明**：*Adapted from Seeger & Minderhoud, Nature, 2026; 本系统采用球面 3D k-NN IDW 空间外推算法，并非 ArcGIS 商业闭源工具 Smooth Neighborhood IDW 的精确像素级逐像元复现，二者在底层插值网格与空间邻域实现上具有方法演进和适用性差异*；
@@ -65,7 +67,7 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
 | :--- | :--- | :--- | :--- |
 | **比较物理基准** | EGM2008 大地水准面 | 局部平均海平面 (MSL) | 基准转换前置，DEM_MSL 可复用且代数等价 |
 | **Stage 1 控制节点 MDT 查询** | 逐节点频繁查询 (78+ 次) | **零查询 (0 次)** | Stage 1 纯潮位解算零额外依赖 |
-| **MDT 沿岸外推边界** | 无明确物理距离截断 | **可配置 0–500 km (默认 100 km)** | 消除超出有效支撑距离过度外推失真风险 |
+| **MDT 沿岸外推边界** | 无明确物理距离截断 | **可配置 0–500 km (默认 500 km)** | 消除超出有效支撑距离过度外推失真风险 |
 | **决策边界一致性** | 基准一致 | **100.0000% 严密等价** | 240,000 次判定残差 $< 10^{-7}\text{ m}$ |
 | **批处理流式吞吐** | 重复解算基准偏移量 | 一次转换 DEM，后续零开销复用 | 显著提升多方案/多时段分析效率 |
 | **多线程并发安全性** | 单线程 | **Thread-Local 实例隔离** | 消除 Workers 并发全局缓存竞态污染 |
@@ -80,7 +82,7 @@ $$(\text{Tide}_{\text{MSL}}(t) + \text{MDT} + \Delta N > Z_{\text{EGM2008}}) \if
 python cli.py convert-dem \
     --input F:/data/coastal_dem_egm2008.tif \
     --output F:/data/coastal_dem_msl.tif \
-    --max-dist-km 100.0 \
+    --max-dist-km 500.0 \
     --block-size 1024 \
     --write-qc \
     --overwrite
@@ -91,7 +93,7 @@ python cli.py convert-dem \
 - `--output`, `-o`: 输出 DEM_MSL GeoTIFF 路径（默认附加 `_MSL.tif`）；
 - `--qc-output`: 输出转换质量控制掩膜 GeoTIFF 路径（仅在需要自定义路径时指定）；
 - `--write-qc`: 是否输出质量控制掩膜 GeoTIFF（默认 False，关闭时避免额外生成 QC 栅格以节约存储与写入开销）；
-- `--max-dist-km`: MDT 空间外推允许的最大物理距离（0.0 - 500.0 km，默认 100.0）；
+- `--max-dist-km`: MDT 空间外推允许的最大物理距离（0.0 - 500.0 km，默认 500.0）；
 - `--block-size`: 2D 空间流式分块边长（默认 1024 像元，内存占用平稳）；
 - `--overwrite`: 覆盖已存在同名输出。
 
@@ -100,7 +102,7 @@ python cli.py convert-dem \
 python cli.py convert-dem-batch \
     --input-dir F:/data/egm2008_dems/ \
     --output-dir F:/data/msl_dems/ \
-    --max-dist-km 100.0 \
+    --max-dist-km 500.0 \
     --workers 2 \
     --resume
 ```
@@ -108,7 +110,7 @@ python cli.py convert-dem-batch \
 **参数说明**：
 - `--input-dir`: 待转换的 DEM 文件夹；
 - `--output-dir`: 输出 DEM_MSL 文件夹；
-- `--max-dist-km`: 最大外推距离门禁（0.0 - 500.0 km，默认 100.0 km）；
+- `--max-dist-km`: 最大外推距离门禁（0.0 - 500.0 km，默认 500.0 km）；
 - `--workers`: 并发解算线程数（默认 1，多线程下各 Worker 拥有私有独立 Converter）；
 - `--resume`: 严格断点恢复模式（校验 SHA-256 参数签名、文件尺寸、mtime 与 TIFF 完整性）；
 - `--write-qc`: 是否写出质量控制掩膜 GeoTIFF（默认 False）；
@@ -153,7 +155,7 @@ summary = convert_dem_to_msl(
     input_dem_path="path/to/dem_egm2008.tif",
     output_msl_path="path/to/dem_msl.tif",
     output_qc_path="path/to/dem_msl_qc.tif",
-    max_extrapolation_distance_km=100.0,
+    max_extrapolation_distance_km=500.0,
     block_size=1024,
     allow_overwrite=True,
     progress_callback=lambda p, m: print(f"[{p}%] {m}")
@@ -168,7 +170,7 @@ print(f"原生插值像元: {summary.native_mdt_pixels:,}, IDW 外推像元: {su
 import numpy as np
 from core.dem_datum_converter import DEMDatumConverter
 
-converter = DEMDatumConverter(max_extrapolation_distance_km=100.0)
+converter = DEMDatumConverter(max_extrapolation_distance_km=500.0)
 
 lons = np.array([121.5, 122.0, 117.0])
 lats = np.array([31.5, 31.0, 31.0])

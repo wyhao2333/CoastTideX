@@ -1,6 +1,6 @@
 """
 CoastTideX v1.7 - GUI MSL Reference Workflow Unit Tests
-验证 GUI DEM 基准转换选项卡 (EGM2008 -> MSL)、100 km 外推门禁锁定、双重转换防呆拦截与下游直通 handoff。
+验证 GUI DEM 基准转换选项卡 (EGM2008 -> MSL)、默认 500 km 的可配置外推门禁、双重转换防呆拦截与下游直通 handoff。
 """
 
 import os
@@ -103,12 +103,13 @@ class TestV17GUIMSLWorkflow(unittest.TestCase):
         self.assertTrue(hasattr(self.win, "btn_handoff_exp"))
         self.assertTrue(hasattr(self.win, "btn_dem_open_folder"))
 
-    def test_spin_dem_max_dist_capped_at_100(self):
-        """测试沿岸外推距离控件范围为 0.0 ~ 500.0 km，默认 100.0 km (Seeger & Minderhoud 2026 全球 500 km)"""
+    def test_spin_dem_max_dist_defaults_to_500(self):
+        """默认支撑距离为 500 km，仍允许选择 0–500 km。"""
         spin = self.win.spin_dem_max_dist
         self.assertEqual(spin.maximum(), 500.0)
         self.assertEqual(spin.minimum(), 0.0)
-        self.assertEqual(spin.value(), 100.0)
+        self.assertEqual(spin.value(), 500.0)
+        self.assertEqual(self.win.spin_batch_dem_max_dist.value(), 500.0)
 
         # 尝试设置 500 km 合法数值
         spin.setValue(500.0)

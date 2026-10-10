@@ -480,7 +480,7 @@ class BatchDEMDatumConverter:
 
         :param input_dir: 输入 DEM 文件夹
         :param output_dir: 输出 MSL DEM 文件夹
-        :param max_dist_km: 近岸 IDW 最大外推距离门禁 (0.0 - 500.0 km, 默认 100.0 km)
+        :param max_dist_km: 近岸 IDW 最大外推距离门禁 (0.0 - 500.0 km, 默认 500.0 km)
         :param workers: 工作线程数 (默认 1 最稳妥; >1 启用独立私有 Converter 并发计算)
         :param resume: 是否开启严密断点恢复 (参数一致且输出无损时跳过)
         :param overwrite: 是否允许强制覆盖既有产物

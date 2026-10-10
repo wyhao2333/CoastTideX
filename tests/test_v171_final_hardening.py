@@ -3,7 +3,7 @@ CoastTideX v1.7.1 单元测试套件:
 最终科学与生产级加固验证 (Final Scientific & Production Hardening Test Suite)
 
 覆盖内容:
-1. 距离配置与严格校验 (0-500 km, 默认 100 km, 0 km 原生 MDT 模式, 非法值报错)
+1. 距离配置与严格校验 (0-500 km, 默认 500 km, 0 km 原生 MDT 模式, 非法值报错)
 2. 动态 MDT 空间索引外包框与高纬度经度膨胀 (Dynamic support window & high-latitude lon pad)
 3. 跨越 180° 经线 (Antimeridian / International Date Line) 最小区间与空间插值连续性
 4. 多线程并发安全性 (Thread-safety with workers > 1, thread-local converter isolation)
@@ -64,7 +64,7 @@ class TestDistanceValidation(unittest.TestCase):
     """测试 1: 外推距离配置与严格校验逻辑 (0.0 - 500.0 km)"""
 
     def test_default_and_boundaries(self):
-        self.assertEqual(DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM, 100.0)
+        self.assertEqual(DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM, 500.0)
         self.assertEqual(MIN_MDT_EXTRAPOLATION_DISTANCE_KM, 0.0)
         self.assertEqual(MAX_ALLOWED_MDT_EXTRAPOLATION_DISTANCE_KM, 500.0)
 
@@ -76,8 +76,8 @@ class TestDistanceValidation(unittest.TestCase):
         self.assertEqual(validate_mdt_extrapolation_distance(100.0), 100.0)
         self.assertEqual(validate_mdt_extrapolation_distance(250.5), 250.5)
         self.assertEqual(validate_mdt_extrapolation_distance(500.0), 500.0)
-        # None 安全缺省为 100.0 km
-        self.assertEqual(validate_mdt_extrapolation_distance(None), 100.0)
+        # v1.7.2: None 安全缺省为 500.0 km
+        self.assertEqual(validate_mdt_extrapolation_distance(None), 500.0)
 
     def test_out_of_range_raises_value_error(self):
         # 负数必须严格报错，严禁默默截断
@@ -698,7 +698,7 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
                 dst.write(data)
                 dst.update_tags(
                     DATUM="MSL", TARGET_VERTICAL_DATUM="MSL",
-                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM="100.0"
+                    SOURCE_VERTICAL_DATUM="EGM2008", MAX_EXTRAPOLATION_DISTANCE_KM=str(kwargs["max_extrapolation_distance_km"])
                 )
 
             qc_written = ""
@@ -718,7 +718,7 @@ class TestQCOptimizationAndResumeIntegrity(unittest.TestCase):
                 input_path=input_dem_path, output_path=output_msl_path, qc_output_path=qc_written,
                 width=10, height=10, total_pixels=100, valid_dem_pixels=100, native_mdt_pixels=100,
                 extrapolated_mdt_pixels=0, nodata_pixels=0, elapsed_seconds=0.01,
-                max_extrapolation_distance_km=100.0, metadata={}
+                max_extrapolation_distance_km=kwargs["max_extrapolation_distance_km"], metadata={}
             )
 
         with patch.object(DEMDatumConverter, "convert_raster", fake_convert):
