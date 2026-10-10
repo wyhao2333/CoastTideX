@@ -73,7 +73,7 @@ def compute_conversion_signature(
     idw_k: int = 8,
     max_extrapolation_distance_km: float = DEFAULT_MDT_EXTRAPOLATION_DISTANCE_KM,
     deltan_source: str = "GOCO06s/EIGEN-6C4",
-    schema_version: str = "1.7.1"
+    schema_version: str = "1.7.2"
 ) -> str:
     """
     计算确定性 DEM 垂直基准转换参数签名指纹 (Deterministic Conversion Signature)。
@@ -519,7 +519,7 @@ class BatchDEMDatumConverter:
             idw_k=self.idw_k,
             max_extrapolation_distance_km=eff_max_dist,
             deltan_source="GOCO06s/EIGEN-6C4",
-            schema_version="1.7.1"
+            schema_version="1.7.2"
         )
 
         success_count = 0

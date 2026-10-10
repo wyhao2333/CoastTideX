@@ -313,6 +313,63 @@ def _apply_affine_transform(transform, xs, ys):
     return transform.a * xs + transform.b * ys + transform.c, transform.d * xs + transform.e * ys + transform.f
 
 
+def _longitude_seam_geometry(src):
+    """Enable longitude periodicity only for an unrotated, nearly global grid.
+
+    The closing gap is measured in degrees, not assumed to equal one pixel.
+    Latitude remains non-periodic; regional/projected grids keep their bounds.
+    """
+    t = src.transform
+    if (src.crs is None or not src.crs.is_geographic or src.width < 2
+            or t.b != 0 or t.d != 0 or t.a <= 0):
+        return None
+    first = t.c + 0.5 * t.a
+    last = first + (src.width - 1) * t.a
+    gap = first + 360.0 - last
+    tolerance = max(1e-8, t.a * 1e-6)
+    if gap < -tolerance or gap > t.a + tolerance:
+        return None
+    return first, last, t.a, max(0.0, gap)
+
+
+def _sample_geoid_grid(data, inv_transform, lons, lats, longitude_geometry=None):
+    """Preserve interior bilinear samples and join the longitude seam only."""
+    cols, rows = _apply_affine_transform(inv_transform, lons, lats)
+    cols_map, rows_map = cols - 0.5, rows - 0.5
+    vals = map_coordinates(data, [rows_map, cols_map], order=1,
+                           mode='constant', cval=np.nan)
+    if longitude_geometry is None:
+        return vals
+
+    first, last, step, gap = longitude_geometry
+    # Never replace interior NoData or extrapolate past the latitude centers.
+    outside = ((cols_map < 0) | (cols_map > data.shape[1] - 1))
+    eligible = (outside & np.isfinite(lons) & np.isfinite(lats)
+                & (np.abs(lats) <= 90) & (rows_map >= 0)
+                & (rows_map <= data.shape[0] - 1))
+    if not np.any(eligible):
+        return vals
+    query_lons = lons[eligible]
+    query_rows = rows_map[eligible]
+    wrapped = (query_lons - first) % 360.0 + first
+    repaired = np.full(wrapped.shape, np.nan, dtype=vals.dtype)
+    interior = wrapped <= last
+    if np.any(interior):
+        repaired[interior] = map_coordinates(
+            data, [query_rows[interior], (wrapped[interior] - first) / step],
+            order=1, mode='constant', cval=np.nan)
+    seam = ~interior
+    if gap > 0 and np.any(seam):
+        east = map_coordinates(data[:, -1], [query_rows[seam]], order=1,
+                               mode='constant', cval=np.nan)
+        west = map_coordinates(data[:, 0], [query_rows[seam]], order=1,
+                               mode='constant', cval=np.nan)
+        weight = (wrapped[seam] - last) / gap
+        repaired[seam] = (1 - weight) * east + weight * west
+    vals[eligible] = repaired
+    return vals
+
+
 class DatumTransformer:
     """
     严密的海洋与大地测量垂直基准转换器。
@@ -362,12 +419,17 @@ class DatumTransformer:
 
         # 懒加载缓存对象
         self._mdt_interpolator = None
+        self._mdt_seam_interpolator = None
+        self._mdt_longitude_limits = None
         self._egm_data = None
         self._egm_inv_transform = None
+        self._egm_longitude_geometry = None
         self._delta_n_goco_data = None
         self._delta_n_goco_inv_transform = None
+        self._delta_n_goco_longitude_geometry = None
         self._delta_n_eigen_data = None
         self._delta_n_eigen_inv_transform = None
+        self._delta_n_eigen_longitude_geometry = None
         self._source_mask_data = None
         self._source_mask_crs = None
         self._source_mask_transform = None
@@ -492,6 +554,19 @@ class DatumTransformer:
                 self._mdt_interpolator = RegularGridInterpolator(
                     (lats, lons), mdt_grid, bounds_error=False, fill_value=np.nan
                 )
+                # Direct point queries need the same circular longitude topology
+                # as the DEM converter's local MDT window. Keep interior samples.
+                steps = np.diff(lons)
+                if (len(steps) and np.all(steps > 0)
+                        and np.allclose(steps, steps[0], rtol=1e-6, atol=1e-8)):
+                    gap = float(lons[0] + 360.0 - lons[-1])
+                    if -1e-8 <= gap <= float(steps[0]) + 1e-8:
+                        self._mdt_longitude_limits = (float(lons[0]), float(lons[-1]))
+                        if gap > 1e-8:
+                            self._mdt_seam_interpolator = RegularGridInterpolator(
+                                (lats, [lons[-1], lons[0] + 360.0]),
+                                mdt_grid[:, [-1, 0]], bounds_error=False, fill_value=np.nan
+                            )
             except Exception as e:
                 msg = f"打开 MDT NetCDF 失败 ({self.mdt_path}): {e}"
                 if strict:
@@ -511,8 +586,9 @@ class DatumTransformer:
                 return
             try:
                 with rasterio.open(self.egm2008_path) as src:
-                    self._egm_data = src.read(1).astype(np.float32)
+                    self._egm_data = src.read(1, masked=True).astype(np.float32).filled(np.nan)
                     self._egm_inv_transform = ~src.transform
+                    self._egm_longitude_geometry = _longitude_seam_geometry(src)
             except Exception as e:
                 msg = f"打开 EGM2008 GeoTIFF 失败: {e}"
                 if strict:
@@ -532,8 +608,9 @@ class DatumTransformer:
                 return
             try:
                 with rasterio.open(self.delta_n_goco_path) as src:
-                    self._delta_n_goco_data = src.read(1).astype(np.float32)
+                    self._delta_n_goco_data = src.read(1, masked=True).astype(np.float32).filled(np.nan)
                     self._delta_n_goco_inv_transform = ~src.transform
+                    self._delta_n_goco_longitude_geometry = _longitude_seam_geometry(src)
             except Exception as e:
                 msg = f"打开 GOCO06s-EGM2008 GeoTIFF 失败: {e}"
                 if strict:
@@ -557,8 +634,9 @@ class DatumTransformer:
                 return
             try:
                 with rasterio.open(self.delta_n_eigen_path) as src:
-                    self._delta_n_eigen_data = src.read(1).astype(np.float32)
+                    self._delta_n_eigen_data = src.read(1, masked=True).astype(np.float32).filled(np.nan)
                     self._delta_n_eigen_inv_transform = ~src.transform
+                    self._delta_n_eigen_longitude_geometry = _longitude_seam_geometry(src)
             except Exception as e:
                 msg = f"打开 EIGEN6C4-EGM2008 GeoTIFF 失败: {e}"
                 if strict:
@@ -587,6 +665,23 @@ class DatumTransformer:
 
         points = np.column_stack([lats_arr, lons_arr])
         res = self._mdt_interpolator(points)
+        if self._mdt_longitude_limits is not None:
+            first, last = self._mdt_longitude_limits
+            outside = ((lons_arr < first) | (lons_arr > last))
+            valid = (outside & np.isfinite(lons_arr) & np.isfinite(lats_arr)
+                     & (np.abs(lats_arr) <= 90))
+            if np.any(valid):
+                wrapped = (lons_arr[valid] - first) % 360.0 + first
+                query_lats = lats_arr[valid]
+                seam = wrapped > last
+                replacement = np.full(wrapped.shape, np.nan)
+                if np.any(seam) and self._mdt_seam_interpolator is not None:
+                    replacement[seam] = self._mdt_seam_interpolator(
+                        np.column_stack([query_lats[seam], wrapped[seam]]))
+                if np.any(~seam):
+                    replacement[~seam] = self._mdt_interpolator(
+                        np.column_stack([query_lats[~seam], wrapped[~seam]]))
+                res[valid] = replacement
         return float(res[0]) if is_scalar else res
 
     def get_egm2008_undulation(self, lons: float | np.ndarray, lats: float | np.ndarray, strict: bool = False) -> float | np.ndarray:
@@ -609,10 +704,8 @@ class DatumTransformer:
             res = np.full(len(lons_arr), np.nan, dtype=float)
             return float(res[0]) if is_scalar else res
 
-        cols, rows = _apply_affine_transform(self._egm_inv_transform, lons_arr, lats_arr)
-        cols_map = cols - 0.5
-        rows_map = rows - 0.5
-        vals = map_coordinates(self._egm_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
+        vals = _sample_geoid_grid(self._egm_data, self._egm_inv_transform,
+                                 lons_arr, lats_arr, self._egm_longitude_geometry)
         return float(vals[0]) if is_scalar else vals
 
     def get_delta_n(self, lons: float | np.ndarray, lats: float | np.ndarray, strict: bool = False) -> float | np.ndarray:
@@ -659,10 +752,9 @@ class DatumTransformer:
             if self._delta_n_goco_data is not None:
                 sub_lons = lons_arr[mask_goco]
                 sub_lats = lats_arr[mask_goco]
-                cols, rows = _apply_affine_transform(self._delta_n_goco_inv_transform, sub_lons, sub_lats)
-                cols_map = cols - 0.5
-                rows_map = rows - 0.5
-                vals = map_coordinates(self._delta_n_goco_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
+                vals = _sample_geoid_grid(
+                    self._delta_n_goco_data, self._delta_n_goco_inv_transform,
+                    sub_lons, sub_lats, self._delta_n_goco_longitude_geometry)
                 res[mask_goco] = vals
 
         if np.any(mask_eigen):
@@ -670,10 +762,9 @@ class DatumTransformer:
             if self._delta_n_eigen_data is not None:
                 sub_lons = lons_arr[mask_eigen]
                 sub_lats = lats_arr[mask_eigen]
-                cols, rows = _apply_affine_transform(self._delta_n_eigen_inv_transform, sub_lons, sub_lats)
-                cols_map = cols - 0.5
-                rows_map = rows - 0.5
-                vals = map_coordinates(self._delta_n_eigen_data, [rows_map, cols_map], order=1, mode='constant', cval=np.nan)
+                vals = _sample_geoid_grid(
+                    self._delta_n_eigen_data, self._delta_n_eigen_inv_transform,
+                    sub_lons, sub_lats, self._delta_n_eigen_longitude_geometry)
                 res[mask_eigen] = vals
 
         return float(res[0]) if is_scalar else res
